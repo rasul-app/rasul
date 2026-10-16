@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="rasul_signal_primary">#AA91FF</color>
+    <color name="rasul_signal_secondary">#C3EDCF</color>
+    <color name="rasul_signal_on_dark">#F4F1EA</color>
+    <color name="rasul_signal_background">#111113</color>
+    <color name="rasul_signal_surface">#202024</color>
+    <color name="rasul_signal_outline">#323238</color>
+    <color name="rasul_signal_white">#FFFFFF</color>
+    <color name="rasul_signal_icon_background">#111113</color>
+</resources>

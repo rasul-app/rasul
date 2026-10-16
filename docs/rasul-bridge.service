@@ -1,0 +1,13 @@
+[Unit]
+Description=Companion bridge
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/rasul-bridge serve
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

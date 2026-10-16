@@ -1,0 +1,4 @@
+-keepclassmembers class app.rasul.** { *; }
+-keep,includedescriptorclasses class app.rasul.**$$serializer { *; }
+-keepclassmembers class app.rasul.** { *** Companion; }
+-keepclasseswithmembers class app.rasul.** { kotlinx.serialization.KSerializer serializer(...); }

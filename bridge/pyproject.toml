@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rasul-bridge"
+version = "0.1.0"
+description = "A pinned TLS companion bridge"
+requires-python = ">=3.11"
+dependencies = ["websockets==17.2", "cryptography==50.0.2", "qrcode==8.2"]
+
+[project.scripts]
+rasul-bridge = "rasul_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rasul_bridge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

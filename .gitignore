@@ -1,0 +1,22 @@
+local.properties
+build/
+**/build/
+.gradle/
+.idea/
+*.iml
+*.jks
+*.keystore
+.env
+.env.*
+!*.example
+.kotlin/
+
+# Internal working notes are kept outside this repository
+docs/briefs/
+docs/reports/
+
+# Python companion build and test artifacts
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/

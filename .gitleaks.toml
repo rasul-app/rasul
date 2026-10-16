@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated virtual environment dependencies"
+paths = ['''(^|/)\.venv/''']
