@@ -406,7 +406,7 @@ private fun SettingsEn() = RasulTheme(false) {
     MoreContent(
         samplePcs, "a", LanguageOption.System, {}, {}, {},
         showAppLockSetting = true, appearance = AppearanceOption.System,
-        hapticsEnabled = true, versionName = app.rasul.BuildConfig.VERSION_NAME,
+        hapticsEnabled = true, versionName = PREVIEW_VERSION,
     )
 }
 
@@ -416,7 +416,7 @@ private fun SettingsAr() = RasulTheme(false) {
     MoreContent(
         samplePcs, "a", LanguageOption.System, {}, {}, {},
         showAppLockSetting = true, appearance = AppearanceOption.System,
-        hapticsEnabled = true, versionName = app.rasul.BuildConfig.VERSION_NAME,
+        hapticsEnabled = true, versionName = PREVIEW_VERSION,
     )
 }
 
@@ -451,3 +451,6 @@ private fun AppearanceSheetEn() = RasulTheme(false) { AppearanceSheet(Appearance
 @Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
 @Composable
 private fun AppearanceSheetAr() = RasulTheme(false) { AppearanceSheet(AppearanceOption.System, {}, {}) }
+
+/** Fixed sample so a version bump does not change the preview screenshots. */
+private const val PREVIEW_VERSION = "0.2.1"
