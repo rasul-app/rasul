@@ -70,9 +70,12 @@ class Upstream:
             raise ValueError("Upstream must use loopback")
         self.host, self.port = origin.hostname, origin.port or 80
 
+    async def connect(self):
+        return await asyncio.open_connection(self.host, self.port)
+
     async def open(self, method, target, key, head=None, body=b""):
         async with asyncio.timeout(10):
-            reader, writer = await asyncio.open_connection(self.host, self.port)
+            reader, writer = await self.connect()
             try:
                 lines = [f"{method} {target} HTTP/1.1", f"Host: {self.host}:{self.port}",
                          f"Authorization: Bearer {key}", "Connection: close", f"Content-Length: {len(body)}"]

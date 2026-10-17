@@ -57,6 +57,10 @@ class CreateBotMessagesTest {
             Triple(R.string.bridge_key_repair, "This device uses an older pairing key. Remove this bridge and pair again.", "يستخدم هذا الجهاز مفتاح اقتران قديمًا. احذف هذا الجسر وأعد الاقتران."),
             Triple(R.string.bridge_timeout, "The bridge did not respond in time. Check its status before retrying.", "لم يستجب الجسر في الوقت المحدد. تحقق من حالته قبل إعادة المحاولة."),
             Triple(R.string.bridge_unreachable, "Cannot reach this bridge. Check that it is online.", "تعذّر الاتصال بالجسر. تأكد من أنه متصل."),
+            Triple(R.string.bridge_link_dropped, "The connection to the bridge dropped. Try again.", "انقطع الاتصال بالجسر. حاول مرة أخرى."),
+            Triple(R.string.bridge_secure_failed, "The secure link to the bridge failed. If it keeps failing, pair the bridge again.", "فشل الاتصال الآمن بالجسر. إذا تكرر ذلك، أعد إقران الجسر."),
+            Triple(R.string.bridge_address_unknown, "Can’t find this bridge’s address. Check the bridge address.", "تعذّر العثور على عنوان الجسر. تحقّق من عنوان الجسر."),
+            Triple(R.string.bridge_refused, "The bridge refused the connection. Check that the bridge is running.", "رفض الجسر الاتصال. تأكد من أن الجسر يعمل."),
         )
         assertTrue(expected.map { it.first }.containsAll(CreateBotError.entries.map { it.message }))
         expected.forEach { (id, english, arabic) ->

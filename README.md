@@ -40,6 +40,10 @@ Early development (version 0.2.1). Pre-release APKs are on the Releases page. Pl
 
 Use [Rasul Bridge](bridge/README.md) for the recommended pinned TLS companion protocol. It keeps profile keys on the computer and supports local device pairing and revocation. This package provides the computer side; the app pairs with it by scanning its QR code. Direct Hermes connections remain the advanced option described below.
 
+## Approvals from computer sessions
+
+The optional [phone approval integration](docs/bridge-approvals.md) adds computer-side routes for listing and answering pending approvals while keeping the local approval card active. Setup requires a profile plugin and a separate private bridge listener. The phone feed UI is a later slice.
+
 ## Direct Hermes connection (advanced)
 
 1. Turn on the Hermes API server. Add these lines to `~/.hermes/.env` on your computer:

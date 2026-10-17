@@ -57,6 +57,10 @@ class Audit:
                  "method": method, "route": route, "profile_id": profile_id, "status": status}
         self.write(value)
 
+    def approval(self, device_id, profile_id, request_id, choice, status):
+        self.write({"time": datetime.now(timezone.utc).isoformat(), "device_id": device_id,
+                    "profile_id": profile_id, "request_id": request_id, "choice": choice, "status": status})
+
     def write(self, value):
         try:
             self._write(value)

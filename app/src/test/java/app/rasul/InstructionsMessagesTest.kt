@@ -50,7 +50,8 @@ class InstructionsMessagesTest {
             Triple(R.string.instructions_invalid_length, "The bridge rejected the instructions request length. Check its version.", "رفض الجسر طول طلب التعليمات. تحقّق من إصداره."),
             Triple(R.string.instructions_body_too_large, "The instructions request is too large for the bridge. Shorten the text.", "طلب التعليمات أكبر مما يقبله الجسر. اختصر النص."),
         )
-        val shared = setOf(R.string.bridge_revoked, R.string.bridge_key_repair, R.string.bridge_timeout, R.string.bridge_unreachable)
+        val shared = setOf(R.string.bridge_revoked, R.string.bridge_key_repair, R.string.bridge_timeout, R.string.bridge_unreachable,
+            R.string.bridge_link_dropped, R.string.bridge_secure_failed, R.string.bridge_address_unknown, R.string.bridge_refused)
         assertTrue(expected.map { it.first }.toSet().plus(shared).containsAll(InstructionsError.entries.map { it.message }))
         expected.forEach { (id, english, arabic) ->
             assertEquals(english, en.getString(id))

@@ -68,6 +68,7 @@
     <string name="job_none">none</string>
     <string name="job_pause">Pause</string>
     <string name="job_resume">Resume</string>
+    <string name="job_resume_named">Resume %1$s</string>
     <string name="job_pause_named">Pause %1$s</string>
     <string name="job_run_now">Run now</string>
     <string name="job_run_confirm_title">Run this job now?</string>
@@ -224,6 +225,10 @@
     <string name="pair_device_required">The bridge incorrectly requires a registered device for pairing. Check its version.</string>
     <string name="pair_route">This bridge has no supported pairing route. Check its version.</string>
     <string name="bridge_unreachable">Cannot reach this bridge. Check that it is online.</string>
+    <string name="bridge_link_dropped">The connection to the bridge dropped. Try again.</string>
+    <string name="bridge_secure_failed">The secure link to the bridge failed. If it keeps failing, pair the bridge again.</string>
+    <string name="bridge_address_unknown">Can’t find this bridge’s address. Check the bridge address.</string>
+    <string name="bridge_refused">The bridge refused the connection. Check that the bridge is running.</string>
     <string name="bridge_revoked">This device no longer has access. Remove the bridge and pair again.</string>
     <string name="bridge_profile_not_ready">This bot is not ready. Complete its setup on the computer.</string>
     <string name="bridge_response_invalid">The bridge sent an invalid profile list.</string>

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.absolutePadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -37,6 +38,7 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -190,6 +193,7 @@ fun RasulRow(
     selected: Boolean? = null,
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
+    bottom: (@Composable () -> Unit)? = null,
     text: @Composable ColumnScope.() -> Unit,
 ) {
     Column(modifier.fillMaxWidth()) {
@@ -217,6 +221,21 @@ fun RasulRow(
             leading?.invoke()
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(textSpacing), content = text)
             trailing?.invoke()
+        }
+        if (bottom != null) {
+            val layoutDirection = LocalLayoutDirection.current
+            val rowEnd = if (layoutDirection == LayoutDirection.Ltr) {
+                contentPadding.calculateRightPadding(layoutDirection)
+            } else {
+                contentPadding.calculateLeftPadding(layoutDirection)
+            }
+            Box(
+                Modifier.fillMaxWidth().padding(
+                    start = hairlineStart,
+                    end = rowEnd,
+                    bottom = contentPadding.calculateBottomPadding(),
+                ),
+            ) { bottom() }
         }
         if (!last) Hairline(Modifier.padding(start = hairlineStart, end = hairlineEnd))
     }
@@ -288,11 +307,18 @@ fun SmallOutlineButton(text: String, onClick: () -> Unit, enabled: Boolean = tru
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text, style = RasulType.buttonSmall, color = col,
-            modifier = Modifier.then(if (width == null) Modifier else Modifier.width(width)).border(1.dp, col, RasulShapes.filter)
+        Box(
+            Modifier.then(if (width == null) Modifier else Modifier.widthIn(min = width))
+                .border(1.dp, col, RasulShapes.filter)
                 .padding(horizontal = if (width == null) 14.dp else 13.dp, vertical = 7.dp),
-        )
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(Modifier.width(IntrinsicSize.Max)) {
+                Text(
+                    text, style = RasulType.buttonSmall, color = col, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                )
+            }
+        }
     }
 }
 

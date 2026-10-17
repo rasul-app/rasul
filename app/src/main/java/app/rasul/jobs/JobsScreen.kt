@@ -5,6 +5,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -158,6 +161,7 @@ fun JobsScreen(vm: JobsViewModel, onPairPc: () -> Unit = {}, onSearch: () -> Uni
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun JobList(
     list: List<JobDto>,
     busy: Boolean,
@@ -173,6 +177,7 @@ internal fun JobList(
     }
     LazyColumn(Modifier.fillMaxSize()) {
         items(list, key = { it.id }) { j ->
+            val jobName = j.name?.takeIf { it.isNotBlank() } ?: j.id
             val (badgeBg, badgeIcon, badgeTint) = when (j.jobState) {
                 JobState.Scheduled -> Triple(c.accentSoft, RasulIcons.Clock, c.accent)
                 JobState.Paused -> Triple(c.fill, RasulIcons.Pause, c.muted)
@@ -185,15 +190,30 @@ internal fun JobList(
                 trailing = {
                     when (j.jobState) {
                         JobState.Scheduled -> RasulToggle(
-                            true, stringResource(R.string.job_pause_named, j.name?.takeIf { it.isNotBlank() } ?: j.id),
+                            true, stringResource(R.string.job_pause_named, jobName), enabled = !busy,
                         ) { if (!busy) onToggle(j) }
-                        JobState.Paused -> SmallOutlineButton(stringResource(R.string.job_resume), { onToggle(j) }, enabled = !busy)
+                        JobState.Paused -> RasulToggle(
+                            false, stringResource(R.string.job_resume_named, jobName), enabled = !busy,
+                        ) { if (!busy) onToggle(j) }
                         JobState.Completed -> StatusChip(stringResource(R.string.job_completed), ChipKind.Done)
                         JobState.Error -> StatusChip(stringResource(R.string.job_failed), ChipKind.Failed)
                     }
                 },
+                bottom = {
+                    FlowRow(
+                        Modifier.fillMaxWidth().testTag("job_actions_line"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SmallOutlineButton(stringResource(R.string.ux3c_job_edit), { onEdit(j) }, enabled = !busy)
+                        SmallOutlineButton(stringResource(R.string.ux3c_job_delete), { onDelete(j) }, enabled = !busy)
+                        if (!j.jobState.isTerminal) {
+                            SmallOutlineButton(stringResource(R.string.job_run_now), { onRunNow(j) }, enabled = !busy)
+                        }
+                    }
+                },
             ) {
-                RowTitle(j.name?.takeIf { it.isNotBlank() } ?: j.id, if (j.jobState == JobState.Paused) c.muted else c.ink)
+                RowTitle(jobName, if (j.jobState == JobState.Paused) c.muted else c.ink)
                 j.scheduleDisplay?.let { RowSub(stringResource(R.string.job_schedule, it)) }
                 when (j.jobState) {
                     JobState.Scheduled -> RowSub(
@@ -202,16 +222,6 @@ internal fun JobList(
                     JobState.Paused -> RowSub(stringResource(R.string.job_paused), c.warnText)
                     JobState.Completed -> RowSub(stringResource(R.string.job_completed), c.successText)
                     JobState.Error -> RowSub(stringResource(R.string.job_failed), c.danger)
-                }
-                Row(
-                    Modifier.padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SmallOutlineButton(stringResource(R.string.ux3c_job_edit), { onEdit(j) }, enabled = !busy)
-                    SmallOutlineButton(stringResource(R.string.ux3c_job_delete), { onDelete(j) }, enabled = !busy)
-                    if (!j.jobState.isTerminal) {
-                        SmallOutlineButton(stringResource(R.string.job_run_now), { onRunNow(j) }, enabled = !busy)
-                    }
                 }
             }
         }

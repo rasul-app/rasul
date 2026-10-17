@@ -47,6 +47,10 @@ enum class InstructionsError(val message: Int) {
     DeviceRevoked(R.string.bridge_revoked),
     DeviceKeyRepair(R.string.bridge_key_repair),
     Timeout(R.string.bridge_timeout),
+    LinkDropped(R.string.bridge_link_dropped),
+    Secure(R.string.bridge_secure_failed),
+    AddressUnknown(R.string.bridge_address_unknown),
+    Refused(R.string.bridge_refused),
     Unreachable(R.string.bridge_unreachable),
 }
 
@@ -88,6 +92,10 @@ internal fun instructionsTransportError(error: Exception): InstructionsError = w
     HermesError.DeviceRevoked -> InstructionsError.DeviceRevoked
     HermesError.DeviceKeyRepair -> InstructionsError.DeviceKeyRepair
     HermesError.BridgeTimeout -> InstructionsError.Timeout
+    HermesError.BridgeLinkDropped -> InstructionsError.LinkDropped
+    HermesError.BridgeSecure -> InstructionsError.Secure
+    HermesError.BridgeAddressUnknown -> InstructionsError.AddressUnknown
+    HermesError.BridgeRefused -> InstructionsError.Refused
     else -> InstructionsError.Unreachable
 }
 

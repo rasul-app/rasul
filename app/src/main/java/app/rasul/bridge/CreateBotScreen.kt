@@ -48,6 +48,10 @@ fun CreateBotScreen(
         HermesError.DeviceRevoked -> CreateBotError.DeviceRevoked
         HermesError.DeviceKeyRepair -> CreateBotError.DeviceKeyRepair
         HermesError.BridgeTimeout -> CreateBotError.Timeout
+        HermesError.BridgeLinkDropped -> CreateBotError.LinkDropped
+        HermesError.BridgeSecure -> CreateBotError.Secure
+        HermesError.BridgeAddressUnknown -> CreateBotError.AddressUnknown
+        HermesError.BridgeRefused -> CreateBotError.Refused
         HermesError.ProfileNotReady -> CreateBotError.NotReady
         HermesError.BridgeResponseInvalid -> CreateBotError.InvalidResponse
         null -> null

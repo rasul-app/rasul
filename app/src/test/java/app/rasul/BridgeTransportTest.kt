@@ -1,6 +1,8 @@
 package app.rasul
 
 import app.rasul.bridge.BridgeTransport
+import app.rasul.bridge.bridgeError
+import app.rasul.bridge.bridgeResponse
 import app.rasul.bridge.bridgeStreamClient
 import app.rasul.bridge.DeviceIdentity
 import app.rasul.bridge.SpkiTrustManager
@@ -12,8 +14,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.resetMain
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -363,7 +367,7 @@ class BridgeTransportTest {
                                     socket.getInputStream().read()
                                 }
                                 assertEquals(failure.stackTraceToString(),
-                                    if (attempt == 0) app.rasul.data.HermesError.BridgeUnreachable else app.rasul.data.HermesError.DeviceRevoked,
+                                    if (attempt == 0) app.rasul.data.HermesError.BridgeSecure else app.rasul.data.HermesError.DeviceRevoked,
                                     app.rasul.bridge.bridgeError(tracker.callFailed(failure)))
                             }
                         }
@@ -379,7 +383,7 @@ class BridgeTransportTest {
         }
     }
 
-    @Test fun plainNetworkDropStaysBridgeUnreachable() {
+    @Test fun plainNetworkDropIsLinkDropped() {
         val tracker = app.rasul.bridge.BridgeRejectionTracker(true)
         val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build()
         try {
@@ -395,11 +399,191 @@ class BridgeTransportTest {
                         tracker.serverVerified()
                         outer.shutdown()
                         val failure = assertThrows(java.io.IOException::class.java) { socket.getInputStream().read() }
-                        assertEquals(app.rasul.data.HermesError.BridgeUnreachable, app.rasul.bridge.bridgeError(tracker.callFailed(failure)))
+                        assertEquals(app.rasul.data.HermesError.BridgeLinkDropped, app.rasul.bridge.bridgeError(tracker.callFailed(failure)))
+                        assertTrue(socket.isInputShutdown)
+                        assertTrue(socket.isOutputShutdown)
                     }
                 }
             }
         } finally { close(client) }
+    }
+
+    /** A request on a link the peer closed is transparently repeated on a fresh link (the owner-reported symptom). */
+    @Test fun aLinkClosedByThePeerIsReopenedForIdempotentGets() = runBlocking {
+        withBridgeLinks { inner, outer, transport, links ->
+            inner.enqueue(MockResponse().setBody("{}"))
+            inner.enqueue(MockResponse().setBody("{}"))
+            val api = HermesClient(transport.client)
+            val target = HermesTarget("", null, "", app.rasul.bridge.BridgeEndpoint(transport.client, "default"))
+            assertTrue(api.health(target) is HermesResult.Ok)
+            assertEquals(1, outer.requestCount)
+            assertTrue(links.single().close(1000, null))
+            assertTrue(kotlinx.coroutines.withTimeout(10_000) { api.health(target) } is HermesResult.Ok)
+            assertEquals(2, outer.requestCount)
+        }
+    }
+
+    /** A link killed mid-response repeats an idempotent GET once on a re-opened link. */
+    @Test fun aLinkKilledMidResponseIsRetriedOnceForGets() = runBlocking {
+        withBridgeLinks { inner, outer, transport, _ ->
+            inner.enqueue(MockResponse().setBody("partial body").setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY))
+            inner.enqueue(MockResponse().setBody("{}"))
+            val api = HermesClient(transport.client)
+            val target = HermesTarget("", null, "", app.rasul.bridge.BridgeEndpoint(transport.client, "default"))
+            assertTrue(kotlinx.coroutines.withTimeout(10_000) { api.health(target) } is HermesResult.Ok)
+            assertEquals(2, outer.requestCount)
+        }
+    }
+
+    /** A non-idempotent POST is never resent; the error names the dropped link. */
+    @Test fun aPostWithoutIdempotencyIsNeverResent() = runBlocking {
+        withBridgeLinks { inner, outer, transport, _ ->
+            inner.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            val api = HermesClient(transport.client)
+            val target = HermesTarget("", null, "", app.rasul.bridge.BridgeEndpoint(transport.client, "default"))
+            val result = kotlinx.coroutines.withTimeout(10_000) {
+                api.send(target, "api/jobs", post = true)
+            }
+            assertEquals(HermesResult.Err(app.rasul.data.HermesError.BridgeLinkDropped), result)
+            assertEquals(1, outer.requestCount)
+        }
+    }
+
+    /** A keyed POST /v1/runs (the route the server deduplicates) is repeated once on a fresh link,
+     * and the retry carries the same key. */
+    @Test fun aPostWithIdempotencyKeyIsRetriedOnce() = runBlocking {
+        withBridgeLinks { inner, outer, transport, _ ->
+            inner.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            inner.enqueue(MockResponse().setBody("{}"))
+            val request = Request.Builder()
+                .url(BridgeTransport.origin.newBuilder()
+                    .addPathSegments("v1/profiles/default/hermes/v1/runs").build())
+                .header("Idempotency-Key", "key-1")
+                .post("{}".toRequestBody("application/json".toMediaType()))
+                .build()
+            val body = kotlinx.coroutines.withTimeout(10_000) {
+                transport.client.bridgeResponse(request) { it.body?.string() }
+            }
+            assertEquals("{}", body)
+            assertEquals(2, outer.requestCount)
+            val first = inner.takeRequest(5, TimeUnit.SECONDS)
+            val second = inner.takeRequest(5, TimeUnit.SECONDS)
+            assertEquals("key-1", first?.getHeader("Idempotency-Key"))
+            assertEquals("key-1", second?.getHeader("Idempotency-Key"))
+            assertEquals("/v1/profiles/default/hermes/v1/runs", second?.path)
+        }
+    }
+
+    /** A keyed POST to a route the server does not deduplicate (an approval answer) is never resent. */
+    @Test fun aKeyedPostToANonDeduplicatedRouteIsNeverResent() = runBlocking {
+        withBridgeLinks { inner, outer, transport, _ ->
+            inner.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            val request = Request.Builder()
+                .url(BridgeTransport.origin.newBuilder()
+                    .addPathSegments("v1/profiles/default/hermes/v1/runs/run_1/approval").build())
+                .header("Idempotency-Key", "key-1")
+                .post("{}".toRequestBody("application/json".toMediaType()))
+                .build()
+            val failure: java.io.IOException = try {
+                kotlinx.coroutines.withTimeout(10_000) {
+                    transport.client.bridgeResponse(request) { it.body?.string() }
+                }
+                throw AssertionError("expected an IOException")
+            } catch (e: java.io.IOException) { e }
+            assertEquals(app.rasul.data.HermesError.BridgeLinkDropped, app.rasul.bridge.bridgeError(failure))
+            assertEquals(1, outer.requestCount)
+        }
+    }
+
+    /** A PUT can commit on the bridge before its response is lost (the revision-guarded instructions
+     * save then answers 409 on a re-send), so a PUT is never resent; the error names the dropped link. */
+    @Test fun aPutWithDroppedResponseIsNeverResent() = runBlocking {
+        withBridgeLinks { inner, outer, transport, _ ->
+            inner.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            inner.enqueue(MockResponse().setResponseCode(409).setBody("{}"))
+            val request = Request.Builder()
+                .url(BridgeTransport.origin.newBuilder()
+                    .addPathSegments("v1/profiles/default/instructions").build())
+                .put("{}".toRequestBody("application/json".toMediaType()))
+                .build()
+            val failure: java.io.IOException = try {
+                kotlinx.coroutines.withTimeout(10_000) {
+                    transport.client.bridgeResponse(request) { it.body?.string() }
+                }
+                throw AssertionError("expected an IOException")
+            } catch (e: java.io.IOException) { e }
+            assertEquals(app.rasul.data.HermesError.BridgeLinkDropped, app.rasul.bridge.bridgeError(failure))
+            assertEquals(1, outer.requestCount)
+        }
+    }
+
+    /** A pooled link idle longer than the tunnel's limit is never reused (resume, network change, Doze).
+     * The threshold must exceed local request latency — it only declares a link stale after real idleness. */
+    @Test fun aStaleIdleLinkIsReopened() = runBlocking {
+        withBridgeLinks(timeouts = app.rasul.bridge.BridgeTimeouts().copy(linkStaleMs = 250)) { inner, outer, transport, _ ->
+            inner.enqueue(MockResponse().setBody("{}"))
+            inner.enqueue(MockResponse().setBody("{}"))
+            val api = HermesClient(transport.client)
+            val target = HermesTarget("", null, "", app.rasul.bridge.BridgeEndpoint(transport.client, "default"))
+            assertTrue(api.health(target) is HermesResult.Ok)
+            Thread.sleep(500)
+            assertTrue(api.health(target) is HermesResult.Ok)
+            assertEquals(2, outer.requestCount)
+        }
+    }
+
+    /** A link that can never be reopened reports the bridge as unreachable after exactly one retry. */
+    @Test fun aRefusedLinkIsBridgeUnreachable() = runBlocking {
+        withBridgeLinks(upgrades = 1) { inner, outer, transport, links ->
+            inner.enqueue(MockResponse().setBody("{}"))
+            val api = HermesClient(transport.client)
+            val target = HermesTarget("", null, "", app.rasul.bridge.BridgeEndpoint(transport.client, "default"))
+            assertTrue(api.health(target) is HermesResult.Ok)
+            assertEquals(1, outer.requestCount)
+            assertTrue(links.single().close(1000, null))
+            outer.enqueue(MockResponse().setResponseCode(503))
+            outer.enqueue(MockResponse().setResponseCode(503))
+            val result = kotlinx.coroutines.withTimeout(10_000) { api.health(target) }
+            assertEquals(HermesResult.Err(app.rasul.data.HermesError.BridgeUnreachable), result)
+            // The dropped link fails attempt 1; exactly one refused re-open proves the single retry ran.
+            assertEquals(2, outer.requestCount)
+        }
+    }
+
+    @Test fun bridgeErrorSplitsLinkTlsRefusedAndTimeout() {
+        val err = ::bridgeError
+        assertEquals(app.rasul.data.HermesError.BridgeLinkDropped,
+            err(java.io.IOException("write", app.rasul.bridge.BridgeLinkDroppedException("gone"))))
+        assertEquals(app.rasul.data.HermesError.BridgeLinkDropped,
+            err(javax.net.ssl.SSLException("unexpected end of stream")))
+        assertEquals(app.rasul.data.HermesError.BridgeLinkDropped,
+            err(java.io.EOFException("eof")))
+        assertEquals(app.rasul.data.HermesError.BridgeSecure,
+            err(app.rasul.bridge.BridgeHandshakeFailure(javax.net.ssl.SSLException("bad_certificate"))))
+        assertEquals(app.rasul.data.HermesError.BridgeLinkDropped,
+            err(app.rasul.bridge.BridgeHandshakeFailure(java.net.SocketException("reset"))))
+        assertEquals(app.rasul.data.HermesError.BridgeSecure,
+            err(javax.net.ssl.SSLHandshakeException("Received fatal alert: certificate_unknown")))
+        assertEquals(app.rasul.data.HermesError.BridgeLinkDropped,
+            err(java.net.ProtocolException("unexpected end of stream")))
+        assertEquals(app.rasul.data.HermesError.BridgeUnreachable,
+            err(java.net.ProtocolException("some other protocol problem")))
+        assertEquals(app.rasul.data.HermesError.BridgeTimeout,
+            err(java.io.IOException("io", java.net.SocketTimeoutException("t"))))
+        assertEquals(app.rasul.data.HermesError.BridgeRefused,
+            err(java.io.IOException("No bridge transport available", java.net.ConnectException("refused"))))
+        assertEquals(app.rasul.data.HermesError.BridgeRefused, err(java.net.ConnectException("refused")))
+        assertEquals(app.rasul.data.HermesError.BridgeAddressUnknown,
+            err(java.io.IOException("No bridge transport available", java.net.UnknownHostException("bridge.invalid"))))
+        assertEquals(app.rasul.data.HermesError.BridgeAddressUnknown, err(java.net.UnknownHostException("bridge.invalid")))
+        assertEquals(app.rasul.data.HermesError.BridgeSecure,
+            err(java.io.IOException("ws", javax.net.ssl.SSLPeerUnverifiedException("hostname not verified"))))
+        assertEquals(app.rasul.data.HermesError.BridgeSecure,
+            err(java.security.cert.CertificateException("certificate expired")))
+        assertEquals(app.rasul.data.HermesError.BridgeSecure,
+            err(java.io.IOException("tls", java.security.cert.CertPathValidatorException("no path"))))
+        assertEquals(app.rasul.data.HermesError.DeviceRevoked,
+            err(app.rasul.bridge.BridgeAccessException(app.rasul.data.HermesError.DeviceRevoked)))
     }
 
     private suspend fun withSilentBridge(timeouts: app.rasul.bridge.BridgeTimeouts, identity: DeviceIdentity? = null, block: suspend (MockWebServer, BridgeTransport) -> Unit) {
@@ -438,6 +622,56 @@ class BridgeTransportTest {
                     outer.start()
                     BridgeTransport(listOf(outer.url("/").toString().replace("http:", "ws:")), pin(serverKey), identity,
                         newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }, timeouts = timeouts).use { block(inner, it) }
+                }
+            }
+        } finally { pipes.forEach { runCatching { it.close() } }; workers.shutdownNow(); workers.awaitTermination(2, TimeUnit.SECONDS) }
+    }
+
+    /** Same two-server setup as [withSilentBridge], but the server end of each WebSocket link is captured in `links`
+     * so a test can close or kill the link underneath the transport, the way a tunnel idle drop does. */
+    private suspend fun withBridgeLinks(
+        timeouts: app.rasul.bridge.BridgeTimeouts = app.rasul.bridge.BridgeTimeouts(),
+        upgrades: Int = 4,
+        block: suspend (inner: MockWebServer, outer: MockWebServer, transport: BridgeTransport, links: List<WebSocket>) -> Unit,
+    ) {
+        val serverKey = HeldCertificate.Builder().ecdsa256().addSubjectAlternativeName("example.invalid").build()
+        val certificates = HandshakeCertificates.Builder().heldCertificate(serverKey).addTrustedCertificate(HeldCertificate.Builder().ecdsa256().build().certificate).build()
+        val pipes = CopyOnWriteArrayList<Socket>()
+        val links = CopyOnWriteArrayList<WebSocket>()
+        val workers = Executors.newCachedThreadPool()
+        try {
+            MockWebServer().use { inner ->
+                inner.useHttps(certificates.sslSocketFactory(), false)
+                inner.start()
+                MockWebServer().use { outer ->
+                    repeat(upgrades) { outer.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                        private lateinit var pipe: Socket
+                        override fun onOpen(webSocket: WebSocket, response: Response) {
+                            links.add(webSocket)
+                            pipe = Socket(InetAddress.getLoopbackAddress(), inner.port)
+                            pipes.add(pipe)
+                            workers.submit {
+                                try {
+                                    val buffer = ByteArray(8192)
+                                    while (true) {
+                                        val n = pipe.getInputStream().read(buffer)
+                                        if (n < 0 || !webSocket.send(buffer.toByteString(0, n))) break
+                                    }
+                                } catch (_: java.io.IOException) { }
+                                finally { pipe.close(); webSocket.close(1000, null) }
+                            }
+                        }
+                        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                            try { pipe.getOutputStream().write(bytes.toByteArray()) } catch (_: java.io.IOException) { }
+                        }
+                        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { if (::pipe.isInitialized) pipe.close() }
+                        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { if (::pipe.isInitialized) pipe.close(); webSocket.cancel() }
+                    })) }
+                    outer.start()
+                    BridgeTransport(listOf(outer.url("/").toString().replace("http:", "ws:")), pin(serverKey), null,
+                        newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }, timeouts = timeouts).use {
+                        block(inner, outer, it, links)
+                    }
                 }
             }
         } finally { pipes.forEach { runCatching { it.close() } }; workers.shutdownNow(); workers.awaitTermination(2, TimeUnit.SECONDS) }

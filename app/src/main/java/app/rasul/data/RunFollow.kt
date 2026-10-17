@@ -22,7 +22,8 @@ const val MAX_RECONNECTS = 5
 fun reconnectBackoffMs(attempt: Int): Long = minOf(1000L shl (attempt - 1).coerceIn(0, 3), 8000L)
 
 private fun HermesError.retryable() = this is HermesError.Unreachable || this is HermesError.Server ||
-    this == HermesError.BridgeUnreachable || this == HermesError.BridgeTimeout
+    this == HermesError.BridgeUnreachable || this == HermesError.BridgeTimeout || this == HermesError.BridgeLinkDropped ||
+    this == HermesError.BridgeAddressUnknown || this == HermesError.BridgeRefused
 
 /**
  * Follows a run across dropped connections. [open] makes one SSE connection starting after the given seq.

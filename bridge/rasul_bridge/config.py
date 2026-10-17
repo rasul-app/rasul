@@ -15,6 +15,7 @@ class Config:
     hermes_url: str = "http://127.0.0.1:8642"
     listen: str = "127.0.0.1"
     port: int = 8787
+    approvals_port: int | None = None
     public_urls: list = field(default_factory=lambda: ["ws://127.0.0.1:8787/v1/link"])
     templates: list = field(default_factory=lambda: [{"id": "blank", "label": "Blank"}])
     restart_command: list = field(default_factory=list)
@@ -32,6 +33,9 @@ class Config:
             raise ValueError("Upstream must be an HTTP loopback origin")
         if type(config.port) is not int or not 1 <= config.port <= 65535:
             raise ValueError("Invalid listening port")
+        if config.approvals_port is not None and (type(config.approvals_port) is not int
+                or not 1 <= config.approvals_port <= 65535 or config.approvals_port == config.port):
+            raise ValueError("Invalid approvals listening port")
         if not config.public_urls:
             raise ValueError("Set at least one public URL")
         for url in config.public_urls:

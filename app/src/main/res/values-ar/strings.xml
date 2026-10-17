@@ -68,6 +68,7 @@
     <string name="job_none">لا يوجد</string>
     <string name="job_pause">إيقاف مؤقت</string>
     <string name="job_resume">استئناف</string>
+    <string name="job_resume_named">استئناف %1$s</string>
     <string name="job_pause_named">إيقاف %1$s مؤقتاً</string>
     <string name="job_run_now">تشغيل الآن</string>
     <string name="job_run_confirm_title">تشغيل هذه المهمة الآن؟</string>
@@ -228,6 +229,10 @@
     <string name="pair_device_required">يطلب الجسر جهازًا مسجّلًا لإجراء الإقران. تحقّق من إصداره.</string>
     <string name="pair_route">لا يوفّر هذا الجسر مسار إقران مدعومًا. تحقّق من إصداره.</string>
     <string name="bridge_unreachable">تعذّر الاتصال بالجسر. تأكد من أنه متصل.</string>
+    <string name="bridge_link_dropped">انقطع الاتصال بالجسر. حاول مرة أخرى.</string>
+    <string name="bridge_secure_failed">فشل الاتصال الآمن بالجسر. إذا تكرر ذلك، أعد إقران الجسر.</string>
+    <string name="bridge_address_unknown">تعذّر العثور على عنوان الجسر. تحقّق من عنوان الجسر.</string>
+    <string name="bridge_refused">رفض الجسر الاتصال. تأكد من أن الجسر يعمل.</string>
     <string name="bridge_revoked">لم يعد لهذا الجهاز إذن بالوصول. احذف الجسر وأعد الاقتران.</string>
     <string name="bridge_profile_not_ready">هذا المساعد غير جاهز. أكمل إعداده على الحاسوب.</string>
     <string name="bridge_response_invalid">أرسل الجسر قائمة مساعدين غير صالحة.</string>

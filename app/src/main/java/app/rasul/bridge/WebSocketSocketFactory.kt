@@ -31,6 +31,7 @@ class WebSocketSocketFactory(
     private val confirmOnConnect: Boolean = true,
     private val onConnectFailure: () -> Unit = {},
     private val onOuterConnected: () -> Unit = {},
+    private val staleAfterMs: Long = BridgeTimeouts.LINK_STALE_MS,
 ) : SocketFactory() {
     private val urls = urls.toList().also {
         require(it.isNotEmpty() && it.all(::validBridgeUrl))
@@ -48,7 +49,7 @@ class WebSocketSocketFactory(
         val preferred = lastWorking
         val ordered = if (preferred == null) urls else listOf(preferred) + urls.filter { it != preferred }
         for (url in ordered.filterNot { it in excluded }) {
-            val socket = WebSocketSocket(outer, url, if (URI(url).path == "/v1/link") url else url.trimEnd('/') + "/v1/link")
+            val socket = WebSocketSocket(outer, url, if (URI(url).path == "/v1/link") url else url.trimEnd('/') + "/v1/link", staleAfterMs)
             try {
                 onAttempt(socket)
                 socket.open(timeoutMs)
@@ -134,26 +135,30 @@ internal class RoutingSocket(private val factory: WebSocketSocketFactory) : Sock
     override fun isConnected() = delegate?.isConnected == true
     override fun isBound() = isConnected
     override fun isClosed() = closed
+    override fun isInputShutdown() = closed || delegate?.isInputShutdown == true
+    override fun isOutputShutdown() = closed || delegate?.isOutputShutdown == true
     override fun shutdownInput() { close() }
     override fun shutdownOutput() { close() }
     override fun close() { closed = true; delegate?.close() }
 }
 
 /** Binary frames form one byte stream. Callback threads never wait for a reader. */
-internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: String, private val url: String) : Socket() {
+internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: String, private val url: String, private val staleAfterMs: Long = BridgeTimeouts.LINK_STALE_MS) : Socket() {
     private val monitor = Object()
     private val received = Buffer()
     private val opened = CountDownLatch(1)
     private var webSocket: WebSocket? = null
-    private var failure: IOException? = null
-    private var eof = false
-    private var eofDelivered = false
+    @Volatile private var failure: IOException? = null
+    @Volatile private var eof = false
+    @Volatile private var eofDelivered = false
     @Volatile private var closed = false
     @Volatile private var connected = false
     @Volatile private var timeout = 0
+    @Volatile private var lastActivityNanos = 0L
 
     fun open(timeoutMs: Int) {
         if (closed) throw SocketException("Socket closed")
+        lastActivityNanos = System.nanoTime()
         webSocket = outer.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 synchronized(monitor) { connected = true; opened.countDown() }
@@ -167,6 +172,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                         webSocket.cancel()
                     } else {
                         received.write(bytes)
+                        lastActivityNanos = System.nanoTime()
                         monitor.notifyAll()
                     }
                 }
@@ -183,7 +189,8 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                 synchronized(monitor) { eof = true; monitor.notifyAll() }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                fail(IOException("Bridge transport failed", t))
+                // Only a link that had opened "dropped"; a refused upgrade is a connect failure.
+                fail(if (connected) BridgeLinkDroppedException("Bridge transport failed", t) else IOException("Bridge transport failed", t))
             }
         })
         try {
@@ -199,9 +206,20 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
 
     private fun fail(error: IOException) = synchronized(monitor) {
         if (failure == null) failure = error
+        connected = false
         opened.countDown()
         monitor.notifyAll()
     }
+
+    /**
+     * No adapter bytes for [staleAfterMs]: the tunnel closes idle links (~100 s), and a suspended app cannot ping —
+     * an idle link this old must not be trusted. A dead or stale link reports its input and output as shut down, so a
+     * pooled connection is never mistaken for usable — OkHttp opens a fresh link instead of writing to a dead one.
+     */
+    private fun dead() = closed || eof || failure != null ||
+        System.nanoTime() - lastActivityNanos > TimeUnit.MILLISECONDS.toNanos(staleAfterMs)
+    override fun isInputShutdown() = dead()
+    override fun isOutputShutdown() = dead()
 
     private val input = object : InputStream() {
         override fun read(): Int {
@@ -239,9 +257,14 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
             require(offset >= 0 && length >= 0 && offset <= bytes.size - length)
             synchronized(monitor) {
                 failure?.let { throw it }
-                if (!connected || closed || eofDelivered) throw SocketException("Socket is not open")
+                if (eofDelivered) throw BridgeLinkDroppedException("Bridge link closed")
+                if (!connected || closed) throw SocketException("Socket is not open")
                 // A peer close must not hide queued TLS records behind a write failure.
                 if (eof) return
+                // A link idle past the tunnel limit is dropped even when it still looks open — never write to it.
+                if (System.nanoTime() - lastActivityNanos > TimeUnit.MILLISECONDS.toNanos(staleAfterMs)) {
+                    throw BridgeLinkDroppedException("Bridge link went stale").also { fail(it) }
+                }
                 val ws = webSocket ?: throw SocketException("Socket is not open")
                 if (length > MAX_BUFFER || ws.queueSize() + length > MAX_BUFFER) throw IOException("Bridge send buffer exceeded")
                 var cursor = offset
@@ -250,6 +273,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                     if (!ws.send(bytes.toByteString(cursor, count))) throw IOException("Bridge send failed")
                     cursor += count
                 }
+                lastActivityNanos = System.nanoTime()
             }
         }
         override fun close() = this@WebSocketSocket.close()

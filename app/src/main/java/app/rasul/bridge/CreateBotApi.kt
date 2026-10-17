@@ -38,6 +38,10 @@ enum class CreateBotError(val message: Int) {
     DeviceRevoked(R.string.bridge_revoked),
     DeviceKeyRepair(R.string.bridge_key_repair),
     Timeout(R.string.bridge_timeout),
+    LinkDropped(R.string.bridge_link_dropped),
+    Secure(R.string.bridge_secure_failed),
+    AddressUnknown(R.string.bridge_address_unknown),
+    Refused(R.string.bridge_refused),
     Unreachable(R.string.bridge_unreachable),
     InvalidRequest(R.string.create_invalid_request),
     InvalidRequestId(R.string.create_invalid_request_id),
@@ -63,6 +67,10 @@ internal fun createTransportError(failure: Throwable): CreateBotError = when (br
     app.rasul.data.HermesError.DeviceRevoked -> CreateBotError.DeviceRevoked
     app.rasul.data.HermesError.DeviceKeyRepair -> CreateBotError.DeviceKeyRepair
     app.rasul.data.HermesError.BridgeTimeout -> CreateBotError.Timeout
+    app.rasul.data.HermesError.BridgeLinkDropped -> CreateBotError.LinkDropped
+    app.rasul.data.HermesError.BridgeSecure -> CreateBotError.Secure
+    app.rasul.data.HermesError.BridgeAddressUnknown -> CreateBotError.AddressUnknown
+    app.rasul.data.HermesError.BridgeRefused -> CreateBotError.Refused
     else -> CreateBotError.Unreachable
 }
 

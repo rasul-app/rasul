@@ -122,13 +122,13 @@ class FakeUpstream:
 
 
 @asynccontextmanager
-async def running(tmp_path, confirm=None, run=None, random_source=None):
+async def running(tmp_path, confirm=None, run=None, random_source=None, approvals=False):
     upstream = FakeUpstream()
     await upstream.start()
     store = Store(tmp_path / "data")
     initialize(store)
     config = Config(hermes_url=f"http://127.0.0.1:{upstream.port}", port=0,
-                    hermes_home=tmp_path / "upstream")
+                    hermes_home=tmp_path / "upstream", approvals_port=0 if approvals else None)
     config.hermes_home.mkdir()
     bridge = Bridge(store, config, confirm=confirm, run=run,
                     random_source=random_source if random_source is not None else random.Random(148))

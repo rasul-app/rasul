@@ -70,3 +70,14 @@ jobs:
           assert not skipped, "Instructions checks skipped: " + ", ".join(skipped)
           print(f"Instructions checks: {len(instructions)}; skipped: {len(skipped)}")
           PY
+      - name: Require desktop security coverage
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("bridge-results.xml").findall(".//testcase")
+          desktop = [case for case in cases if case.attrib["name"].startswith("test_desktop_")]
+          assert desktop, "Desktop checks were not collected"
+          skipped = [case.attrib["name"] for case in desktop if case.find("skipped") is not None]
+          assert not skipped, "Desktop checks skipped: " + ", ".join(skipped)
+          print(f"Desktop checks: {len(desktop)}; skipped: {len(skipped)}")
+          PY

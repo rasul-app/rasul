@@ -40,14 +40,14 @@ class BridgeRoutingTest {
             val tracker = BridgeRejectionTracker(true)
             tracker.beginAttempt(); tracker.outerConnected(); tracker.serverVerified()
             val failure = javax.net.ssl.SSLHandshakeException("Received fatal alert: $alert")
-            assertEquals(HermesError.BridgeUnreachable, bridgeError(tracker.rejected(failure)))
+            assertEquals(HermesError.BridgeSecure, bridgeError(tracker.rejected(failure)))
             assertEquals(HermesError.DeviceRevoked, bridgeError(tracker.rejected(failure)))
             tracker.reset()
-            assertEquals(HermesError.BridgeUnreachable, bridgeError(tracker.rejected(failure)))
+            assertEquals(HermesError.BridgeSecure, bridgeError(tracker.rejected(failure)))
             tracker.rejected(IOException())
-            assertEquals(HermesError.BridgeUnreachable, bridgeError(tracker.rejected(failure)))
+            assertEquals(HermesError.BridgeSecure, bridgeError(tracker.rejected(failure)))
             val unpaired = BridgeRejectionTracker(false)
-            repeat(2) { assertEquals(HermesError.BridgeUnreachable, bridgeError(unpaired.rejected(failure))) }
+            repeat(2) { assertEquals(HermesError.BridgeSecure, bridgeError(unpaired.rejected(failure))) }
         }
         val tracker = BridgeRejectionTracker(true)
         repeat(3) {
@@ -57,9 +57,9 @@ class BridgeRoutingTest {
         }
         tracker.beginAttempt() // Outer TLS itself failed, so this is not an inner certificate rejection.
         val alert = javax.net.ssl.SSLHandshakeException("Received fatal alert: unknown_ca")
-        repeat(2) { assertEquals(HermesError.BridgeUnreachable, bridgeError(tracker.callFailed(alert))) }
+        repeat(2) { assertEquals(HermesError.BridgeSecure, bridgeError(tracker.callFailed(alert))) }
         tracker.beginAttempt(); tracker.outerConnected()
-        repeat(2) { assertEquals(HermesError.BridgeUnreachable, bridgeError(tracker.rejected(alert))) }
+        repeat(2) { assertEquals(HermesError.BridgeSecure, bridgeError(tracker.rejected(alert))) }
     }
 
     @Test fun bridgeChatSessionsJobsAndStreamUseSelectedClientAndPrefix() = runBlocking {

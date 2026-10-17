@@ -82,6 +82,18 @@ sealed interface HermesError {
     data object DeviceRevoked : HermesError
     data object DeviceKeyRepair : HermesError
     data object BridgeTimeout : HermesError
+
+    /** An established link to the bridge dropped; callers that keep retrying show it as transient. */
+    data object BridgeLinkDropped : HermesError
+
+    /** The TLS session over the link failed (handshake alert, not a plain transport loss). */
+    data object BridgeSecure : HermesError
+
+    /** The bridge's address does not resolve. */
+    data object BridgeAddressUnknown : HermesError
+
+    /** Nothing listens at the bridge's address — the connection was refused. */
+    data object BridgeRefused : HermesError
     data object ProfileNotReady : HermesError
     data object BridgeResponseInvalid : HermesError
     data object Unauthorized : HermesError

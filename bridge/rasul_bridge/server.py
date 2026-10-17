@@ -17,6 +17,8 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from .audit import Audit
+from .approvals import Approvals, PHONE_ROUTE
+from .desktop import Desktop, RULES as DESKTOP_RULES
 from .http import HTTPError, Reader, chunk, request, response, stream_start
 from .limits import Limits
 from .instructions import Instructions
@@ -72,6 +74,7 @@ class Bridge:
         self.upstream = Upstream(config.hermes_url)
         self.profiles = Profiles(store, config, self.upstream, run=run)
         self.instructions = Instructions(self.profiles)
+        self.desktop = Desktop(self.profiles)
         self.connections = {}
         self.pending = {}
         self.anonymous = {}
@@ -85,6 +88,8 @@ class Bridge:
         self.link_tasks = {}
         self.server = None
         self.heartbeat_interval = 15
+        self.approvals = (Approvals(store, self.profiles, self.audit_call)
+                          if config.approvals_port is not None else None)
 
     async def admission(self, connection, request):
         if request.path != "/v1/link":
@@ -171,6 +176,13 @@ class Bridge:
                                   server_header=None, max_size=65536, max_queue=2,
                                   open_timeout=UPGRADE_TIMEOUT, close_timeout=1, logger=logger)
         self.port = self.server.sockets[0].getsockname()[1]
+        if self.approvals is not None:
+            try:
+                await self.approvals.start(self.config.approvals_port)
+            except Exception:
+                self.server.close()
+                await self.server.wait_closed()
+                raise
         self.monitor_task = asyncio.create_task(self.monitor())
         return self
 
@@ -294,6 +306,11 @@ class Bridge:
                     raise HTTPError(403, "Pairing denied") from None
                 status = 200
                 await response(link, status, value)
+            elif self.approvals is not None and PHONE_ROUTE.fullmatch(target):
+                match = PHONE_ROUTE.fullmatch(target)
+                route, profile = "/v1/profiles/{id}/approvals", match[1]
+                await self.approvals.phone(link, device, method, match, body)
+                status = 200
             elif method == "GET" and target == "/v1/profiles":
                 route, status = "/v1/profiles", 200
                 await response(link, status, await self.profiles.snapshot())
@@ -329,6 +346,18 @@ class Bridge:
                         raise HTTPError(400, "instructions_invalid") from None
                 value = self.instructions.call(profile, value)
                 status = 200
+                await response(link, status, value)
+            elif re.match(r"/v1/profiles/[a-z0-9][a-z0-9_-]{0,63}/desktop(?:/|$)", path):
+                route = "/v1/profiles/{id}/desktop/unknown"
+                profile = path.split("/")[3]
+                suffix = target[len("/v1/profiles/" + profile + "/desktop"): ]
+                for verb, pattern, name, cap in DESKTOP_RULES:
+                    if method == verb and re.fullmatch(pattern, urlsplit(suffix).path):
+                        route = "/v1/profiles/{id}/desktop/" + name
+                        break
+                if body and _has_unsupported_charset(head):
+                    raise HTTPError(400, "desktop_invalid")
+                status, value = await self.desktop.call(device, profile, method, suffix, body)
                 await response(link, status, value)
             elif method == "GET" and re.fullmatch(r"/v1/operations/[0-9a-f]{32}", target):
                 route, status = "/v1/operations/{id}", 200
@@ -379,10 +408,13 @@ class Bridge:
             await response(link, status, {"error": "Upstream unavailable"})
         finally:
             # Method is parser-validated; route is always a static template.
+            if route.startswith("/v1/profiles/{id}/desktop/"):
+                self.audit_call("write", {"route": route, "status": status})
             summarized = (device is None and status >= 400) or status == 429
-            if summarized:
+            if summarized and not route.startswith("/v1/profiles/{id}/desktop/"):
                 self.audit_call("reject")
-            if not summarized or (device is not None and route == "/v1/profiles/{id}/instructions"):
+            if (not route.startswith("/v1/profiles/{id}/desktop/")
+                    and (not summarized or (device is not None and route == "/v1/profiles/{id}/instructions"))):
                 self.audit_call("record", device, method, route, profile, status)
 
     async def events(self, link):
@@ -411,6 +443,8 @@ class Bridge:
             await asyncio.gather(task, return_exceptions=True)
 
     async def close(self):
+        if self.approvals is not None:
+            await self.approvals.close()
         self.monitor_task.cancel()
         with suppress(asyncio.CancelledError):
             await self.monitor_task
