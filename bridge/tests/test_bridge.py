@@ -10,6 +10,7 @@ import random
 from pathlib import Path
 import secrets
 import ssl
+import sys
 import struct
 import uuid
 import zlib
@@ -1816,3 +1817,515 @@ def test_qr_falls_back_to_the_image_on_a_console_without_block_characters():
     wide = io.StringIO()
     show_qr(code, wide)
     assert "█" in wide.getvalue()
+
+
+@asynchronous
+async def test_instructions_load_save_conflict_and_audit(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        identity, device = registered(bridge)
+        soul = bridge.config.hermes_home / "SOUL.md"
+        original = "Be clear.\r\nأجب بوضوح.\n".encode("utf-8")
+        soul.write_bytes(original)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            target = "/v1/profiles/default/instructions"
+            await send(link, "GET", target)
+            status, value = await read_response(reader)
+            assert status == 200
+            assert value == {"text": original.decode("utf-8"), "revision": hashlib.sha256(original).hexdigest()}
+            soul.write_bytes(b"Changed locally")
+            await send(link, "PUT", target, {"text": "Phone edit", "revision": value["revision"]})
+            assert await read_response(reader) == (409, {"error": "instructions_conflict"})
+            assert soul.read_bytes() == b"Changed locally"
+            await send(link, "GET", target)
+            _, value = await read_response(reader)
+            await send(link, "PUT", target, {"text": "Phone edit", "revision": value["revision"]})
+            assert await read_response(reader) == (200, {"revision": hashlib.sha256(b"Phone edit").hexdigest()})
+            assert soul.read_bytes() == b"Phone edit"
+        rows = [json.loads(line) for line in bridge.audit.path.read_text().splitlines()]
+        assert any(row.get("route") == "/v1/profiles/{id}/instructions" and row["profile_id"] == "default"
+                   and row["status"] == 409 for row in rows)
+        assert "Phone edit" not in bridge.audit.path.read_text()
+        assert "Changed locally" not in bridge.audit.path.read_text()
+        assert not upstream.requests
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+@asynchronous
+async def test_instructions_unpaired_denied(tmp_path, method):
+    async with running(tmp_path) as (bridge, _):
+        async with client(bridge, tmp_path) as (link, reader, _):
+            await send(link, method, "/v1/profiles/default/instructions", {})
+            assert (await read_response(reader))[0] == 403
+
+
+@pytest.mark.parametrize("profile", ["missing", "..", "%2e%2e", "default/..", "Default"])
+@asynchronous
+async def test_instructions_unknown_and_traversal(tmp_path, profile):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "GET", "/v1/profiles/" + profile + "/instructions")
+            assert (await read_response(reader))[0] == 404
+
+
+@asynchronous
+async def test_instructions_empty_missing_and_named_home(tmp_path):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        named = bridge.config.hermes_home / "profiles" / "sample"
+        named.mkdir(parents=True)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            for profile in ("default", "sample"):
+                target = "/v1/profiles/" + profile + "/instructions"
+                await send(link, "GET", target)
+                status, value = await read_response(reader)
+                assert (status, value) == (200, {"text": "", "revision": hashlib.sha256(b"").hexdigest()})
+                await send(link, "PUT", target, dict(value, text=""))
+                assert (await read_response(reader))[0] == 200
+        assert (named / "SOUL.md").read_bytes() == b""
+
+
+@pytest.mark.parametrize("data,status,token", [pytest.param(b"x" * 20001, 413, "instructions_too_large", id="oversize"),
+                                               (b"\xff", 400, "instructions_not_utf8")])
+@asynchronous
+async def test_instructions_invalid_existing_file(tmp_path, data, status, token):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        (bridge.config.hermes_home / "SOUL.md").write_bytes(data)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "GET", "/v1/profiles/default/instructions")
+            assert await read_response(reader) == (status, {"error": token})
+
+
+@pytest.mark.parametrize("body,status,token", [
+    ({"text": "أ" * 10001, "revision": hashlib.sha256(b"").hexdigest()}, 413, "instructions_too_large"),
+    ({"text": "ok", "revision": "bad"}, 400, "instructions_invalid"),
+    (b"{\"text\":\"\xff\"}", 400, "instructions_invalid"),
+    ({"text": 3, "revision": hashlib.sha256(b"").hexdigest()}, 400, "instructions_invalid"),
+])
+@asynchronous
+async def test_instructions_invalid_save(tmp_path, body, status, token):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "PUT", "/v1/profiles/default/instructions", body)
+            assert await read_response(reader) == (status, {"error": token})
+        assert not (bridge.config.hermes_home / "SOUL.md").exists()
+
+
+@pytest.mark.parametrize("parent", [False, True])
+@asynchronous
+async def test_instructions_symlink_denied(tmp_path, parent):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "SOUL.md").write_bytes(b"Private content")
+        home = bridge.config.hermes_home
+        if parent:
+            (home / "profiles").mkdir()
+            link_path = home / "profiles" / "sample"
+            link_target = outside
+            profile = "sample"
+        else:
+            link_path = home / "SOUL.md"
+            link_target = outside / "SOUL.md"
+            profile = "default"
+        if os.name == "nt" and parent:
+            import _winapi
+            _winapi.CreateJunction(str(link_target), str(link_path))
+        else:
+            try:
+                link_path.symlink_to(link_target, target_is_directory=parent)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    pytest.skip("File symlinks require an operating-system privilege")
+                raise
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            for method in ("GET", "PUT"):
+                await send(link, method, "/v1/profiles/" + profile + "/instructions",
+                           {"text": "edit", "revision": hashlib.sha256(b"Private content").hexdigest()})
+                assert (await read_response(reader))[0] in (403, 404)
+        assert (outside / "SOUL.md").read_bytes() == b"Private content"
+
+
+@asynchronous
+async def test_instructions_rate_limit(tmp_path):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            for _ in range(5):
+                await send(link, "GET", "/v1/profiles/default/instructions")
+                assert (await read_response(reader))[0] == 200
+            await send(link, "GET", "/v1/profiles/default/instructions")
+            assert await read_response(reader) == (429, {"error": "instructions_rate_limited"})
+        rows = [json.loads(line) for line in bridge.audit.path.read_text().splitlines()]
+        assert any(row.get("route") == "/v1/profiles/{id}/instructions" and row.get("profile_id") == "default"
+                   and row.get("status") == 429 for row in rows)
+
+
+@asynchronous
+async def test_instructions_atomic_failure_keeps_original_and_permissions(tmp_path, monkeypatch):
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        if os.name != "nt":
+            soul.chmod(0o640)
+        before = soul.stat().st_mode
+        value = bridge.instructions.call("default")
+        bridge.instructions.call("default", dict(value, text="Saved"))
+        assert soul.stat().st_mode == before
+        def fail(_):
+            raise OSError("Storage unavailable")
+        monkeypatch.setattr(instructions.os, "fsync", fail)
+        with pytest.raises(HTTPError) as error:
+            bridge.instructions.call("default", {"text": "Never committed", "revision": hashlib.sha256(b"Saved").hexdigest()})
+        assert (error.value.status, error.value.message) == (503, "instructions_unavailable")
+        assert soul.read_bytes() == b"Saved"
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+@asynchronous
+async def test_instructions_rechecks_external_edit_before_commit(tmp_path, monkeypatch):
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        original_fsync = instructions.os.fsync
+        def edit(fd):
+            original_fsync(fd)
+            soul.write_bytes(b"Concurrent edit")
+        monkeypatch.setattr(instructions.os, "fsync", edit)
+        with pytest.raises(HTTPError) as error:
+            bridge.instructions.call("default", {"text": "Phone edit", "revision": hashlib.sha256(b"Original").hexdigest()})
+        assert (error.value.status, error.value.message) == (409, "instructions_conflict")
+        assert soul.read_bytes() == b"Concurrent edit"
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+def test_instructions_reparse_attribute_denied():
+    from types import SimpleNamespace
+    import stat
+    from rasul_bridge.instructions import _safe
+    with pytest.raises(HTTPError) as error:
+        _safe(SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_file_attributes=0x400))
+    assert (error.value.status, error.value.message) == (403, "instructions_unsafe_path")
+
+
+@asynchronous
+async def test_instructions_replacement_failure_cannot_remove_original(tmp_path, monkeypatch):
+    import ctypes
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        real_kernel = instructions._kernel
+        class Kernel:
+            def __getattr__(self, name):
+                return getattr(real_kernel(), name)
+            def ReplaceFileW(self, target, replacement, *_):
+                # Documented failure 1176 can remove the destination without a backup.
+                Path(target).unlink()
+                ctypes.set_last_error(1176)
+                return 0
+        monkeypatch.setattr(instructions, "_kernel", Kernel)
+        try:
+            bridge.instructions.call("default", {"text": "Replacement", "revision": hashlib.sha256(b"Original").hexdigest()})
+        except HTTPError as error:
+            assert error.status == 503
+            assert soul.read_bytes() == b"Original"
+        else:
+            assert soul.read_bytes() == b"Replacement"
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+@asynchronous
+async def test_instructions_leaf_junction_denied(tmp_path):
+    async with running(tmp_path) as (bridge, _):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        soul = bridge.config.hermes_home / "SOUL.md"
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(outside), str(soul))
+        else:
+            soul.symlink_to(outside, target_is_directory=True)
+        for body in (None, {"text": "edit", "revision": hashlib.sha256(b"").hexdigest()}):
+            with pytest.raises(HTTPError) as error:
+                bridge.instructions.call("default", body)
+            assert (error.value.status, error.value.message) == (403, "instructions_unsafe_path")
+        assert list(outside.iterdir()) == []
+
+
+@asynchronous
+async def test_instructions_preserves_protected_file_dacl(tmp_path):
+    if os.name != "nt":
+        async with running(tmp_path) as (bridge, _):
+            soul = bridge.config.hermes_home / "SOUL.md"
+            soul.write_bytes(b"Original")
+            soul.chmod(0o600)
+            before = soul.stat().st_mode
+            bridge.instructions.call("default", {"text": "Saved", "revision": hashlib.sha256(b"Original").hexdigest()})
+            assert soul.stat().st_mode == before
+            assert soul.read_bytes() == b"Saved"
+        return
+    import ctypes
+    from ctypes import wintypes as w
+    from rasul_bridge.storage import current_sid, windows_api
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        kernel, security = windows_api()
+        descriptor = w.LPVOID()
+        assert security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            "D:P(A;;FA;;;" + current_sid() + ")", 1, ctypes.byref(descriptor), None)
+        try:
+            assert security.SetFileSecurityW(str(soul), 0x80000004, descriptor)
+        finally:
+            kernel.LocalFree(descriptor)
+        security.GetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, w.LPVOID, w.DWORD, ctypes.POINTER(w.DWORD)]
+        def permissions():
+            length = w.DWORD()
+            security.GetFileSecurityW(str(soul), 4, None, 0, ctypes.byref(length))
+            data = ctypes.create_string_buffer(length.value)
+            assert security.GetFileSecurityW(str(soul), 4, data, length, ctypes.byref(length))
+            return data.raw
+        before = permissions()
+        bridge.instructions.call("default", {"text": "Saved", "revision": hashlib.sha256(b"Original").hexdigest()})
+        assert permissions() == before
+        assert soul.read_bytes() == b"Saved"
+
+
+@asynchronous
+async def test_instructions_replace_error_keeps_original(tmp_path, monkeypatch):
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        def fail(*args, **kwargs):
+            raise OSError("Replacement unavailable")
+        monkeypatch.setattr(instructions.os, "replace", fail)
+        with pytest.raises(HTTPError) as error:
+            bridge.instructions.call("default", {"text": "Not saved", "revision": hashlib.sha256(b"Original").hexdigest()})
+        assert (error.value.status, error.value.message) == (503, "instructions_unavailable")
+        assert soul.read_bytes() == b"Original"
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+@asynchronous
+async def test_instructions_hardlink_denied(tmp_path, method):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"Private content")
+        soul = bridge.config.hermes_home / "SOUL.md"
+        os.link(outside, soul)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, method, "/v1/profiles/default/instructions",
+                       {"text": "edit", "revision": hashlib.sha256(b"Private content").hexdigest()})
+            assert await read_response(reader) == (403, {"error": "instructions_unsafe_path"})
+        assert outside.read_bytes() == soul.read_bytes() == b"Private content"
+        assert soul.stat().st_nlink == 2
+
+
+@asynchronous
+async def test_instructions_rechecks_hardlink_before_commit(tmp_path, monkeypatch):
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        outside = tmp_path / "outside"
+        original_fsync = instructions.os.fsync
+        def link(fd):
+            original_fsync(fd)
+            if not outside.exists():
+                os.link(soul, outside)
+        monkeypatch.setattr(instructions.os, "fsync", link)
+        with pytest.raises(HTTPError) as error:
+            bridge.instructions.call("default", {"text": "edit", "revision": hashlib.sha256(b"Original").hexdigest()})
+        assert (error.value.status, error.value.message) == (403, "instructions_unsafe_path")
+        assert outside.read_bytes() == soul.read_bytes() == b"Original"
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+@asynchronous
+async def test_instructions_hardlink_handle_denied(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"Private content")
+        os.link(outside, bridge.config.hermes_home / "SOUL.md")
+        original_fstat = os.fstat
+        def one_link(fd):
+            info = original_fstat(fd)
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=getattr(info, "st_file_attributes", 0),
+                                   st_nlink=1 if os.name == "nt" else info.st_nlink)
+        monkeypatch.setattr(instructions.os, "fstat", one_link)
+        with pytest.raises(HTTPError) as error:
+            bridge.instructions.call("default")
+        assert (error.value.status, error.value.message) == (403, "instructions_unsafe_path")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux access ACL")
+@pytest.mark.parametrize("failure", [None, "read", "write"])
+@asynchronous
+async def test_instructions_preserves_access_acl(tmp_path, monkeypatch, failure):
+    import errno
+    import shutil
+    import subprocess
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        if shutil.which("setfacl"):
+            subprocess.run(["setfacl", "-m", "u:65534:r--", str(soul)], check=True)
+            expected = os.getxattr(soul, "system.posix_acl_access")
+            getxattr, setxattr = os.getxattr, os.setxattr
+        else:
+            expected = b"access rules"
+            stored = {}
+            def getxattr(fd, name):
+                assert name == "system.posix_acl_access"
+                return expected
+            def setxattr(fd, name, value):
+                assert name == "system.posix_acl_access"
+                stored[os.fstat(fd).st_ino] = value
+        calls = []
+        def read(fd, name):
+            calls.append("read")
+            if failure == "read":
+                raise OSError(errno.EACCES, "Access rules unavailable")
+            return getxattr(fd, name)
+        def write(fd, name, value):
+            calls.append("write")
+            if failure == "write":
+                raise OSError(errno.EACCES, "Access rules unavailable")
+            return setxattr(fd, name, value)
+        before = soul.stat()
+        monkeypatch.setattr(instructions.os, "getxattr", read)
+        monkeypatch.setattr(instructions.os, "setxattr", write)
+        body = {"text": "Saved", "revision": hashlib.sha256(b"Original").hexdigest()}
+        if failure:
+            with pytest.raises(HTTPError) as error:
+                bridge.instructions.call("default", body)
+            assert (error.value.status, error.value.message) == (503, "instructions_unavailable")
+            assert soul.read_bytes() == b"Original"
+            assert soul.stat().st_ino == before.st_ino
+        else:
+            assert bridge.instructions.call("default", body) == {"revision": hashlib.sha256(b"Saved").hexdigest()}
+            assert calls == ["read", "write"]
+            if shutil.which("setfacl"):
+                assert getxattr(soul, "system.posix_acl_access") == expected
+            else:
+                assert stored[soul.stat().st_ino] == expected
+            assert soul.stat().st_mode == before.st_mode
+            assert (soul.stat().st_uid, soul.stat().st_gid) == (before.st_uid, before.st_gid)
+            assert soul.read_bytes() == b"Saved"
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux access ACL")
+@pytest.mark.parametrize("failure", [None, "read", "write"])
+@asynchronous
+async def test_instructions_removes_inherited_access_acl(tmp_path, monkeypatch, failure):
+    import errno
+    import subprocess
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        subprocess.run(["setfacl", "-m", "d:u:65534:r--", str(soul.parent)], check=True)
+        soul.write_bytes(b"Original")
+        subprocess.run(["setfacl", "-b", str(soul)], check=True)
+        soul.chmod(0o640)
+        with pytest.raises(OSError) as error:
+            os.getxattr(soul, "system.posix_acl_access")
+        assert error.value.errno == errno.ENODATA
+        before = soul.stat()
+        remove = os.removexattr
+        calls = []
+        def write(fd, name):
+            assert isinstance(fd, int)
+            assert name == "system.posix_acl_access"
+            calls.append(fd)
+            if failure:
+                raise OSError(errno.EACCES if failure == "read" else errno.EIO,
+                              "Access rules unavailable")
+            return remove(fd, name)
+        monkeypatch.setattr(instructions.os, "removexattr", write)
+        body = {"text": "Saved", "revision": hashlib.sha256(b"Original").hexdigest()}
+        if failure:
+            with pytest.raises(HTTPError) as error:
+                bridge.instructions.call("default", body)
+            assert (error.value.status, error.value.message) == (503, "instructions_unavailable")
+            assert soul.read_bytes() == b"Original"
+            assert soul.stat().st_ino == before.st_ino
+        else:
+            assert bridge.instructions.call("default", body) == {"revision": hashlib.sha256(b"Saved").hexdigest()}
+            assert soul.read_bytes() == b"Saved"
+        acl = subprocess.run(["getfacl", "-cpn", str(soul)], check=True,
+                             capture_output=True, text=True).stdout
+        print(acl, end="")
+        print(f"mode={soul.stat().st_mode & 0o777:04o}")
+        assert "user:65534:" not in acl
+        assert soul.stat().st_mode == before.st_mode
+        assert (soul.stat().st_uid, soul.stat().st_gid) == (before.st_uid, before.st_gid)
+        assert len(calls) == 1
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux access ACL")
+@pytest.mark.parametrize("data", ["ENODATA", "ENOTSUP"])
+@pytest.mark.parametrize("failure", ["ENODATA", "ENOTSUP"])
+@asynchronous
+async def test_instructions_absent_access_acl(tmp_path, monkeypatch, data, failure):
+    import errno
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        soul.chmod(0o640)
+        calls = []
+        def read(fd, name):
+            raise OSError(getattr(errno, data), "Access rules unavailable")
+        def write(fd, name):
+            assert isinstance(fd, int)
+            assert name == "system.posix_acl_access"
+            calls.append(fd)
+            raise OSError(getattr(errno, failure), "Access rules unavailable")
+        monkeypatch.setattr(instructions.os, "getxattr", read)
+        monkeypatch.setattr(instructions.os, "removexattr", write)
+        body = {"text": "Saved", "revision": hashlib.sha256(b"Original").hexdigest()}
+        assert bridge.instructions.call("default", body) == {"revision": hashlib.sha256(b"Saved").hexdigest()}
+        assert soul.read_bytes() == b"Saved"
+        assert soul.stat().st_mode & 0o777 == 0o640
+        assert len(calls) == 1
+        assert not list(soul.parent.glob(".instructions-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory durability")
+@asynchronous
+async def test_instructions_directory_fsync_failure_is_committed(tmp_path, monkeypatch):
+    import stat
+    import rasul_bridge.instructions as instructions
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        soul = bridge.config.hermes_home / "SOUL.md"
+        soul.write_bytes(b"Original")
+        original_fsync = instructions.os.fsync
+        failed = []
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                failed.append(fd)
+                raise OSError("Directory durability unavailable")
+            original_fsync(fd)
+        monkeypatch.setattr(instructions.os, "fsync", sync)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "PUT", "/v1/profiles/default/instructions",
+                       {"text": "Saved", "revision": hashlib.sha256(b"Original").hexdigest()})
+            assert await read_response(reader) == (200, {"revision": hashlib.sha256(b"Saved").hexdigest()})
+        assert len(failed) == 1
+        assert soul.read_bytes() == b"Saved"
+        assert not list(soul.parent.glob(".instructions-*"))

@@ -120,6 +120,7 @@ private val TABS = listOf(
 private const val CHAT = "chat/{id}?run_profile={run_profile}&newSession={newSession}&session={session}"
 private const val BRIDGE_CHAT = "bridge-chat/{bridge}/{profile}?newSession={newSession}&session={session}"
 private const val BRIDGE_DETAIL = "bridge-detail/{id}"
+private const val INSTRUCTIONS = "instructions?bridge={bridge}&profile={profile}&name={name}"
 
 @Composable
 fun RasulNav(
@@ -308,6 +309,28 @@ fun RasulNav(
             }
             composable(SEARCH) { SearchDestination(container, nav, sharedOwner) }
             composable(PRIVACY) { PrivacyScreen(onBack = { nav.popBackStack() }) }
+            composable(INSTRUCTIONS, arguments = listOf(
+                navArgument("bridge") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("profile") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("name") { type = NavType.StringType; defaultValue = "" },
+            )) { entry ->
+                val bridge = entry.arguments?.getString("bridge")
+                val profile = entry.arguments?.getString("profile")
+                val name = entry.arguments?.getString("name").orEmpty()
+                val vm: app.rasul.bridge.InstructionsViewModel = viewModel(factory = viewModelFactory {
+                    initializer {
+                        app.rasul.bridge.InstructionsViewModel(if (bridge == null) null else {
+                            {
+                                val saved = container.bridges.get(bridge)
+                                    ?: throw app.rasul.bridge.InstructionsException(app.rasul.bridge.InstructionsError.BridgeRemoved)
+                                app.rasul.bridge.BridgeInstructionsApi(container.bridgeClients.client(saved).client,
+                                    profile ?: throw app.rasul.bridge.InstructionsException(app.rasul.bridge.InstructionsError.InvalidRequest))
+                            }
+                        })
+                    }
+                })
+                app.rasul.bridge.InstructionsScreen(vm, name, onBack = { nav.popBackStack() })
+            }
             composable(BRIDGE_CHAT, arguments = listOf(
                 navArgument("bridge") { type = NavType.StringType }, navArgument("profile") { type = NavType.StringType },
                 navArgument("newSession") { type = NavType.StringType; nullable = true; defaultValue = null },
@@ -337,7 +360,9 @@ fun RasulNav(
                         })
                     }
                     ChatScreen(vm = model, title = name, onBack = { nav.popBackStack() },
-                        runs = container.runs, modelOptionsLoader = optionsLoader)
+                        runs = container.runs, modelOptionsLoader = optionsLoader,
+                        onInstructions = { nav.navigate("instructions?bridge=" + Uri.encode(bridge) + "&profile=" +
+                            Uri.encode(profile) + "&name=" + Uri.encode(name)) })
                 }
             }
             composable(CHAT, arguments = listOf(
@@ -368,7 +393,8 @@ fun RasulNav(
                         })
                     }
                     ChatScreen(vm = model, title = name, onBack = { nav.popBackStack() },
-                        runs = container.runs, modelOptionsLoader = optionsLoader)
+                        runs = container.runs, modelOptionsLoader = optionsLoader,
+                        onInstructions = { nav.navigate("instructions?name=" + Uri.encode(name)) })
                 }
             }
             composable(
@@ -448,7 +474,7 @@ private fun SkillsToolsDestination(picker: PcPicker, container: AppContainer, on
                 stringResource(R.string.ux3b_skills_tools_title),
                 actions = {
                     IconButton(onClick = onBack) {
-                        Icon(RasulIcons.Chev, contentDescription = stringResource(R.string.back), tint = Rasul.colors.accent)
+                        Icon(RasulIcons.Back, contentDescription = stringResource(R.string.back), tint = Rasul.colors.accent)
                     }
                 },
             )

@@ -3,8 +3,10 @@ package app.rasul.chat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -35,6 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
@@ -56,14 +59,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -100,6 +107,7 @@ fun ChatScreen(
     onBack: () -> Unit,
     runs: RunsClient,
     modelOptionsLoader: suspend (Boolean) -> HermesResult<ModelOptionsDto>,
+    onInstructions: () -> Unit = {},
 ) {
     val state by vm.state.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -127,6 +135,7 @@ fun ChatScreen(
         state = state,
         title = title,
         onBack = onBack,
+        onInstructions = onInstructions,
         onDraft = vm::onDraft,
         onSend = {
             if (android.os.Build.VERSION.SDK_INT >= 33 && !preferences.getBoolean("asked", false) && state.draft.isNotBlank()) {
@@ -155,7 +164,7 @@ fun ChatScreen(
 }
 
 @Composable
-private fun ChatScreenContent(
+internal fun ChatScreenContent(
     state: ChatState,
     title: String,
     onBack: () -> Unit,
@@ -170,6 +179,7 @@ private fun ChatScreenContent(
     selectedModel: RunModelSelection?,
     tokenUsage: TokenUsageSummary?,
     onSelectModel: (RunModelSelection?) -> Unit,
+    onInstructions: () -> Unit = {},
 ) {
     val colors = Rasul.colors
     var hiddenFor by remember { mutableStateOf<ApprovalUi?>(null) }
@@ -203,6 +213,7 @@ private fun ChatScreenContent(
             onBack = onBack,
             onChooseModel = { modelPickerOpen = true },
             onShowUsage = { tokenUsageOpen = true },
+            onInstructions = onInstructions,
         )
         when (val load = state.load) {
             ChatLoad.Loading -> Box(
@@ -259,6 +270,9 @@ private fun ChatScreenContent(
                 onSend = onSend,
                 sending = state.run != null && state.run?.runId == null,
                 steering = state.run?.runId != null,
+                modelName = selectedModel?.model ?: stringResource(R.string.ux3b_model_server_default),
+                modelPickerEnabled = modelPickerEnabled,
+                onChooseModel = { modelPickerOpen = true },
             )
         }
     }
@@ -297,7 +311,7 @@ private fun ChatScreenContent(
 }
 
 @Composable
-private fun ChatTopBar(
+internal fun ChatTopBar(
     title: String,
     active: Boolean,
     selectedModel: String?,
@@ -305,8 +319,11 @@ private fun ChatTopBar(
     onBack: () -> Unit,
     onChooseModel: () -> Unit,
     onShowUsage: () -> Unit,
+    onInstructions: () -> Unit = {},
 ) {
     val colors = Rasul.colors
+    val backIcon = RasulIcons.Back
+    val headerName = title.ifBlank { stringResource(R.string.instructions_title) }
     var menuExpanded by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(horizontal = 8.dp, vertical = 4.dp).heightIn(min = 52.dp),
@@ -315,10 +332,10 @@ private fun ChatTopBar(
     ) {
         IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
             Icon(
-                RasulIcons.Chev,
+                backIcon,
                 contentDescription = stringResource(R.string.back),
                 tint = colors.accent,
-                modifier = Modifier.size(26.dp),
+                modifier = Modifier.size(26.dp).testTag(backIcon.name),
             )
         }
         BotAvatar(
@@ -327,8 +344,10 @@ private fun ChatTopBar(
             working = active,
         )
         Column(
-            Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            Modifier.weight(1f).heightIn(min = 48.dp)
+                .semantics { contentDescription = headerName }
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onInstructions),
+            verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterVertically),
         ) {
             Text(
                 title,
@@ -706,49 +725,90 @@ private fun Composer(
     onSend: () -> Unit,
     sending: Boolean,
     steering: Boolean,
+    modelName: String,
+    modelPickerEnabled: Boolean,
+    onChooseModel: () -> Unit,
 ) {
     val colors = Rasul.colors
     val sendLabel = stringResource(R.string.chat_send)
+    val chipAccessibilityName = stringResource(R.string.ux3b_model_chip_accessibility, modelName)
+    val unavailableLabel = stringResource(R.string.ux3b_model_selection_unavailable)
     val enabled = draft.isNotBlank() && !sending
-    Row(
+    Column(
         Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
             .padding(horizontal = 12.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        BasicTextField(
-            value = draft,
-            onValueChange = onDraft,
-            modifier = Modifier.weight(1f).heightIn(min = 40.dp)
-                .background(colors.fill, RoundedCornerShape(22.dp))
-                .padding(horizontal = 16.dp, vertical = 11.dp),
-            textStyle = RasulType.body.copy(fontSize = 15.sp, color = colors.ink),
-            cursorBrush = SolidColor(colors.accent),
-            maxLines = 5,
-            decorationBox = { innerTextField ->
-                Box(contentAlignment = Alignment.CenterStart) {
-                    if (draft.isEmpty()) {
-                        Text(
-                            stringResource(if (steering) R.string.chat_hint_steer else R.string.chat_hint),
-                            style = RasulType.body.copy(fontSize = 15.sp),
-                            color = colors.muted,
-                        )
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val chipMaxWidth = minOf(280.dp, maxWidth * 0.7f)
+            Row(
+                Modifier.minimumInteractiveComponentSize().widthIn(max = chipMaxWidth)
+                    .clip(RasulShapes.chip)
+                    .background(colors.fill)
+                    .clickable(enabled = modelPickerEnabled, role = Role.Button, onClick = onChooseModel)
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = chipAccessibilityName
+                        if (!modelPickerEnabled) {
+                            disabled()
+                            stateDescription = unavailableLabel
+                        }
                     }
-                    innerTextField()
-                }
-            },
-        )
-        Box(
-            Modifier.size(48.dp)
-                .semantics { contentDescription = sendLabel }
-                .clickable(enabled = enabled, role = Role.Button, onClick = onSend),
-            contentAlignment = Alignment.Center,
+                    .testTag("ux3b_model_chip")
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    modelName,
+                    modifier = Modifier.weight(1f, fill = false)
+                        .testTag("ux3b_model_chip_label"),
+                    style = RasulType.chip,
+                    color = colors.ink,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Icon(RasulIcons.ChevDown, contentDescription = null, tint = colors.muted, modifier = Modifier.size(14.dp).testTag("ux3b_model_chip_chevron"))
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            BasicTextField(
+                value = draft,
+                onValueChange = onDraft,
+                modifier = Modifier.weight(1f).heightIn(min = 40.dp).testTag("chat_message_field")
+                    .background(colors.fill, RoundedCornerShape(22.dp))
+                    .padding(horizontal = 16.dp, vertical = 11.dp),
+                textStyle = RasulType.body.copy(fontSize = 15.sp, color = colors.ink),
+                cursorBrush = SolidColor(colors.accent),
+                maxLines = 5,
+                decorationBox = { innerTextField ->
+                    Box(contentAlignment = Alignment.CenterStart) {
+                        if (draft.isEmpty()) {
+                            Text(
+                                stringResource(if (steering) R.string.chat_hint_steer else R.string.chat_hint),
+                                style = RasulType.body.copy(fontSize = 15.sp),
+                                color = colors.muted,
+                            )
+                        }
+                        innerTextField()
+                    }
+                },
+            )
             Box(
-                Modifier.size(40.dp).background(colors.accent, CircleShape),
+                Modifier.size(48.dp)
+                    .semantics { contentDescription = sendLabel }
+                    .clickable(enabled = enabled, role = Role.Button, onClick = onSend),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("\u2191", style = RasulType.button.copy(fontSize = 22.sp), color = colors.onAccent)
+                Box(
+                    Modifier.size(40.dp).background(colors.accent, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("\u2191", style = RasulType.button.copy(fontSize = 22.sp), color = colors.onAccent)
+                }
             }
         }
     }
@@ -950,6 +1010,7 @@ private fun ChatPreviewBody(kind: ChatPreviewKind) = RasulTheme(dark = false) {
     ChatScreenContent(
         state = ChatState(
             load = ChatLoad.Ready,
+            sessionId = if (kind == ChatPreviewKind.Idle) "sample-session" else null,
             messages = messages,
             run = run,
             approvals = approvals,
@@ -965,7 +1026,7 @@ private fun ChatPreviewBody(kind: ChatPreviewKind) = RasulTheme(dark = false) {
         onAnswerApproval = { _, _ -> },
         onRetryHistory = {},
         modelOptionsLoader = { HermesResult.Err(HermesError.NotFound) },
-        selectedModel = null,
+        selectedModel = if (kind == ChatPreviewKind.Idle) RunModelSelection("example", "Example model") else null,
         tokenUsage = null,
         onSelectModel = {},
     )

@@ -19,6 +19,7 @@ from websockets.exceptions import ConnectionClosed
 from .audit import Audit
 from .http import HTTPError, Reader, chunk, request, response, stream_start
 from .limits import Limits
+from .instructions import Instructions
 from .pairing import Pairing
 from .profiles import Profiles
 from .proxy import StreamAborted, Upstream, allowed
@@ -70,6 +71,7 @@ class Bridge:
         self.audit = Audit(store)
         self.upstream = Upstream(config.hermes_url)
         self.profiles = Profiles(store, config, self.upstream, run=run)
+        self.instructions = Instructions(self.profiles)
         self.connections = {}
         self.pending = {}
         self.anonymous = {}
@@ -309,6 +311,25 @@ class Bridge:
                     raise HTTPError(400, "Invalid profile request") from None
                 status = 202
                 await response(link, status, value)
+            elif method in ("GET", "PUT") and re.fullmatch(
+                    r"/v1/profiles/([a-z0-9][a-z0-9_-]{0,63})/instructions", target):
+                route = "/v1/profiles/{id}/instructions"
+                profile = target.split("/")[3]
+                if not self.limits.instructions(device):
+                    raise HTTPError(429, "instructions_rate_limited")
+                value = None
+                if method == "PUT":
+                    try:
+                        if _has_unsupported_charset(head):
+                            raise ValueError
+                        value = json.loads(body.decode("utf-8", errors="strict"))
+                        if value is None:
+                            raise ValueError
+                    except (UnicodeError, ValueError, TypeError):
+                        raise HTTPError(400, "instructions_invalid") from None
+                value = self.instructions.call(profile, value)
+                status = 200
+                await response(link, status, value)
             elif method == "GET" and re.fullmatch(r"/v1/operations/[0-9a-f]{32}", target):
                 route, status = "/v1/operations/{id}", 200
                 await response(link, status, self.profiles.operation(path.rsplit("/", 1)[1]))
@@ -358,9 +379,10 @@ class Bridge:
             await response(link, status, {"error": "Upstream unavailable"})
         finally:
             # Method is parser-validated; route is always a static template.
-            if (device is None and status >= 400) or status == 429:
+            summarized = (device is None and status >= 400) or status == 429
+            if summarized:
                 self.audit_call("reject")
-            else:
+            if not summarized or (device is not None and route == "/v1/profiles/{id}/instructions"):
                 self.audit_call("record", device, method, route, profile, status)
 
     async def events(self, link):

@@ -106,7 +106,7 @@ fun SkillsToolsScreen(target: ActiveTarget.Ready, client: HermesClient, onBack: 
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                Icon(RasulIcons.Chev, contentDescription = stringResource(R.string.back), tint = Rasul.colors.accent)
+                Icon(RasulIcons.Back, contentDescription = stringResource(R.string.back), tint = Rasul.colors.accent)
             }
             Column(Modifier.weight(1f)) {
                 Text(stringResource(R.string.ux3b_skills_tools_title), style = RasulType.rowTitle, color = Rasul.colors.ink)

@@ -70,6 +70,7 @@ object RasulIcons {
     )
     val ChevDown = icon("chevd", 14f, 1.46f, false, "M3.5 5.25L7 8.75L10.5 5.25")
     val Chev = icon("chev", 18f, 1.5f, true, "M6.75 13.5L11.25 9L6.75 4.5")
+    val Back = icon("back", 18f, 1.5f, true, "M11.25 4.5L6.75 9L11.25 13.5")
     val Clock = icon(
         "clock", 20f, 1.67f, false,
         "M10 17.5C14.14 17.5 17.5 14.14 17.5 10C17.5 5.86 14.14 2.5 10 2.5C5.86 2.5 2.5 5.86 2.5 10C2.5 14.14 5.86 17.5 10 17.5Z",

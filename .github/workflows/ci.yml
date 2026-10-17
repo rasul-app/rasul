@@ -38,3 +38,35 @@ jobs:
             app/build/outputs/roborazzi
           if-no-files-found: warn
           retention-days: 7
+
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: bridge
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: bridge/pyproject.toml
+      - name: Install dependencies
+        run: |
+          python -m pip install --require-hashes -r bridge/requirements.txt
+          python -m pip install pytest
+          sudo apt-get update
+          sudo apt-get install -y acl
+      - name: Run bridge checks
+        run: python -m pytest -q -rs --junitxml=bridge-results.xml bridge/tests
+      - name: Require instructions security coverage
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("bridge-results.xml").findall(".//testcase")
+          instructions = [case for case in cases if case.attrib["name"].startswith("test_instructions_")]
+          assert instructions, "Instructions checks were not collected"
+          skipped = [case.attrib["name"] for case in instructions if case.find("skipped") is not None]
+          assert not skipped, "Instructions checks skipped: " + ", ".join(skipped)
+          print(f"Instructions checks: {len(instructions)}; skipped: {len(skipped)}")
+          PY
