@@ -12,7 +12,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
 
 /** One row of GET /api/sessions (server `_session_response`). Unknown keys are ignored. */
 @Serializable
@@ -34,6 +36,16 @@ data class SessionDto(
 
 @Serializable
 data class SessionListDto(val data: List<SessionDto>)
+
+@Serializable
+data class SessionOneDto(val session: SessionDto)
+
+@Serializable
+private data class SessionDeletedDto(
+    @SerialName("object") val objectType: String? = null,
+    val id: String,
+    val deleted: Boolean,
+)
 
 /** One message of GET /api/sessions/{id}/messages. `content` is a string or a list of parts. */
 @Serializable
@@ -59,11 +71,41 @@ interface SessionsApi {
     suspend fun messages(target: HermesTarget, sessionId: String): HermesResult<List<SessionMessageDto>>
 }
 
-class SessionsClient(private val client: HermesClient) : SessionsApi {
+interface SessionsManagementApi {
+    suspend fun list(target: HermesTarget, limit: Int = 50): HermesResult<List<SessionDto>>
+    suspend fun rename(target: HermesTarget, sessionId: String, title: String): HermesResult<SessionDto>
+    suspend fun delete(target: HermesTarget, sessionId: String): HermesResult<Unit>
+}
+
+class SessionsClient(private val client: HermesClient) : SessionsApi, SessionsManagementApi {
     private val json = Json { ignoreUnknownKeys = true }
 
+    override suspend fun rename(target: HermesTarget, sessionId: String, title: String): HermesResult<SessionDto> {
+        if (!SAFE_ID.matches(sessionId)) return HermesResult.Err(HermesError.NotFound)
+        return decode("api/sessions/{session_id}", client.send(
+            target,
+            "api/sessions/$sessionId",
+            body = buildJsonObject { put("title", title) }.toString(),
+            httpMethod = "PATCH",
+        )) { json.decodeFromString<SessionOneDto>(it).session }
+    }
+
+    override suspend fun delete(target: HermesTarget, sessionId: String): HermesResult<Unit> {
+        if (!SAFE_ID.matches(sessionId)) return HermesResult.Err(HermesError.NotFound)
+        return when (val r = client.send(target, "api/sessions/$sessionId", httpMethod = "DELETE")) {
+            is HermesResult.Err -> r
+            is HermesResult.Ok -> try {
+                val deleted = json.decodeFromString<SessionDeletedDto>(r.value)
+                if (deleted.deleted && deleted.id == sessionId) HermesResult.Ok(Unit)
+                else HermesResult.Err(HermesError.ResourceNotFound)
+            } catch (e: Exception) {
+                HermesResult.Err(HermesError.Incompatible(listOf("api/sessions/{session_id}")))
+            }
+        }
+    }
+
     /** GET /api/sessions (newest activity first, server-side). */
-    suspend fun list(target: HermesTarget, limit: Int = 50): HermesResult<List<SessionDto>> =
+    override suspend fun list(target: HermesTarget, limit: Int): HermesResult<List<SessionDto>> =
         decode("api/sessions", client.send(target, "api/sessions", query = mapOf("limit" to limit.toString()))) {
             json.decodeFromString<SessionListDto>(it).data
         }

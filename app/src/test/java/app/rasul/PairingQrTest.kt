@@ -102,11 +102,12 @@ class PairingQrTest {
     @Test fun everyQrErrorHasItsOwnEnglishAndArabicValue() {
         val app = RuntimeEnvironment.getApplication()
         val arabic = app.createConfigurationContext(Configuration(app.resources.configuration).apply { setLocale(Locale("ar")) })
+        val command = "\u2066rasul-bridge pair\u2069"
         val expected = listOf(
-            "This pairing code is invalid or incomplete. Scan a new code from your computer." to "رمز الإقران غير صالح أو غير مكتمل. امسح رمزًا جديدًا من حاسوبك.",
-            "This pairing code has expired. Create a new code on your computer." to "انتهت صلاحية رمز الإقران. أنشئ رمزًا جديدًا على حاسوبك.",
+            "This pairing code is invalid or incomplete. On your PC, run rasul-bridge pair and scan its QR code." to "رمز الإقران غير صالح أو غير مكتمل. شغّل الأمر $command على حاسوبك وامسح رمز QR الجديد.",
+            "This pairing code has expired. On your PC, run rasul-bridge pair and scan its new QR code." to "انتهت صلاحية رمز الإقران. شغّل الأمر $command على حاسوبك وامسح رمز QR الجديد.",
             "This pairing code uses an unsupported version." to "إصدار رمز الإقران غير مدعوم.",
-            "This pairing code has no server fingerprint. Create a new code on your computer." to "لا يحتوي رمز الإقران على بصمة الخادم. أنشئ رمزًا جديدًا على حاسوبك.",
+            "This pairing code has no server fingerprint. On your PC, run rasul-bridge pair and scan its QR code." to "رمز الإقران بلا بصمة للخادم. شغّل الأمر $command على حاسوبك وامسح رمز QR الجديد.",
             "This pairing code has an invalid bridge address. Only WS or WSS bridge addresses are supported." to "عنوان الجسر في رمز الإقران غير صالح. يُسمح فقط بعناوين WS أو WSS.",
         )
         PairingQrError.entries.zip(expected).forEach { (error, messages) ->

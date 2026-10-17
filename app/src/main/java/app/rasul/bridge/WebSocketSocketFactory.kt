@@ -147,6 +147,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
     private var webSocket: WebSocket? = null
     private var failure: IOException? = null
     private var eof = false
+    private var eofDelivered = false
     @Volatile private var closed = false
     @Volatile private var connected = false
     @Volatile private var timeout = 0
@@ -215,7 +216,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                 while (received.size == 0L) {
                     failure?.let { throw it }
                     if (closed) throw SocketException("Socket closed")
-                    if (eof) return -1
+                    if (eof) { eofDelivered = true; return -1 }
                     val remaining = deadline - System.nanoTime()
                     if (remaining <= 0) throw SocketTimeoutException("Bridge read timed out")
                     try {
@@ -225,7 +226,6 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                         throw IOException("Bridge read interrupted", e)
                     }
                 }
-                failure?.let { throw it }
                 if (closed) throw SocketException("Socket closed")
                 return received.read(bytes, offset, length)
             }
@@ -239,7 +239,9 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
             require(offset >= 0 && length >= 0 && offset <= bytes.size - length)
             synchronized(monitor) {
                 failure?.let { throw it }
-                if (!connected || closed || eof) throw SocketException("Socket is not open")
+                if (!connected || closed || eofDelivered) throw SocketException("Socket is not open")
+                // A peer close must not hide queued TLS records behind a write failure.
+                if (eof) return
                 val ws = webSocket ?: throw SocketException("Socket is not open")
                 if (length > MAX_BUFFER || ws.queueSize() + length > MAX_BUFFER) throw IOException("Bridge send buffer exceeded")
                 var cursor = offset

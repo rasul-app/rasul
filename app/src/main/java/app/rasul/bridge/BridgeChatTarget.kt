@@ -25,4 +25,6 @@ fun bridgeRunMemory(store: ConnectionStore, bridgeId: String, profileId: String)
     } ?: Anchor.Unknown
     override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) =
         store.setActiveRun(id, profileId, runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null)
+    override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor) =
+        store.setCurrentSessionRun(id, profileId, sessionId, runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null)
 }

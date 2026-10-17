@@ -2,10 +2,13 @@ package app.rasul.ui.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.absolutePadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -23,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +36,8 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,6 +46,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
@@ -53,6 +60,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogWindowProvider
 import app.rasul.ui.theme.Rasul
 import app.rasul.ui.theme.RasulShapes
 import app.rasul.ui.theme.RasulType
@@ -78,6 +86,7 @@ fun avatarStyleFor(key: String): AvatarStyle {
 @Composable
 fun BotAvatar(style: AvatarStyle, size: Dp = 48.dp, working: Boolean = false, modifier: Modifier = Modifier) {
     val accent = Rasul.colors.accent
+    val onAccent = Rasul.colors.onAccent
     Box(modifier.size(size)) {
         Canvas(Modifier.size(size)) {
             val s = this.size.width / 48f
@@ -99,7 +108,7 @@ fun BotAvatar(style: AvatarStyle, size: Dp = 48.dp, working: Boolean = false, mo
                 drawCircle(Color.White, bs / 2, o + Offset(bs / 2, bs / 2))
                 drawCircle(accent, bs / 2 - 1f * s, o + Offset(bs / 2, bs / 2))
                 for (dx in listOf(5.08f, 10.08f, 15.08f)) {
-                    drawCircle(Color.White, 1.5f * s, o + Offset(dx * s, 10.08f * s))
+                    drawCircle(onAccent, 1.5f * s, o + Offset(dx * s, 10.08f * s))
                 }
             }
         }
@@ -109,14 +118,14 @@ fun BotAvatar(style: AvatarStyle, size: Dp = 48.dp, working: Boolean = false, mo
 // ---------- header, glass pill ----------
 
 @Composable
-fun ScreenHeader(title: String, modifier: Modifier = Modifier, actions: (@Composable RowScope.() -> Unit)? = null) {
+fun ScreenHeader(title: String, modifier: Modifier = Modifier, contentPadding: PaddingValues = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 6.dp), actionHorizontalPadding: Dp = 8.dp, actionInset: Dp = 5.dp, rightInset: Dp = 0.dp, actions: (@Composable RowScope.() -> Unit)? = null) {
     Row(
-        modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 6.dp),
+        modifier.fillMaxWidth().padding(contentPadding).absolutePadding(right = rightInset),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(title, style = RasulType.title, color = Rasul.colors.ink, modifier = Modifier.weight(1f, fill = false))
-        if (actions != null) GlassPill(content = actions)
+        Text(title, style = RasulType.title, color = Rasul.colors.ink, modifier = Modifier.weight(1f, fill = false), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        if (actions != null) GlassPill(horizontalPadding = actionHorizontalPadding, verticalInset = actionInset, content = actions)
     }
 }
 
@@ -125,18 +134,18 @@ fun ScreenHeader(title: String, modifier: Modifier = Modifier, actions: (@Compos
  * Children carry their own 48 dp touch target; the capsule is drawn 5 dp inside the 48 dp box so its size stays 38.
  */
 @Composable
-fun GlassPill(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+fun GlassPill(modifier: Modifier = Modifier, horizontalPadding: Dp = 8.dp, verticalInset: Dp = 5.dp, content: @Composable RowScope.() -> Unit) {
     val c = Rasul.colors
     Box(modifier.heightIn(min = 48.dp)) {
         Box(
-            Modifier.matchParentSize().padding(vertical = 5.dp)
+            Modifier.matchParentSize().padding(vertical = verticalInset)
                 .shadow(8.dp, RasulShapes.glassPill, ambientColor = Color(0x1F000000), spotColor = Color(0x1F000000))
                 .background(c.bg, RasulShapes.glassPill)
                 .border(1.dp, c.cardBorder, RasulShapes.glassPill),
         )
         Row(
-            Modifier.padding(horizontal = 14.dp).align(Alignment.Center),
-            horizontalArrangement = Arrangement.spacedBy(18.dp),
+            Modifier.padding(horizontal = horizontalPadding).align(Alignment.Center),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
             content = content,
         )
@@ -165,10 +174,17 @@ fun Hairline(modifier: Modifier = Modifier) {
  * makes the row a radio-style choice for screen readers.
  */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun RasulRow(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String? = null,
     hairlineStart: Dp = 74.dp,
+    hairlineEnd: Dp = 16.dp,
+    minHeight: Dp = 48.dp,
+    gap: Dp = 14.dp,
+    textSpacing: Dp = 3.dp,
     last: Boolean = false,
     contentPadding: PaddingValues = PaddingValues(start = 20.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
     selected: Boolean? = null,
@@ -178,23 +194,31 @@ fun RasulRow(
 ) {
     Column(modifier.fillMaxWidth()) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            Modifier.fillMaxWidth().heightIn(min = minHeight)
                 .then(
                     when {
-                        onClick == null -> Modifier
-                        selected != null -> Modifier.selectable(selected, role = Role.RadioButton, onClick = onClick)
-                        else -> Modifier.clickable(role = Role.Button, onClick = onClick)
+                        onLongClick != null -> Modifier.combinedClickable(
+                            role = Role.Button,
+                            onClickLabel = null,
+                            onLongClickLabel = onLongClickLabel,
+                            onClick = onClick ?: {},
+                            onLongClick = onLongClick,
+                        )
+                        selected != null && onClick != null ->
+                            Modifier.selectable(selected, role = Role.RadioButton, onClick = onClick)
+                        onClick != null -> Modifier.clickable(role = Role.Button, onClick = onClick)
+                        else -> Modifier
                     },
                 )
                 .padding(contentPadding),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(gap),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             leading?.invoke()
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp), content = text)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(textSpacing), content = text)
             trailing?.invoke()
         }
-        if (!last) Hairline(Modifier.padding(start = hairlineStart, end = 16.dp))
+        if (!last) Hairline(Modifier.padding(start = hairlineStart, end = hairlineEnd))
     }
 }
 
@@ -211,7 +235,7 @@ fun RowSub(text: String, color: Color = Rasul.colors.muted, maxLines: Int = 2) =
 enum class ChipKind { Running, Done, Failed, Neutral }
 
 @Composable
-fun StatusChip(text: String, kind: ChipKind) {
+fun StatusChip(text: String, kind: ChipKind, contentPadding: PaddingValues = PaddingValues(horizontal = 10.dp, vertical = 3.dp), modifier: Modifier = Modifier, textAlign: TextAlign = TextAlign.Unspecified) {
     val c = Rasul.colors
     val (bg, fg) = when (kind) {
         ChipKind.Running -> c.accentSoft to c.accent
@@ -220,23 +244,24 @@ fun StatusChip(text: String, kind: ChipKind) {
         ChipKind.Neutral -> c.fill to c.muted
     }
     Text(
-        text, style = RasulType.chip, color = fg,
-        modifier = Modifier.background(bg, RasulShapes.chip).padding(horizontal = 10.dp, vertical = 3.dp),
+        text, style = RasulType.chip, color = fg, textAlign = textAlign,
+        modifier = modifier.background(bg, RasulShapes.chip).padding(contentPadding),
     )
 }
 
 @Composable
 fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, icon: ImageVector? = null) {
     val c = Rasul.colors
+    val col = if (!enabled && c.accent.luminance() > c.onAccent.luminance()) c.ink else c.onAccent
     Row(
         modifier.clip(RasulShapes.button).background(if (enabled) c.accent else c.accent.copy(alpha = 0.4f))
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick).heightIn(min = 48.dp)
-            .padding(horizontal = 28.dp, vertical = 14.dp),
+            .padding(horizontal = 28.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (icon != null) Icon(icon, null, tint = c.onAccent, modifier = Modifier.size(20.dp))
-        Text(text, style = RasulType.button, color = c.onAccent)
+        if (icon != null) Icon(icon, null, tint = col, modifier = Modifier.size(20.dp))
+        Text(text, style = RasulType.button, color = col)
     }
 }
 
@@ -246,16 +271,16 @@ fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modi
     val c = Rasul.colors
     val col = if (enabled) c.accent else c.accent.copy(alpha = 0.4f)
     Box(
-        modifier.clip(RasulShapes.button).border(BorderStroke(1.5.dp, col), RasulShapes.button)
+        modifier.clip(RasulShapes.button).border(BorderStroke(1.dp, col), RasulShapes.button)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick).heightIn(min = 48.dp)
-            .padding(vertical = 13.dp),
+            .padding(vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) { Text(text, style = RasulType.button, color = col) }
 }
 
 /** Small outlined pill button for job actions. */
 @Composable
-fun SmallOutlineButton(text: String, onClick: () -> Unit, enabled: Boolean = true) {
+fun SmallOutlineButton(text: String, onClick: () -> Unit, enabled: Boolean = true, width: Dp? = null) {
     val c = Rasul.colors
     val col = if (enabled) c.accent else c.accent.copy(alpha = 0.4f)
     Box(
@@ -265,7 +290,8 @@ fun SmallOutlineButton(text: String, onClick: () -> Unit, enabled: Boolean = tru
     ) {
         Text(
             text, style = RasulType.buttonSmall, color = col,
-            modifier = Modifier.border(1.dp, col, RasulShapes.filter).padding(horizontal = 14.dp, vertical = 7.dp),
+            modifier = Modifier.then(if (width == null) Modifier else Modifier.width(width)).border(1.dp, col, RasulShapes.filter)
+                .padding(horizontal = if (width == null) 14.dp else 13.dp, vertical = 7.dp),
         )
     }
 }
@@ -298,21 +324,22 @@ fun RasulToggle(checked: Boolean, label: String, enabled: Boolean = true, onChec
 fun <T> SegmentedSwitch(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Unit) {
     val c = Rasul.colors
     Row(
-        Modifier.background(c.fill, RasulShapes.filter).padding(3.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        Modifier.background(c.fill, RasulShapes.filter).padding(8.dp),
     ) {
         options.forEach { (v, label) ->
             val sel = v == selected
             Box(
-                Modifier.minimumInteractiveComponentSize().selectable(sel, role = Role.RadioButton) { onSelect(v) },
+                Modifier.minimumInteractiveComponentSize().widthIn(min = 63.dp).heightIn(min = 48.dp)
+                    .selectable(sel, role = Role.RadioButton) { onSelect(v) },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     label,
-                    style = RasulType.sectionLabel.copy(fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Medium),
+                    style = RasulType.sectionLabel.copy(fontSize = 12.sp, lineHeight = 15.sp, fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Medium),
                     color = if (sel) c.ink else c.muted,
                     modifier = Modifier.clip(RoundedCornerShape(13.dp)).background(if (sel) c.bg else Color.Transparent)
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .widthIn(min = 63.dp).padding(horizontal = 8.dp, vertical = 8.dp),
+                    textAlign = TextAlign.Center,
                 )
             }
         }
@@ -321,17 +348,19 @@ fun <T> SegmentedSwitch(options: List<Pair<T, String>>, selected: T, onSelect: (
 
 /** Filter chip that fills when selected. */
 @Composable
-fun FilterPill(text: String, selected: Boolean, onClick: () -> Unit) {
+fun FilterPill(text: String, selected: Boolean, width: Dp? = null, onClick: () -> Unit) {
     val c = Rasul.colors
     Box(
-        Modifier.minimumInteractiveComponentSize().selectable(selected, role = Role.RadioButton, onClick = onClick),
+        Modifier.then(if (width == null) Modifier.minimumInteractiveComponentSize() else Modifier.width(width).heightIn(min = 48.dp))
+            .selectable(selected, role = Role.RadioButton, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text, style = RasulType.chip.copy(fontSize = 13.sp),
+            text, style = RasulType.chip.copy(fontSize = if (width == null) 13.sp else 12.sp, lineHeight = 15.sp),
+            textAlign = TextAlign.Center,
             color = if (selected) c.bg else c.ink,
-            modifier = Modifier.clip(RasulShapes.filter).background(if (selected) c.ink else c.fill)
-                .padding(horizontal = 14.dp, vertical = 7.dp),
+            modifier = Modifier.then(if (width == null) Modifier else Modifier.width(width)).clip(RasulShapes.filter).background(if (selected) c.ink else c.fill)
+                .padding(horizontal = if (width == null) 14.dp else 8.dp, vertical = if (width == null) 7.dp else 8.dp),
         )
     }
 }
@@ -340,19 +369,22 @@ fun FilterPill(text: String, selected: Boolean, onClick: () -> Unit) {
 
 /** Connection switcher pill with PC icon, name, and chevron. */
 @Composable
-fun PcSwitcher(name: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun PcSwitcher(
+    name: String, onClick: () -> Unit, modifier: Modifier = Modifier,
+    minWidth: Dp = Dp.Unspecified, textStyle: TextStyle? = null, horizontalPadding: Dp = 12.dp, iconSize: Dp = 16.dp,
+) {
     val c = Rasul.colors
     Row(
         modifier.padding(start = 20.dp, end = 20.dp, bottom = 6.dp),
     ) {
         Box(Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button, onClick = onClick)) {
         Row(
-            Modifier.clip(RasulShapes.filter).background(c.fill).padding(horizontal = 12.dp, vertical = 6.dp),
+            Modifier.widthIn(min = minWidth).clip(RasulShapes.filter).background(c.fill).padding(horizontal = horizontalPadding, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(RasulIcons.Pc, null, tint = c.ink, modifier = Modifier.size(16.dp))
-            Text(name, style = RasulType.pill, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Icon(RasulIcons.Pc, null, tint = c.ink, modifier = Modifier.size(iconSize))
+            Text(name, style = textStyle ?: RasulType.pill, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             Icon(RasulIcons.ChevDown, null, tint = c.muted, modifier = Modifier.size(14.dp))
         }
         }
@@ -388,7 +420,7 @@ fun RasulTabBar(tabs: List<RasulTab>, selectedRoute: String?, onSelect: (RasulTa
                     if (t.badge > 0) {
                         Text(
                             t.badge.toString(),
-                            style = TextStyleBadge, color = Color.White, textAlign = TextAlign.Center,
+                            style = TextStyleBadge.copy(fontFamily = RasulType.tab.fontFamily), color = Color.White, textAlign = TextAlign.Center,
                             modifier = Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-6).dp)
                                 .background(c.badge, RoundedCornerShape(10.dp)).padding(horizontal = 4.dp),
                         )
@@ -404,6 +436,13 @@ private val TextStyleBadge = TextStyle(fontSize = 10.sp, fontWeight = FontWeight
 
 // ---------- dialog, sheet ----------
 
+@Composable
+fun DialogScrim() {
+    val view = LocalView.current
+    val alpha = 1f - (1f - Rasul.colors.scrim.alpha) * 0.7f
+    SideEffect { (view.parent as? DialogWindowProvider)?.window?.setDimAmount(alpha) }
+}
+
 /** Confirmation dialog with title, body, and two equally sized actions. */
 @Composable
 fun ConfirmDialog(
@@ -414,27 +453,35 @@ fun ConfirmDialog(
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
     destructive: Boolean = false,
+    contentPadding: PaddingValues = PaddingValues(20.dp),
+    spacing: Dp = 8.dp,
+    actionPadding: Dp = 10.dp,
+    confirmTextStyle: TextStyle? = null,
+    decoration: @Composable () -> Unit = {},
 ) {
     val c = Rasul.colors
     Dialog(onDismissRequest = onCancel) {
-        Column(
-            Modifier.fillMaxWidth().background(c.bg, RasulShapes.dialog).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(title, style = RasulType.dialogTitle, color = c.ink)
-            Text(body, style = RasulType.body, color = c.muted)
-            Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Box(
-                    Modifier.weight(1f).heightIn(min = 48.dp).clip(RasulShapes.dialog).background(c.fill)
-                        .clickable(role = Role.Button, onClick = onCancel).padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) { Text(cancelText, style = RasulType.button, color = c.ink) }
-                Box(
-                    Modifier.weight(1f).heightIn(min = 48.dp).clip(RasulShapes.dialog)
-                        .background(if (destructive) c.danger else c.accent)
-                        .clickable(role = Role.Button, onClick = onConfirm).padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) { Text(confirmText, style = RasulType.button, color = c.onAccent) }
+        decoration()
+        app.rasul.WindowHapticFeedbackProvider {
+            Column(
+                Modifier.fillMaxWidth().background(c.bg, RasulShapes.dialog).padding(contentPadding),
+                verticalArrangement = Arrangement.spacedBy(spacing),
+            ) {
+                Text(title, style = RasulType.dialogTitle, color = c.ink)
+                Text(body, style = RasulType.body, color = c.muted)
+                Row(Modifier.fillMaxWidth().padding(top = actionPadding), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Box(
+                        Modifier.weight(1f).heightIn(min = 48.dp).clip(RasulShapes.dialog).background(c.fill)
+                            .clickable(role = Role.Button, onClick = onCancel).padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(cancelText, style = RasulType.button, color = c.ink) }
+                    Box(
+                        Modifier.weight(1f).heightIn(min = 48.dp).clip(RasulShapes.dialog)
+                            .background(if (destructive) c.danger else c.accent)
+                            .clickable(role = Role.Button, onClick = onConfirm).padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(confirmText, style = confirmTextStyle ?: RasulType.button, color = c.onAccent) }
+                }
             }
         }
     }
@@ -445,16 +492,18 @@ fun ConfirmDialog(
 fun NoticeDialog(text: String, okText: String, onDismiss: () -> Unit) {
     val c = Rasul.colors
     Dialog(onDismissRequest = onDismiss) {
-        Column(
-            Modifier.fillMaxWidth().background(c.bg, RasulShapes.dialog).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(text, style = RasulType.body, color = c.ink)
-            Box(
-                Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp).clip(RasulShapes.dialog).background(c.accent)
-                    .clickable(role = Role.Button, onClick = onDismiss).padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) { Text(okText, style = RasulType.button, color = c.onAccent) }
+        app.rasul.WindowHapticFeedbackProvider {
+            Column(
+                Modifier.fillMaxWidth().background(c.bg, RasulShapes.dialog).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(text, style = RasulType.body, color = c.ink)
+                Box(
+                    Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp).clip(RasulShapes.dialog).background(c.accent)
+                        .clickable(role = Role.Button, onClick = onDismiss).padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text(okText, style = RasulType.button, color = c.onAccent) }
+            }
         }
     }
 }
@@ -468,29 +517,31 @@ fun RasulSheet(title: String, onDismiss: () -> Unit, content: @Composable Column
         onDismissRequest = onDismiss,
         shape = RasulShapes.sheet,
         containerColor = c.bg,
-        scrimColor = Color(0x66000000),
+        scrimColor = c.scrim,
         dragHandle = {
-            Box(Modifier.padding(top = 10.dp, bottom = 12.dp).width(36.dp).height(5.dp).background(c.hairline, RoundedCornerShape(3.dp)))
+            Box(Modifier.padding(top = 12.dp, bottom = 12.dp).width(36.dp).height(5.dp).background(c.hairline, RoundedCornerShape(3.dp)))
         },
     ) {
-        Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 34.dp)) {
-            Text(title, style = RasulType.sheetTitle, color = c.ink, modifier = Modifier.padding(bottom = 6.dp))
-            content()
+        app.rasul.WindowHapticFeedbackProvider {
+            Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 34.dp)) {
+                Text(title, style = RasulType.sheetTitle, color = c.ink, modifier = Modifier.padding(bottom = 6.dp))
+                content()
+            }
         }
     }
 }
 
 /** Rounded fill group for rows in More. */
 @Composable
-fun InsetGroup(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Column(modifier.padding(horizontal = 20.dp).fillMaxWidth().clip(RasulShapes.card).background(Rasul.colors.fill), content = content)
+fun InsetGroup(modifier: Modifier = Modifier, contentPadding: PaddingValues = PaddingValues(0.dp), content: @Composable ColumnScope.() -> Unit) {
+    Column(modifier.padding(horizontal = 20.dp).fillMaxWidth().clip(RasulShapes.card).background(Rasul.colors.fill).padding(contentPadding), content = content)
 }
 
 @Composable
-fun SectionLabel(text: String) {
+fun SectionLabel(text: String, contentPadding: PaddingValues = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 10.dp)) {
     Text(
         text, style = RasulType.sectionLabel, color = Rasul.colors.muted,
-        modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(contentPadding).heightIn(min = 18.dp),
     )
 }
 
@@ -512,18 +563,18 @@ fun EmptyState(
     ) {
         if (avatar != null) BotAvatar(avatar, size = 128.dp)
         Text(title, style = RasulType.emptyTitle, color = c.ink, textAlign = TextAlign.Center)
-        Text(body, style = RasulType.body, color = c.muted, textAlign = TextAlign.Center)
+        Text(body, style = RasulType.body, color = c.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(bottom = 2.dp))
         action?.invoke()
-        if (footnote != null) Text(footnote, style = RasulType.bodySmall, color = c.muted, textAlign = TextAlign.Center)
+        if (footnote != null) Text(footnote, style = RasulType.bodySmall, color = c.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(bottom = 2.dp))
     }
 }
 
 /** Form navigation bar with leading and trailing text actions. */
 @Composable
-fun RasulNavBar(title: String, leading: String, onLeading: () -> Unit, trailing: String? = null, onTrailing: () -> Unit = {}, trailingEnabled: Boolean = true) {
+fun RasulNavBar(title: String, leading: String, onLeading: () -> Unit, trailing: String? = null, onTrailing: () -> Unit = {}, trailingEnabled: Boolean = true, horizontalPadding: Dp = 20.dp, leadingAlignment: Alignment = Alignment.TopStart) {
     val c = Rasul.colors
-    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.width(80.dp)) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = horizontalPadding, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(80.dp), contentAlignment = leadingAlignment) {
             Text(leading, style = RasulType.navAction, color = c.accent, modifier = Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button, onClick = onLeading))
         }
         Text(title, style = RasulType.navBar, color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)

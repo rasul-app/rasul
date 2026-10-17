@@ -254,22 +254,152 @@ class BridgeTransportTest {
         }
     }
 
-    @Test fun rejectedPairedCertificateOverConnectedOuterTransportBecomesRevoked() = runBlocking {
-        val key = HeldCertificate.Builder().ecdsa256().build()
+    @Test fun rejectedPairedCertificateOverConnectedOuterTransportBecomesRevoked() {
+        val serverKey = HeldCertificate.Builder().ecdsa256().addSubjectAlternativeName("example.invalid").build()
+        val deviceKey = HeldCertificate.Builder().ecdsa256().build()
         val identity = object : DeviceIdentity {
-            override val privateKey = key.keyPair.private
-            override val certificateChain = arrayOf(key.certificate)
+            override val privateKey = deviceKey.keyPair.private
+            override val certificateChain = arrayOf(deviceKey.certificate)
         }
-        withSilentBridge(app.rasul.bridge.BridgeTimeouts(), identity) { inner, transport ->
-            repeat(2) { inner.enqueue(MockResponse().setBody("{}")) }
-            repeat(2) { attempt ->
-                try { app.rasul.bridge.BridgeProfiles(transport.client).list(); fail("expected certificate rejection") }
-                catch (e: java.io.IOException) {
-                    assertEquals(if (attempt == 0) app.rasul.data.HermesError.BridgeUnreachable else app.rasul.data.HermesError.DeviceRevoked,
-                        app.rasul.bridge.bridgeError(e))
+        val certificates = HandshakeCertificates.Builder().heldCertificate(serverKey)
+            .addTrustedCertificate(HeldCertificate.Builder().ecdsa256().build().certificate).build()
+        val tracker = app.rasul.bridge.BridgeRejectionTracker(true)
+        val trust = SpkiTrustManager(pin(serverKey)) { tracker.serverVerified() }
+        val tls = app.rasul.bridge.BridgeTlsSocketFactory(trust, identity,
+            { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }, tracker)
+        val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build()
+        val pipes = CopyOnWriteArrayList<Socket>()
+        val workers = Executors.newCachedThreadPool()
+        try {
+            (certificates.sslContext().serverSocketFactory.createServerSocket(0, 50, InetAddress.getLoopbackAddress())
+                as javax.net.ssl.SSLServerSocket).use { inner ->
+                inner.enabledProtocols = arrayOf("TLSv1.3")
+                inner.needClientAuth = true
+                val rejectedAttempts = List(2) { java.util.concurrent.CountDownLatch(1) }
+                val rejected = workers.submit {
+                    repeat(2) { attempt ->
+                        (inner.accept() as javax.net.ssl.SSLSocket).use { socket ->
+                            pipes.add(socket)
+                            socket.soTimeout = 5000
+                            assertThrows(javax.net.ssl.SSLHandshakeException::class.java) { socket.startHandshake() }
+                            rejectedAttempts[attempt].countDown()
+                        }
+                    }
+                }
+                MockWebServer().use { outer ->
+                    val events = CopyOnWriteArrayList<String>()
+                    val forwarded = CopyOnWriteArrayList<java.util.concurrent.Future<*>>()
+                    val closed = List(2) { java.util.concurrent.CountDownLatch(1) }
+                    for ((index, close) in closed.withIndex()) {
+                        outer.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                            private lateinit var pipe: Socket
+                            override fun onOpen(webSocket: WebSocket, response: Response) {
+                                pipe = Socket(InetAddress.getLoopbackAddress(), inner.localPort)
+                                pipes.add(pipe)
+                                forwarded.add(workers.submit {
+                                    try {
+                                        val buffer = ByteArray(8192)
+                                        while (true) {
+                                            val n = pipe.getInputStream().read(buffer)
+                                            events.add("$index forward read=$n")
+                                            if (n < 0) break
+                                            assertTrue("$index forwarding failed: $events", webSocket.send(buffer.toByteString(0, n)))
+                                        }
+                                    } catch (t: Throwable) {
+                                        events.add("$index forward failure=$t")
+                                        throw t
+                                    } finally {
+                                        synchronized(pipe) { pipe.close() }
+                                        events.add("$index close queued=${webSocket.close(1000, null)}")
+                                    }
+                                })
+                            }
+                            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                                synchronized(pipe) {
+                                    // Late handshake frames must not abort the outer close handshake.
+                                    if (pipe.isClosed) {
+                                        assertTrue("$index closed without TLS rejection: $events",
+                                            rejectedAttempts[index].await(5, TimeUnit.SECONDS))
+                                        events.add("$index inbound discarded after rejection")
+                                        return
+                                    }
+                                    try {
+                                        pipe.getOutputStream().write(bytes.toByteArray())
+                                    } catch (failure: java.io.IOException) {
+                                        events.add("$index inbound failure=$failure")
+                                        assertTrue("$index write failed without TLS rejection: $events",
+                                            rejectedAttempts[index].await(5, TimeUnit.SECONDS))
+                                    }
+                                }
+                            }
+                            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { events.add("$index acknowledged"); close.countDown() }
+                            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                                events.add("$index websocket failure=$t")
+                                if (::pipe.isInitialized) synchronized(pipe) { pipe.close() }
+                            }
+                        }))
+                    }
+                    outer.start()
+                    val factory = WebSocketSocketFactory(listOf(outer.url("/").toString().replace("http:", "ws:")),
+                        client, confirmOnConnect = false, onConnectFailure = tracker::reset, onOuterConnected = tracker::outerConnected)
+                    repeat(2) { attempt ->
+                        tracker.beginAttempt()
+                        factory.createSocket("example.invalid", 443).use { raw ->
+                            tls.createSocket(raw, "example.invalid", 443, true).use { socket ->
+                                socket.soTimeout = 5000
+                                // The close reply proves the adapter processed the peer close before this write.
+                                if (!closed[attempt].await(5, TimeUnit.SECONDS)) {
+                                    events.add("server done=${rejected.isDone}; forwarders=${forwarded.map { it.isDone }}")
+                                    if (rejected.isDone) runCatching { rejected.get() }.exceptionOrNull()?.let { events.add("server failure=$it") }
+                                    forwarded.filter { it.isDone }.forEach { future ->
+                                        runCatching { future.get() }.exceptionOrNull()?.let { events.add("forwarder failure=$it") }
+                                    }
+                                    fail("attempt=$attempt peer close was not acknowledged: $events")
+                                }
+                                assertTrue("$attempt missing TLS rejection: $events", rejectedAttempts[attempt].await(5, TimeUnit.SECONDS))
+                                forwarded[attempt].get(5, TimeUnit.SECONDS)
+                                val failure = assertThrows(javax.net.ssl.SSLException::class.java) {
+                                    socket.getOutputStream().write("GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n".toByteArray())
+                                    socket.getInputStream().read()
+                                }
+                                assertEquals(failure.stackTraceToString(),
+                                    if (attempt == 0) app.rasul.data.HermesError.BridgeUnreachable else app.rasul.data.HermesError.DeviceRevoked,
+                                    app.rasul.bridge.bridgeError(tracker.callFailed(failure)))
+                            }
+                        }
+                    }
+                    rejected.get(5, TimeUnit.SECONDS)
                 }
             }
+        } finally {
+            pipes.forEach { runCatching { it.close() } }
+            workers.shutdownNow()
+            workers.awaitTermination(2, TimeUnit.SECONDS)
+            close(client)
         }
+    }
+
+    @Test fun plainNetworkDropStaysBridgeUnreachable() {
+        val tracker = app.rasul.bridge.BridgeRejectionTracker(true)
+        val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build()
+        try {
+            repeat(2) {
+                MockWebServer().use { outer ->
+                    outer.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {}))
+                    outer.start()
+                    val factory = WebSocketSocketFactory(listOf(outer.url("/").toString().replace("http:", "ws:")),
+                        client, onConnectFailure = tracker::reset, onOuterConnected = tracker::outerConnected)
+                    tracker.beginAttempt()
+                    factory.createSocket("example.invalid", 443).use { socket ->
+                        socket.soTimeout = 5000
+                        tracker.serverVerified()
+                        outer.shutdown()
+                        val failure = assertThrows(java.io.IOException::class.java) { socket.getInputStream().read() }
+                        assertEquals(app.rasul.data.HermesError.BridgeUnreachable, app.rasul.bridge.bridgeError(tracker.callFailed(failure)))
+                    }
+                }
+            }
+        } finally { close(client) }
     }
 
     private suspend fun withSilentBridge(timeouts: app.rasul.bridge.BridgeTimeouts, identity: DeviceIdentity? = null, block: suspend (MockWebServer, BridgeTransport) -> Unit) {
@@ -299,7 +429,9 @@ class BridgeTransportTest {
                                 finally { pipe.close(); webSocket.close(1000, null) }
                             }
                         }
-                        override fun onMessage(webSocket: WebSocket, bytes: ByteString) { pipe.getOutputStream().write(bytes.toByteArray()) }
+                        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                            try { pipe.getOutputStream().write(bytes.toByteArray()) } catch (_: java.io.IOException) { }
+                        }
                         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { if (::pipe.isInitialized) pipe.close() }
                         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { if (::pipe.isInitialized) pipe.close(); webSocket.cancel() }
                     })) }

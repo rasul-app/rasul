@@ -43,6 +43,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.IOException
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.util.Locale
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -156,7 +157,7 @@ class S3FixRoundTest {
     }
 
     @Test fun isoTimeWithOffsetIsShownInThePhoneZone() {
-        val t = isoText("2026-10-16T09:00:00+00:00", ZoneId.of("Europe/Stockholm"), Locale.ENGLISH)
+        val t = isoText("2026-10-16T09:00:00+00:00", ZoneOffset.ofHours(2), Locale.ENGLISH)
         assertTrue(t, t.contains("11:00"))
         assertEquals("not a date", isoText("not a date", ZoneId.of("UTC"), Locale.ENGLISH))
     }

@@ -36,6 +36,20 @@ class ConnectionStore(private val ds: DataStore<Preferences>, private val cipher
     private val serializer = ListSerializer(StoredConnection.serializer())
     private val listKey = stringPreferencesKey("connections_v1")
     private val activeKey = stringPreferencesKey("active_connection_v1")
+    private val runUsageKey = stringPreferencesKey("run_usage_v1")
+
+    @Serializable
+    private data class StoredRunUsage(
+        val sessionByRun: Map<String, String> = emptyMap(),
+        val recordedRunIds: Set<String> = emptySet(),
+        val usageBySession: Map<String, TokenUsageSummary> = emptyMap(),
+    )
+
+    private fun Preferences.runUsage(): StoredRunUsage = this[runUsageKey]?.let {
+        runCatching { json.decodeFromString(StoredRunUsage.serializer(), it) }.getOrNull()
+    } ?: StoredRunUsage()
+
+    val runUsageBySession: Flow<Map<String, TokenUsageSummary>> = ds.data.map { it.runUsage().usageBySession }
 
     private fun Preferences.stored(): List<StoredConnection> =
         this[listKey]?.let { json.decodeFromString(serializer, it) } ?: emptyList()
@@ -113,6 +127,9 @@ class ConnectionStore(private val ds: DataStore<Preferences>, private val cipher
         return id
     }
 
+    suspend fun currentSessionId(id: String, profile: String?): String? =
+        ds.data.first()[stringPreferencesKey("session_${id}_${profile.orEmpty()}")]
+
     /** One stable session id per connection and profile (created on first use), so Back does not start a new Hermes session. */
     suspend fun sessionId(id: String, profile: String?): String {
         val key = stringPreferencesKey("session_${id}_${profile.orEmpty()}")
@@ -122,8 +139,64 @@ class ConnectionStore(private val ds: DataStore<Preferences>, private val cipher
         return out
     }
 
+    suspend fun setCurrentSessionRun(id: String, profile: String?, sessionId: String, runId: String?, lastEventId: Long? = null, anchorKey: String? = null) {
+        val sessionKey = stringPreferencesKey("session_" + id + "_" + profile.orEmpty())
+        val key = runKey(id, profile)
+        val eventKey = runEventKey(id, profile)
+        val anchor = runAnchorKey(id, profile)
+        ds.edit { p ->
+            p[sessionKey] = sessionId
+            if (runId == null) {
+                p.remove(key)
+                p.remove(eventKey)
+                p.remove(anchor)
+            } else {
+                p[key] = runId
+                if (anchorKey == null) p.remove(anchor) else p[anchor] = anchorKey
+                if (lastEventId == null) p.remove(eventKey) else p[eventKey] = lastEventId
+            }
+        }
+    }
+
+    /** Clear matching direct or bridge session pointers and their run resume state atomically. */
+    suspend fun clearSessionPointers(sessionId: String) {
+        ds.edit { p ->
+            val suffixes = p.asMap()
+                .filter { (key, value) -> key.name.startsWith("session_") && value == sessionId }
+                .keys
+                .map { it.name.removePrefix("session_") }
+            suffixes.forEach { suffix ->
+                p.remove(stringPreferencesKey("session_$suffix"))
+                p.remove(stringPreferencesKey("run_$suffix"))
+                p.remove(longPreferencesKey("run_event_$suffix"))
+                p.remove(stringPreferencesKey("run_anchor_$suffix"))
+            }
+        }
+    }
+
     /** The run left going when the chat was closed, if any. Keyed like the session: connection id + profile. */
     suspend fun activeRun(id: String, profile: String?): String? = ds.data.first()[runKey(id, profile)]
+
+    data class PersistedRun(val id: String, val profile: String?)
+
+    suspend fun persistedRuns(): List<PersistedRun> {
+        val prefs = ds.data.first()
+        val ids = prefs.stored().map { it.id }.sortedByDescending { it.length }
+        return prefs.asMap().keys.mapNotNull { key ->
+            if (!key.name.startsWith("run_") || !prefs.contains(stringPreferencesKey("session_" + key.name.removePrefix("run_")))) return@mapNotNull null
+            val suffix = key.name.removePrefix("run_")
+            val id = ids.firstOrNull { suffix.startsWith(it + "_") }
+            if (id != null) return@mapNotNull PersistedRun(id, suffix.removePrefix(id + "_").ifEmpty { null })
+            if (!suffix.startsWith("bridge:")) return@mapNotNull null
+            val split = suffix.indexOf(':', "bridge:".length)
+            if (split < 0) return@mapNotNull null
+            val repeated = suffix.substring(split + 1)
+            val middle = repeated.length / 2
+            if (repeated.length % 2 != 1 || repeated[middle] != '_' || repeated.take(middle) != repeated.drop(middle + 1)) return@mapNotNull null
+            val profile = repeated.take(middle)
+            PersistedRun(suffix.take(split + 1) + profile, profile)
+        }
+    }
 
     suspend fun lastEventId(id: String, profile: String?): Long? = ds.data.first()[runEventKey(id, profile)]
 
@@ -148,6 +221,42 @@ class ConnectionStore(private val ds: DataStore<Preferences>, private val cipher
                 if (lastEventId == null) p.remove(eventKey) else p[eventKey] = lastEventId
             }
         }
+    }
+
+    suspend fun rememberRunSession(runId: String, sessionId: String) {
+        require(runId.isNotBlank() && sessionId.isNotBlank())
+        ds.edit { p ->
+            val current = p.runUsage()
+            if (runId !in current.recordedRunIds) {
+                p[runUsageKey] = json.encodeToString(
+                    StoredRunUsage.serializer(),
+                    current.copy(sessionByRun = current.sessionByRun + (runId to sessionId)),
+                )
+            }
+        }
+    }
+
+    suspend fun recordCompletedRunUsage(runId: String, usage: RunTokenUsage?): Map<String, TokenUsageSummary>? {
+        var result: Map<String, TokenUsageSummary>? = null
+        ds.edit { p ->
+            val current = p.runUsage()
+            val sessionId = current.sessionByRun[runId]
+            if (sessionId != null && runId !in current.recordedRunIds) {
+                val nextUsage = current.usageBySession + (
+                    sessionId to (current.usageBySession[sessionId] ?: TokenUsageSummary()).include(usage)
+                )
+                p[runUsageKey] = json.encodeToString(
+                    StoredRunUsage.serializer(),
+                    current.copy(
+                        sessionByRun = current.sessionByRun - runId,
+                        recordedRunIds = current.recordedRunIds + runId,
+                        usageBySession = nextUsage,
+                    ),
+                )
+                result = nextUsage
+            }
+        }
+        return result
     }
 
     suspend fun delete(id: String) {

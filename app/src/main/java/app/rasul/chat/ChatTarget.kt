@@ -6,9 +6,13 @@ import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
 
 /** Session id, active run id, and last event id for one connection+profile. The profile is read once. */
-fun chatRunMemory(container: AppContainer, id: String) = object : RunMemory {
-    private var profile: String? = null
-    private var read = false
+fun chatRunMemory(container: AppContainer, id: String) = runMemory(container, id, false, null)
+
+fun chatRunMemory(container: AppContainer, id: String, profile: String?) = runMemory(container, id, true, profile)
+
+private fun runMemory(container: AppContainer, id: String, fixed: Boolean, selectedProfile: String?) = object : RunMemory {
+    private var profile: String? = selectedProfile
+    private var read = fixed
 
     private suspend fun profile(): String? {
         if (!read) {
@@ -18,6 +22,7 @@ fun chatRunMemory(container: AppContainer, id: String) = object : RunMemory {
         return profile
     }
 
+    override suspend fun currentSessionId() = container.connections.currentSessionId(id, profile())
     override suspend fun sessionId() = container.connections.sessionId(id, profile())
     override suspend fun activeRun() = container.connections.activeRun(id, profile())
     override suspend fun lastEventId() = container.connections.lastEventId(id, profile())
@@ -26,6 +31,8 @@ fun chatRunMemory(container: AppContainer, id: String) = object : RunMemory {
     } ?: Anchor.Unknown
     override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) =
         container.connections.setActiveRun(id, profile(), runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null)
+    override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor) =
+        container.connections.setCurrentSessionRun(id, profile(), sessionId, runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null)
 }
 
 /** Reads the saved connection and decrypts its key; a missing piece is a specific error, not a blank screen. */
@@ -42,5 +49,13 @@ fun chatTargetLoader(container: AppContainer, id: String) = TargetLoader {
         throw e
     } catch (e: Exception) {
         HermesResult.Err(HermesError.Unreachable(e.message ?: e.javaClass.simpleName))
+    }
+}
+
+/** A persisted run keeps its original profile even if the saved default changed. */
+fun chatTargetLoader(container: AppContainer, id: String, profile: String?) = TargetLoader {
+    when (val result = chatTargetLoader(container, id).load()) {
+        is HermesResult.Ok -> HermesResult.Ok(result.value.copy(profile = profile))
+        is HermesResult.Err -> result
     }
 }

@@ -11,10 +11,6 @@ build/
 !*.example
 .kotlin/
 
-# Internal working notes are kept outside this repository
-docs/briefs/
-docs/reports/
-
 # Python companion build and test artifacts
 .venv/
 __pycache__/

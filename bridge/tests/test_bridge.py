@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from contextlib import asynccontextmanager, suppress
+from email.message import Message
 from functools import wraps
 import hashlib
 import json
@@ -47,6 +48,7 @@ def asynchronous(function):
 class FakeUpstream:
     def __init__(self):
         self.requests = []
+        self.decoded_requests = []
         self.finish_stream = asyncio.Event()
         self.stream_closed = asyncio.Event()
         self.tasks = set()
@@ -64,6 +66,11 @@ class FakeUpstream:
             head = headers(raw[1:-2])
             body = await reader.readexactly(int(head.get("content-length", "0")))
             self.requests.append((method, target, head, body))
+            if body:
+                content_type = Message()
+                content_type["content-type"] = head.get("content-type", "application/json")
+                charset = content_type.get_content_charset() or "utf-8"
+                self.decoded_requests.append((method, target, body.decode(charset)))
             if (not target.endswith("/health")
                     and head.get("authorization") != "Bearer " + self.expected_key(target)):
                 writer.write(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\n\r\n{}")
@@ -174,7 +181,7 @@ async def client(bridge, tmp_path, identity=None, trust=None, version=ssl.TLSVer
 
 
 async def send(link, method, target, value=None, extra=""):
-    data = json.dumps(value).encode() if value is not None else b""
+    data = (value if isinstance(value, bytes) else json.dumps(value).encode()) if value is not None else b""
     await link.write((f"{method} {target} HTTP/1.1\r\nHost: my-pc\r\nContent-Length: {len(data)}\r\n"
                       + extra + "\r\n").encode() + data)
 
@@ -239,6 +246,15 @@ async def test_pairing_happy_path_with_confirmation_and_real_tls(tmp_path):
                                            "ready": True, "default": True}]
         rows = [json.loads(line) for line in bridge.audit.path.read_text().splitlines()]
         assert any(row.get("route") == "/v1/pair" and row["status"] == 200 for row in rows)
+
+
+@asynchronous
+async def test_anonymous_connection_cannot_use_new_route(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        async with client(bridge, tmp_path) as (link, reader, _):
+            await send(link, "GET", "/v1/profiles/default/hermes/v1/skills")
+            assert (await read_response(reader)) == (403, {"error": "Registered device certificate required"})
+        assert not upstream.requests
 
 
 @pytest.mark.parametrize("failure", ["expired", "reused", "wrong-secret", "declined", "timeout"])
@@ -356,7 +372,7 @@ async def test_phone_authorization_dropped_route_allowlist_and_audit(tmp_path):
             await send(link, "GET", "/v1/profiles/default/hermes/health", extra=f"Authorization: Bearer {phone_secret}\r\n")
             assert (await read_response(reader)) == (200, {"status": "ok"})
             assert upstream.requests[-1][2]["authorization"] == "Bearer " + bridge.profiles.key("default")
-            for target in ("/v1/devices", "/v1/profiles/default/hermes/api/jobs/new", "/v1/profiles/default/hermes/v1/browser-control/ws",
+            for target in ("/v1/devices", "/v1/profiles/default/hermes/api/jobs/new/extra", "/v1/profiles/default/hermes/v1/browser-control/ws",
                            "/v1/profiles/default/hermes/health?secret=" + phone_secret):
                 await send(link, "GET", target)
                 assert (await read_response(reader))[0] == 404
@@ -372,6 +388,89 @@ async def test_phone_authorization_dropped_route_allowlist_and_audit(tmp_path):
             assert secret not in log
         values = [json.loads(line) for line in log.splitlines()]
         assert all(set(row) == {"time", "device_id", "method", "route", "profile_id", "status"} for row in values)
+
+
+@asynchronous
+async def test_session_patch_limits_fields_and_delete_replaces_authorization(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        identity, _ = registered(bridge)
+        phone_secret = secrets.token_urlsafe(32)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one",
+                       {"title": "renamed"}, extra=f"Authorization: Bearer {phone_secret}\r\n")
+            assert (await read_response(reader)) == (200, {"status": "ok"})
+            method, target, head, body = upstream.requests[-1]
+            assert (method, target) == ("PATCH", "/api/sessions/one")
+            assert head["authorization"] == "Bearer " + bridge.profiles.key("default")
+            assert head["content-type"] == "application/json"
+            assert head["content-length"] == str(len(body))
+            assert body == json.dumps({"title": "renamed"}, ensure_ascii=False).encode("utf-8")
+            assert upstream.decoded_requests[-1] == (
+                "PATCH", "/api/sessions/one", '{"title": "renamed"}')
+
+            await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one",
+                       {"title": "utf8"},
+                       extra="Content-Type: application/json; charset=utf-8\r\n")
+            assert (await read_response(reader)) == (200, {"status": "ok"})
+            assert upstream.decoded_requests[-1] == (
+                "PATCH", "/api/sessions/one", '{"title": "utf8"}')
+
+            await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one",
+                       {"title": "utf8 quoted"},
+                       extra='Content-Type: application/json; charset="UTF-8"\r\n')
+            assert (await read_response(reader)) == (200, {"status": "ok"})
+            assert upstream.decoded_requests[-1] == (
+                "PATCH", "/api/sessions/one", '{"title": "utf8 quoted"}')
+
+            forwarded = len(upstream.requests)
+            attack = b'{"title":"safe+ACI-,+ACI-end_reason+ACI-:+ACI-done"}'
+            await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one", attack,
+                       extra="Content-Type: application/json; charset=utf-7\r\n")
+            assert (await read_response(reader)) == (400, {"error": "unsupported_charset"})
+            assert len(upstream.requests) == forwarded
+
+            await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one",
+                       b'{"title":"\xff"}',
+                       extra="Content-Type: application/json; charset=utf-8\r\n")
+            assert (await read_response(reader)) == (400, {"error": "session_patch_invalid_fields"})
+            assert len(upstream.requests) == forwarded
+
+            for invalid_title in (1, {"nested": "value"}):
+                await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one",
+                           {"title": invalid_title})
+                assert (await read_response(reader)) == (
+                    400, {"error": "session_patch_invalid_fields"})
+                assert len(upstream.requests) == forwarded
+
+            await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one",
+                       {"title": None})
+            assert (await read_response(reader)) == (200, {"status": "ok"})
+            assert upstream.decoded_requests[-1] == (
+                "PATCH", "/api/sessions/one", '{"title": null}')
+
+            forwarded = len(upstream.requests)
+            await send(link, "POST", "/v1/profiles/default/hermes/api/jobs", {"name": "job"},
+                       extra="Content-Type: application/json; charset=utf-16\r\n")
+            assert (await read_response(reader)) == (400, {"error": "unsupported_charset"})
+            assert len(upstream.requests) == forwarded
+
+            await send(link, "PATCH", "/v1/profiles/default/hermes/api/sessions/one",
+                       {"title": "renamed", "end_reason": "done"})
+            assert (await read_response(reader)) == (400, {"error": "session_patch_invalid_fields"})
+            assert len(upstream.requests) == forwarded
+            await send(link, "DELETE", "/v1/profiles/default/hermes/api/jobs/job",
+                       extra=f"Authorization: Bearer {phone_secret}\r\n")
+            assert (await read_response(reader)) == (200, {"status": "ok"})
+            method, target, head, _ = upstream.requests[-1]
+            assert (method, target) == ("DELETE", "/api/jobs/job")
+            assert head["authorization"] == "Bearer " + bridge.profiles.key("default")
+        audit = bridge.audit.path.read_text()
+        assert "renamed" not in audit and "end_reason" not in audit
+        rows = [json.loads(line) for line in audit.splitlines()]
+        assert any(row["route"] == "/v1/profiles/{id}/hermes/api/sessions/{id}"
+                   and row["status"] == 200 for row in rows)
+        assert any(row["route"] == "/v1/profiles/{id}/hermes/api/jobs/{id}"
+                   and row["status"] == 200 for row in rows)
 
 
 @asynchronous
@@ -570,6 +669,27 @@ def test_route_boundaries_and_query_names():
     for target in ("/health?next=/v1/runs", "/api/jobs?include_disabled=true&include_disabled=false",
                    "/v1/runs/../events", "/v1/runs/%2e%2e/events", "//example.com/health", "/health#x"):
         assert allowed("GET", target) is None
+
+
+def test_new_routes_allow_only_their_methods_and_query_keys():
+    routes = [
+        ("GET", "/v1/skills", "/v1/skills"),
+        ("GET", "/v1/toolsets", "/v1/toolsets"),
+        ("GET", "/api/model/options", "/api/model/options"),
+        ("GET", "/api/sessions/one", "/api/sessions/{id}"),
+        ("PATCH", "/api/sessions/one", "/api/sessions/{id}"),
+        ("DELETE", "/api/sessions/one", "/api/sessions/{id}"),
+        ("POST", "/api/jobs", "/api/jobs"),
+        ("GET", "/api/jobs/one", "/api/jobs/{id}"),
+        ("PATCH", "/api/jobs/one", "/api/jobs/{id}"),
+        ("DELETE", "/api/jobs/one", "/api/jobs/{id}"),
+    ]
+    for method, target, template in routes:
+        assert allowed(method, target) == template
+        assert allowed("PUT", target) is None
+        assert allowed(method, target + "?unexpected=value") is None
+    assert allowed("GET", "/api/model/options?refresh=true") == "/api/model/options"
+    assert allowed("GET", "/api/model/options?refresh=true&unexpected=value") is None
 
 
 @asynchronous

@@ -12,6 +12,7 @@ import app.rasul.security.AppLockSettings
 import app.rasul.jobs.JobsClient
 import app.rasul.sessions.SessionsClient
 import app.rasul.data.RunsClient
+import app.rasul.settings.AppSettings
 import app.rasul.ui.ActivePcHolder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,14 +21,17 @@ import kotlinx.coroutines.SupervisorJob
 private val Context.dataStore by preferencesDataStore(name = "rasul")
 
 /** Manual DI: one place that wires the app. */
-class AppContainer(context: Context) {
+class AppContainer(
+    context: Context,
+    val settings: AppSettings = AppSettings(context.dataStore),
+    /** Shared by the active-PC holder and ordered run writer. */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+) {
     val client = HermesClient()
     val sessions = SessionsClient(client)
     val jobs = JobsClient(client)
     val connections = ConnectionStore(context.dataStore, KeystoreSecretCipher())
 
-    /** The one app-lifetime scope: the active-PC holder and the run writer share it. */
-    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val bridges = app.rasul.bridge.BridgeStore(context.dataStore, KeystoreSecretCipher())
     val bridgeClients = app.rasul.bridge.BridgeClients(bridges, appScope)
     val appLockSettings = AppLockSettings(context.dataStore)
@@ -35,7 +39,11 @@ class AppContainer(context: Context) {
     val bridgeBots = app.rasul.bridge.BridgeBotsRepository(bridges, bridgeClients)
     val activePc = ActivePcHolder(connections, appScope, bridgeBots)
     val transcriptSources = app.rasul.sessions.TranscriptSources()
-    val runs = RunsClient()
+    val pendingChat = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val runs = RunsClient(usageStore = connections, scope = appScope)
+    val runWatcher = app.rasul.notifications.RunWatcher(
+        this, context.applicationContext, CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    )
 
     /** The single ordered queue for those writes, shared by every chat screen. */
     val runWriter = OrderedWriter(appScope)

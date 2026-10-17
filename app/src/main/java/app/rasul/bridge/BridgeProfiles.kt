@@ -65,7 +65,11 @@ data class BridgeGroup(
     val error: HermesError? = null,
 )
 
-data class BridgeBotsState(val groups: List<BridgeGroup> = emptyList(), val storageError: Boolean = false)
+data class BridgeBotsState(
+    val groups: List<BridgeGroup> = emptyList(),
+    val storageError: Boolean = false,
+    val loaded: Boolean = false,
+)
 
 /** Each event replaces a complete snapshot, including removals and readiness changes. */
 fun followProfiles(
@@ -103,6 +107,13 @@ class BridgeBotsRepository(
 ) {
     private val mutable = MutableStateFlow(BridgeBotsState())
     val state: StateFlow<BridgeBotsState> = mutable
+    val activeSelection: Flow<BridgeSelection?> = store.activeSelection
+    suspend fun setActiveSelection(selection: BridgeSelection?) = store.setActiveSelection(selection)
+
+    suspend fun forget(bridge: SavedBridge) {
+        mutable.update { state -> state.copy(groups = state.groups.filterNot { it.id == bridge.bridgeId }) }
+        clients.forget(bridge)
+    }
 
     /** Called only by the visible, resumed Bots destination. Cancellation closes every SSE read. */
     suspend fun follow(): Unit = try {
@@ -113,7 +124,7 @@ class BridgeBotsRepository(
             mutable.value = BridgeBotsState(bridges.map { bridge ->
                 cached[bridge.bridgeId]?.copy(name = bridge.name, loading = true)
                     ?: BridgeGroup(bridge.bridgeId, bridge.name)
-            })
+            }, loaded = true)
             coroutineScope {
                 bridges.forEach { bridge -> launch {
                     try {
@@ -133,7 +144,7 @@ class BridgeBotsRepository(
             }
         }
     } catch (e: CancellationException) { throw e }
-    catch (_: Exception) { mutable.update { it.copy(storageError = true) } }
+    catch (_: Exception) { mutable.update { it.copy(storageError = true, loaded = true) } }
 
     suspend fun target(bridgeId: String, profileId: String): HermesResult<HermesTarget> {
         val bridge = store.get(bridgeId) ?: return HermesResult.Err(HermesError.ConnectionChanged)

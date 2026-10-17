@@ -3,15 +3,23 @@ package app.rasul
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import app.rasul.bridge.bridgeBotId
 import app.rasul.data.Connection
 import app.rasul.data.ConnectionStore
 import app.rasul.data.HermesClient
 import app.rasul.data.HermesError
+import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
 import app.rasul.data.Load
 import app.rasul.data.SecretCipher
 import app.rasul.jobs.JobsClient
+import app.rasul.jobs.JobDto
+import app.rasul.jobs.JobsApi
 import app.rasul.jobs.JobsViewModel
+import app.rasul.sessions.SessionDto
+import app.rasul.sessions.SessionsManagementApi
 import app.rasul.sessions.SessionsClient
 import app.rasul.sessions.SessionsViewModel
 import app.rasul.settings.MoreMode
@@ -31,6 +39,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -40,6 +49,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -345,9 +355,173 @@ class FinalRoundTest {
         assertTrue(jobsReady(jobs, "A") && sessionsReady(sessions, "A"))
     }
 
+    @Test fun renamingAJobSendsOnlyChangedFieldsAndUnchangedEditSendsNothing() {
+        val store = ConnectionStore(ds, cipher)
+        save(store, "A", url(a))
+        val holder = ActivePcHolder(store, scope())
+        val api = MutableJobsApi()
+        val jobs = JobsViewModel(store, holder, api)
+        waitFor { jobsReady(jobs, "A") }
+
+        val ready = jobs.state.value as Load.Ready
+        val original = ready.value.single()
+        jobs.save(ready.source, original, "Evening summary", original.scheduleInput, original.prompt.orEmpty())
+        waitFor {
+            (jobs.state.value as? Load.Ready)?.value?.singleOrNull()?.name == "Evening summary" && jobs.busy.value == null
+        }
+        assertEquals(listOf(Triple("Evening summary", null, null)), api.updates)
+
+        val renamed = (jobs.state.value as Load.Ready).value.single()
+        jobs.save(ready.source, renamed, renamed.name.orEmpty(), renamed.scheduleInput, renamed.prompt.orEmpty())
+        assertEquals(1, api.updates.size)
+    }
+
+    @Test fun deletingCurrentSessionClearsMatchingDirectAndBridgePointers() {
+        val store = ConnectionStore(ds, cipher)
+        val directId = runBlocking { store.save(Connection("", "A", url(a)), "kA") }
+        val currentSession = runBlocking { store.sessionId(directId, null) }
+        val bridgeId = bridgeBotId("bridge-one", "profile-one")
+        val bridgeSessionKey = stringPreferencesKey("session_${bridgeId}_profile-one")
+        runBlocking {
+            ds.edit { prefs -> prefs[bridgeSessionKey] = currentSession }
+            store.setActiveRun(directId, null, "direct-run", 7L, "direct-anchor")
+            store.setActiveRun(bridgeId, "profile-one", "bridge-run", 9L, "bridge-anchor")
+        }
+
+        val holder = ActivePcHolder(store, scope())
+        val api = MutableSessionsApi(currentSession)
+        val sessions = SessionsViewModel(store, holder, api)
+        waitFor { sessionsReady(sessions, "A") }
+        val ready = sessions.state.value as Load.Ready
+        sessions.delete(ready.source, ready.value.single())
+        waitFor { (sessions.state.value as? Load.Ready)?.value?.isEmpty() == true && sessions.busy.value == null }
+
+        assertNotEquals(currentSession, runBlocking { store.sessionId(directId, null) })
+        assertNotEquals(currentSession, runBlocking { store.sessionId(bridgeId, "profile-one") })
+        assertNull(runBlocking { store.activeRun(directId, null) })
+        assertNull(runBlocking { store.lastEventId(directId, null) })
+        assertNull(runBlocking { store.runAnchor(directId, null) })
+        assertNull(runBlocking { store.activeRun(bridgeId, "profile-one") })
+        assertNull(runBlocking { store.lastEventId(bridgeId, "profile-one") })
+        assertNull(runBlocking { store.runAnchor(bridgeId, "profile-one") })
+    }
+
+    @Test fun deletingAnotherSessionLeavesTheCurrentSessionPointerUntouched() {
+        val store = ConnectionStore(ds, cipher)
+        val directId = runBlocking { store.save(Connection("", "A", url(a)), "kA") }
+        val currentSession = runBlocking { store.sessionId(directId, null) }
+        val holder = ActivePcHolder(store, scope())
+        val sessions = SessionsViewModel(store, holder, MutableSessionsApi("another-session"))
+        waitFor { sessionsReady(sessions, "A") }
+        val ready = sessions.state.value as Load.Ready
+        sessions.delete(ready.source, ready.value.single())
+        waitFor { (sessions.state.value as? Load.Ready)?.value?.isEmpty() == true && sessions.busy.value == null }
+
+        assertEquals(currentSession, runBlocking { store.sessionId(directId, null) })
+    }
+
+    @Test fun resourceActionsUpdateRowsWithoutReloading() {
+        val store = ConnectionStore(ds, cipher)
+        save(store, "A", url(a))
+        val holder = ActivePcHolder(store, scope())
+        val jobs = JobsViewModel(store, holder, MutableJobsApi())
+        val sessions = SessionsViewModel(store, holder, MutableSessionsApi())
+        waitFor { jobsReady(jobs, "A") && sessionsReady(sessions, "A") }
+
+        val jobSource = jobsSource(jobs)
+        jobs.save(jobSource, null, "Evening summary", "0 10 * * *", "Summarize recent activity")
+        waitFor { (jobs.state.value as? Load.Ready)?.value?.any { it.name == "Evening summary" } == true && jobs.busy.value == null }
+        assertTrue(jobs.state.value is Load.Ready)
+        val newJob = (jobs.state.value as Load.Ready).value.first { it.name == "Evening summary" }
+        jobs.save(jobSource, newJob, "Morning summary", "0 9 * * *", "Summarize recent activity")
+        waitFor {
+            (jobs.state.value as? Load.Ready)?.value?.any { it.id == newJob.id && it.name == "Morning summary" } == true &&
+                jobs.busy.value == null
+        }
+        assertEquals(2, (jobs.state.value as Load.Ready).value.size)
+        jobs.delete(jobSource, newJob.copy(name = "Morning summary"))
+        waitFor { (jobs.state.value as? Load.Ready)?.value?.none { it.id == newJob.id } == true && jobs.busy.value == null }
+        assertTrue(jobs.state.value is Load.Ready)
+
+        val sessionState = sessions.state.value as Load.Ready
+        val session = sessionState.value.single()
+        sessions.rename(sessionState.source, session, "Retitled chat")
+        waitFor { (sessions.state.value as? Load.Ready)?.value?.singleOrNull()?.title == "Retitled chat" && sessions.busy.value == null }
+        assertTrue(sessions.state.value is Load.Ready)
+        sessions.delete(sessionState.source, session)
+        waitFor { (sessions.state.value as? Load.Ready)?.value?.isEmpty() == true && sessions.busy.value == null }
+        assertTrue(sessions.state.value is Load.Ready)
+    }
+
     private fun waitFor(cond: () -> Boolean) {
         val end = System.currentTimeMillis() + 5000
         while (!cond() && System.currentTimeMillis() < end) Thread.sleep(20)
         assertTrue("timed out", cond())
+    }
+
+    private class MutableJobsApi : JobsApi {
+        val updates = mutableListOf<Triple<String?, String?, String?>>()
+        private val rows = mutableListOf(
+            JobDto(
+                "job-one", "Morning summary", "0 9 * * *", enabled = true,
+                schedule = JsonPrimitive("0 9 * * *"), prompt = "Summarize recent activity",
+            ),
+        )
+
+        override suspend fun create(target: HermesTarget, name: String, schedule: String, prompt: String): HermesResult<JobDto> {
+            val created = JobDto(
+                "job-two", name, schedule, enabled = true, schedule = JsonPrimitive(schedule), prompt = prompt,
+            )
+            rows += created
+            return HermesResult.Ok(created)
+        }
+
+        override suspend fun update(
+            target: HermesTarget,
+            id: String,
+            name: String?,
+            schedule: String?,
+            prompt: String?,
+        ): HermesResult<JobDto> {
+            updates += Triple(name, schedule, prompt)
+            val index = rows.indexOfFirst { it.id == id }
+            if (index < 0) return HermesResult.Err(HermesError.ResourceNotFound)
+            val old = rows[index]
+            val updated = old.copy(
+                name = name ?: old.name,
+                scheduleDisplay = schedule ?: old.scheduleDisplay,
+                schedule = schedule?.let(::JsonPrimitive) ?: old.schedule,
+                prompt = prompt ?: old.prompt,
+            )
+            rows[index] = updated
+            return HermesResult.Ok(updated)
+        }
+
+        override suspend fun delete(target: HermesTarget, id: String): HermesResult<Unit> =
+            if (rows.removeIf { it.id == id }) HermesResult.Ok(Unit) else HermesResult.Err(HermesError.ResourceNotFound)
+
+        override suspend fun list(target: HermesTarget): HermesResult<List<JobDto>> = HermesResult.Ok(rows.toList())
+        override suspend fun pause(target: HermesTarget, id: String): HermesResult<JobDto> = HermesResult.Err(HermesError.NotFound)
+        override suspend fun resume(target: HermesTarget, id: String): HermesResult<JobDto> = HermesResult.Err(HermesError.NotFound)
+        override suspend fun runNow(target: HermesTarget, id: String): HermesResult<JobDto> = HermesResult.Err(HermesError.NotFound)
+    }
+
+    private class MutableSessionsApi(initialSessionId: String = "session-one") : SessionsManagementApi {
+        private val rows = mutableListOf(SessionDto(initialSessionId, "Current title"))
+
+        override suspend fun list(target: HermesTarget, limit: Int): HermesResult<List<SessionDto>> =
+            HermesResult.Ok(rows.toList())
+
+        override suspend fun rename(target: HermesTarget, sessionId: String, title: String): HermesResult<SessionDto> {
+            val index = rows.indexOfFirst { it.id == sessionId }
+            if (index < 0) return HermesResult.Err(HermesError.ResourceNotFound)
+            val renamed = rows[index].copy(title = title)
+            rows[index] = renamed
+            return HermesResult.Ok(renamed)
+        }
+
+        override suspend fun delete(target: HermesTarget, sessionId: String): HermesResult<Unit> =
+            if (rows.removeIf { it.id == sessionId }) HermesResult.Ok(Unit) else HermesResult.Err(HermesError.ResourceNotFound)
+
     }
 }

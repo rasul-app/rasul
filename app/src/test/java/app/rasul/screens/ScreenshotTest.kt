@@ -1,5 +1,9 @@
 package app.rasul.screens
 
+import android.content.res.Configuration
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalInspectionMode
 import com.github.takahirom.roborazzi.captureRoboImage
 import sergio.sastre.composable.preview.scanner.android.AndroidComposablePreviewScanner
 import sergio.sastre.composable.preview.scanner.android.AndroidPreviewInfo
@@ -15,14 +19,15 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * Renders every @Preview in app.rasul (EN + AR, light) to app/src/test/screenshots on the JVM.
+ * Renders every screen preview in both app languages and both themes on the JVM.
  * Preview functions are private, so includePrivatePreviews(). Size/locale come from each @Preview
  * (390 dp wide = phone preview width; height is the preview's own).
  */
+@OptIn(com.github.takahirom.roborazzi.ExperimentalRoborazziApi::class)
 @RunWith(ParameterizedRobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [35])
-class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>) {
+class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>, private val dark: Boolean) {
     // Sessions/Jobs dates are formatted in the JVM default zone; pin UTC so PNGs do not depend on the host.
     private var savedZone: TimeZone? = null
 
@@ -39,18 +44,34 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>)
 
     @Test
     fun capture() {
-        preview.captureRoboImage(fileName(preview.methodName))
+        val themed = object : ComposablePreview<AndroidPreviewInfo> by preview {
+            @Composable
+            override fun invoke() {
+                CompositionLocalProvider(LocalInspectionMode provides true) { preview() }
+            }
+
+            override val previewInfo = preview.previewInfo.copy(
+                uiMode = if (dark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO,
+                backgroundColor = if (dark) 0xFF111113 else 0xFFFFFFFF,
+            )
+        }
+        themed.captureRoboImage(fileName(preview.methodName, dark))
     }
 
     companion object {
         // Order of screens in the file names (nn-).
         private val order = listOf("Bots", "BotsEmpty", "Edit", "Sessions", "Jobs", "ResumeDialog", "More", "LanguageSheet")
 
-        fun fileName(method: String): String {
+        fun fileName(method: String, dark: Boolean = false): String {
             val lang = if (method.endsWith("Ar")) "ar" else "en"
             val screen = method.removeSuffix("Ar").removeSuffix("En")
             val n = when {
-                screen.startsWith("Chat") -> 10
+                screen == "ChatIdle" -> 10
+                screen == "ChatThinking" -> 25
+                screen == "ChatTool" -> 26
+                screen == "ChatApproval" -> 27
+                screen == "ChatLost" -> 28
+                screen == "ChatHistoryError" -> 29
                 screen == "Lock" -> 11
                 screen == "LockSetting" -> 12
                 screen == "ScanPermission" -> 13
@@ -59,18 +80,46 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>)
                 screen == "BridgeBotsReady" -> 16
                 screen == "BridgeBotsNotReady" -> 17
                 screen == "BridgeBotsUnreachable" -> 18
+                screen == "BridgePcUnreachable" -> 23
+                screen == "BridgePcNoReadyBots" -> 24
+                screen == "SearchFiltered" -> 30
+                screen == "Settings" -> 31
+                screen == "PlusMenu" -> 32
+                screen == "SkillsTools" -> 44
+                screen == "ModelPicker" -> 45
+                screen == "TokenUsage" -> 46
                 screen == "CreateBotEmpty" -> 19
                 screen == "CreateBotInvalid" -> 20
                 screen == "CreateBotCreating" -> 21
                 screen == "CreateBotError" -> 22
+                screen == "MoreBridge" -> 33
+                screen == "PairingGuide" -> 34
+                screen == "Transcript" -> 35
+                screen == "SearchEmpty" -> 36
+                screen == "SearchNoResults" -> 37
+                screen == "SearchLoading" -> 38
+                screen == "SearchError" -> 39
+                screen == "BotPicker" -> 40
+                screen == "BridgePicker" -> 41
+                screen == "AppearanceSheet" -> 42
+                screen == "Privacy" -> 43
+                screen == "JobForm" -> 47
+                screen == "JobDelete" -> 48
+                screen == "SessionRename" -> 49
                 else -> order.indexOf(screen).let { if (it < 0) order.size else it } + 1
             }
-            return "src/test/screenshots/%02d-%s-%s.png".format(n, screen.lowercase(), lang)
+            val suffix = if (dark) "-dark" else ""
+            return "src/test/screenshots/%02d-%s-%s%s.png".format(n, screen.lowercase(), lang, suffix)
         }
 
         @JvmStatic
-        @Parameters(name = "{0}")
-        fun previews(): List<ComposablePreview<AndroidPreviewInfo>> =
+        @Parameters(name = "{0}, dark={1}")
+        fun previews(): List<Array<Any>> =
+            allPreviews().filterNot { it.methodName.startsWith("PlusMenu") }.flatMap {
+                listOf(arrayOf(it, false), arrayOf(it, true))
+            }
+
+        fun allPreviews(): List<ComposablePreview<AndroidPreviewInfo>> =
             AndroidComposablePreviewScanner()
                 .scanPackageTrees("app.rasul")
                 .includePrivatePreviews()

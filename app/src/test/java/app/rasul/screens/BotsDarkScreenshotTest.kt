@@ -1,12 +1,11 @@
 package app.rasul.screens
 
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onRoot
-import app.rasul.data.Connection
-import app.rasul.ui.BotsListContent
-import app.rasul.ui.ConnectionsState
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.background
+import androidx.compose.ui.test.onNodeWithText
+import com.github.takahirom.roborazzi.captureScreenRoboImage
 import app.rasul.ui.theme.RasulTheme
-import com.github.takahirom.roborazzi.captureRoboImage
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,27 +14,38 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
-/** Dark theme of the Bots list (no dark @Preview exists; main files are not touched in this slice). */
+/** Real plus-menu windows in both app languages and themes. */
+@OptIn(com.github.takahirom.roborazzi.ExperimentalRoborazziApi::class)
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [35], qualifiers = "w390dp-h700dp")
 class BotsDarkScreenshotTest {
     @get:Rule val compose = createComposeRule()
 
-    private val sample = ConnectionsState.Loaded(
-        listOf(
-            Connection("a", "Hermes", "http://100.64.0.7:8642"),
-            Connection("b", "Research", "http://100.64.0.7:8642", "research"),
-            Connection("c", "Deploys", "http://100.64.0.9:8642", "deploys"),
-        ),
-    )
-
-    private fun shot(lang: String) {
-        RuntimeEnvironment.setQualifiers("+$lang-w390dp-h700dp")
-        compose.setContent { RasulTheme(true) { BotsListContent(sample, {}, {}, {}, {}) } }
-        compose.onRoot().captureRoboImage("src/test/screenshots/01-bots-$lang-dark.png")
+    private fun plusMenu(language: String, dark: Boolean = false) {
+        RuntimeEnvironment.setQualifiers("+$language-w390dp-h700dp")
+        // Freeze the popup's continuous location polling while capturing its real window.
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            RasulTheme(dark) {
+                androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxSize().background(app.rasul.ui.theme.Rasul.colors.bg)) {
+                    app.rasul.ui.components.ScreenHeader(androidx.compose.ui.res.stringResource(app.rasul.R.string.tab_bots)) {
+                        app.rasul.ui.PrimaryScreenActions({}, {}, {}, menuInitiallyExpanded = true)
+                    }
+                }
+            }
+        }
+        compose.mainClock.advanceTimeBy(1000)
+        compose.waitForIdle()
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(app.rasul.R.string.new_chat)).assertExists()
+        compose.onNodeWithText(context.getString(app.rasul.R.string.new_bot)).assertExists()
+        captureScreenRoboImage(ScreenshotTest.fileName(if (language == "ar") "PlusMenuAr" else "PlusMenuEn", dark))
     }
 
-    @Test fun botsDarkEn() = shot("en")
-    @Test fun botsDarkAr() = shot("ar")
+    @Test fun plusMenuEn() = plusMenu("en")
+    @Test fun plusMenuAr() = plusMenu("ar")
+
+    @Test fun plusMenuDarkEn() = plusMenu("en", true)
+    @Test fun plusMenuDarkAr() = plusMenu("ar", true)
 }

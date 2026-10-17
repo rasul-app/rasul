@@ -30,7 +30,7 @@ Implementation hints: bridge = WebSocket endpoint that pipes each connection's b
 - `POST /v1/profiles` {"request_id":uuid,"name":<[a-z0-9-]{2,32}>,"template":<id from GET /v1/profile-templates>} -> 202 {"operation_id"}. Same request_id = same operation (idempotent).
 - `GET /v1/profile-templates` -> [{"id","label"}] from the bridge config (owner-defined; default only "blank").
 - `GET /v1/operations/{id}` -> {"state":"running|done|failed","profile_id"?, "error"?}.
-- `ANY /v1/profiles/{id}/hermes/<path>` -> proxied to the Hermes API at `/p/<profile>/<path>` (or `/<path>` for the default profile) with the bridge adding that profile's bearer key. Only an allowlist of Hermes routes the app uses (health, capabilities, models, runs + events + stop + approval, sessions list/messages, jobs list/pause/resume/run). Any Authorization header from the phone is dropped. Streaming responses are passed through unbuffered.
+- `ANY /v1/profiles/{id}/hermes/<path>` -> proxied to the Hermes API at `/p/<profile>/<path>` (or `/<path>` for the default profile) with the bridge adding that profile's bearer key. Only an allowlist of Hermes routes the app uses (health, capabilities, skills, toolsets, models, model options, runs/events/actions, sessions list/read/title update/delete/messages, jobs list/create/read/update/delete/actions). Any Authorization header from the phone is dropped. Streaming responses are passed through unbuffered.
 - `GET /v1/devices` / `DELETE /v1/devices/{id}` are LOCAL only (CLI `rasul-bridge devices` / `rasul-bridge revoke <id>`), not reachable from phones.
 
 ## Limits and logs

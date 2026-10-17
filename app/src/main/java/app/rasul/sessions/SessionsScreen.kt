@@ -1,14 +1,26 @@
 package app.rasul.sessions
 
+import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -16,52 +28,140 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import app.rasul.R
 import app.rasul.data.ActiveTarget
+import app.rasul.data.HermesError
 import app.rasul.data.Load
 import app.rasul.data.timeText
+import app.rasul.data.RelativeTimeLabels
+import app.rasul.data.formatRelativeTime
 import app.rasul.ui.LoadView
+import app.rasul.ui.text
 import app.rasul.data.Connection
 import app.rasul.ui.PcPicker
 import app.rasul.ui.PcSwitcherHost
 import app.rasul.ui.components.BotAvatar
-import app.rasul.ui.components.ChipKind
 import app.rasul.ui.components.FilterPill
 import app.rasul.ui.components.GlassText
+import app.rasul.ui.components.ConfirmDialog
+import app.rasul.ui.components.NoticeDialog
+import app.rasul.ui.components.SmallOutlineButton
 import app.rasul.ui.components.RasulNavBar
 import app.rasul.ui.components.RasulRow
 import app.rasul.ui.components.RowSub
 import app.rasul.ui.components.RowTitle
 import app.rasul.ui.components.ScreenHeader
-import app.rasul.ui.components.StatusChip
 import app.rasul.ui.components.avatarStyleFor
+import app.rasul.ui.PrimaryScreenActions
 import app.rasul.ui.theme.Rasul
 import app.rasul.ui.theme.RasulTheme
 import app.rasul.ui.theme.RasulType
+import app.rasul.ui.theme.RasulShapes
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.JsonNull
+import java.text.DateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 private enum class SessionFilter { All, Open, Ended }
+private data class PendingSession(val source: ActiveTarget.Ready, val session: SessionDto)
 
 /** Sessions list with refresh action, connection switcher, filters, and status rows. */
 @Composable
-fun SessionsScreen(vm: SessionsViewModel, onOpen: (id: String, source: ActiveTarget.Ready) -> Unit) {
+fun SessionsScreen(
+    vm: SessionsViewModel,
+    onOpen: (id: String, source: ActiveTarget.Ready) -> Unit,
+    onPairPc: () -> Unit = {},
+    onSearch: () -> Unit = {},
+    onNewChat: () -> Unit = {},
+    onNewBot: () -> Unit = {},
+) {
     val state by vm.state.collectAsState()
     val source = (state as? Load.Ready)?.source
+    val picker by vm.picker.collectAsState()
+    val busy by vm.busy.collectAsState()
+    val renameError by vm.renameError.collectAsState()
+    val deleteError by vm.deleteError.collectAsState()
+    var rename by remember(picker.target) { mutableStateOf<PendingSession?>(null) }
+    var confirmDelete by remember(picker.target) { mutableStateOf<PendingSession?>(null) }
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
-        ScreenHeader(stringResource(R.string.tab_sessions)) { GlassText(stringResource(R.string.refresh), vm::refresh) }
-        val picker by vm.picker.collectAsState()
-        PcSwitcherHost(picker, vm::selectPc, vm::clearWriteError)
-        LoadView(state, onRetry = vm::retry) { list -> SessionList(list) { id -> source?.let { onOpen(id, it) } } }
+        ScreenHeader(stringResource(R.string.tab_sessions), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 0.dp), actionHorizontalPadding = 7.dp, actionInset = 4.dp, rightInset = 9.dp) {
+            PrimaryScreenActions(onSearch, onNewChat, onNewBot)
+            GlassText(stringResource(R.string.refresh), vm::refresh)
+        }
+        SessionPcSwitcherHost(picker, vm::selectPc, vm::clearWriteError)
+        LoadView(
+            state, onRetry = vm::retry,
+            onPairPc = onPairPc.takeIf { picker.pcs.isEmpty() && picker.bridgeGroups.isEmpty() },
+        ) { list ->
+            SessionList(
+                list, source?.id.orEmpty(), System.currentTimeMillis(),
+                onOpen = { id -> source?.let { onOpen(id, it) } },
+                busy = busy != null,
+                onRename = { session -> source?.let { vm.clearRenameError(); rename = PendingSession(it, session) } },
+                onDelete = { session -> source?.let { confirmDelete = PendingSession(it, session) } },
+            )
+        }
     }
+    rename?.let { pending ->
+        SessionRenameDialog(
+            initialTitle = pending.session.title.orEmpty(),
+            saving = busy != null,
+            serverError = renameError?.sessionValidationMessage(),
+            onCancel = { if (busy == null) { rename = null; vm.clearRenameError() } },
+            onSave = { title ->
+                vm.rename(pending.source, pending.session, title) {
+                    rename = null
+                    vm.clearRenameError()
+                }
+            },
+        )
+    }
+    confirmDelete?.let { pending ->
+        SessionDeleteConfirmDialog(
+            title = pending.session.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.session_untitled),
+            onCancel = { confirmDelete = null },
+            onConfirm = {
+                vm.delete(pending.source, pending.session)
+                confirmDelete = null
+            },
+        )
+    }
+    deleteError?.let { NoticeDialog(it.sessionMessage(), stringResource(R.string.ok), vm::clearDeleteError) }
 }
 
 @Composable
-internal fun SessionList(list: List<SessionDto>, onOpen: (String) -> Unit) {
+private fun SessionPcSwitcherHost(picker: PcPicker, onSelect: (String) -> Unit, onClearError: () -> Unit = {}) {
+    PcSwitcherHost(
+        picker, onSelect, onClearError, capsuleMinWidth = 130.dp, capsulePadding = 6.dp, capsuleIconSize = 14.dp,
+        capsuleTextStyle = RasulType.pill.copy(fontSize = 13.sp, lineHeight = 18.sp,
+            lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None)),
+    )
+}
+
+@Composable
+internal fun SessionList(
+    list: List<SessionDto>,
+    avatarKey: String,
+    nowMillis: Long,
+    onOpen: (String) -> Unit,
+    busy: Boolean = false,
+    onRename: (SessionDto) -> Unit = {},
+    onDelete: (SessionDto) -> Unit = {},
+) {
     var filter by remember { mutableStateOf(SessionFilter.All) }
     if (list.isEmpty()) {
         Text(
@@ -74,9 +174,9 @@ internal fun SessionList(list: List<SessionDto>, onOpen: (String) -> Unit) {
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        FilterPill(stringResource(R.string.filter_all), filter == SessionFilter.All) { filter = SessionFilter.All }
-        FilterPill(stringResource(R.string.filter_open), filter == SessionFilter.Open) { filter = SessionFilter.Open }
-        FilterPill(stringResource(R.string.filter_ended), filter == SessionFilter.Ended) { filter = SessionFilter.Ended }
+        FilterPill(stringResource(R.string.filter_all), filter == SessionFilter.All, width = 46.dp) { filter = SessionFilter.All }
+        FilterPill(stringResource(R.string.filter_open), filter == SessionFilter.Open, width = 60.dp) { filter = SessionFilter.Open }
+        FilterPill(stringResource(R.string.filter_ended), filter == SessionFilter.Ended, width = 60.dp) { filter = SessionFilter.Ended }
     }
     val shown = list.filter {
         when (filter) {
@@ -86,38 +186,170 @@ internal fun SessionList(list: List<SessionDto>, onOpen: (String) -> Unit) {
         }
     }
     LazyColumn(Modifier.fillMaxSize()) {
-        items(shown, key = { it.id }) { s ->
-            val time = timeText(s.lastActive ?: s.startedAt)
-            RasulRow(
-                onClick = { onOpen(s.id) }, hairlineStart = 74.dp,
-                leading = { BotAvatar(avatarStyleFor(s.id), size = 40.dp) },
-                trailing = {
-                    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        time?.let { Text(it, style = RasulType.meta, color = Rasul.colors.muted) }
-                        if (s.isActive) {
-                            StatusChip(stringResource(R.string.filter_open), ChipKind.Running)
-                        } else {
-                            StatusChip(stringResource(R.string.filter_ended), ChipKind.Neutral)
-                        }
+        itemsIndexed(shown, key = { _, s -> s.id }) { index, s ->
+            val isArabic = LocalConfiguration.current.locales[0].language == "ar"
+            val lastActive = s.lastActive?.takeUnless { it is JsonNull }
+            val time = relativeSessionTime(lastActive ?: s.startedAt, nowMillis)
+            var menuOpen by remember(s.id) { mutableStateOf(false) }
+            Box {
+                RasulRow(
+                    onClick = { onOpen(s.id) },
+                    onLongClick = { menuOpen = true },
+                    onLongClickLabel = stringResource(R.string.ux3c_chat_actions),
+                    hairlineStart = if (isArabic) 78.dp else 82.dp, hairlineEnd = if (isArabic) 20.dp else 16.dp,
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = if (index == 0) 10.dp else 8.dp, bottom = 16.dp),
+                    leading = { BotAvatar(avatarStyleFor(avatarKey), size = 40.dp) },
+                    trailing = {
+                        time?.let { Text(it, style = RasulType.meta, color = Rasul.colors.muted, modifier = Modifier.widthIn(min = 32.dp), textAlign = TextAlign.End) }
+                    },
+                ) {
+                    RowTitle(s.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.session_untitled))
+                    s.preview?.takeIf { it.isNotBlank() }?.let { RowSub(it, maxLines = 1) }
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    SessionMenuAction(stringResource(R.string.ux3c_chat_rename), enabled = !busy) {
+                        menuOpen = false
+                        onRename(s)
                     }
-                },
-            ) {
-                RowTitle(s.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.session_untitled))
-                RowSub(
-                    s.preview?.takeIf { it.isNotBlank() }
-                        ?: s.messageCount?.let { stringResource(R.string.session_messages, it) }.orEmpty(),
-                    maxLines = 1,
-                )
+                    SessionMenuAction(stringResource(R.string.ux3c_chat_delete), enabled = !busy) {
+                        menuOpen = false
+                        onDelete(s)
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
+private fun SessionMenuAction(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { role = Role.Button }.padding(horizontal = 16.dp, vertical = 12.dp),
+        color = if (enabled) Rasul.colors.ink else Rasul.colors.muted,
+        style = RasulType.body,
+    )
+}
+
+@Composable
+internal fun SessionRenameDialog(
+    initialTitle: String,
+    saving: Boolean,
+    serverError: String?,
+    onCancel: () -> Unit,
+    onSave: (title: String) -> Unit,
+) {
+    Dialog(onDismissRequest = onCancel) {
+        app.rasul.ui.components.DialogScrim()
+        SessionRenameContent(initialTitle, saving, serverError, onCancel, onSave)
+    }
+}
+
+@Composable
+internal fun SessionRenameContent(
+    initialTitle: String,
+    saving: Boolean,
+    serverError: String?,
+    onCancel: () -> Unit,
+    onSave: (title: String) -> Unit,
+) {
+    val c = Rasul.colors
+    var title by remember(initialTitle) { mutableStateOf(initialTitle) }
+    var attempted by remember(initialTitle) { mutableStateOf(false) }
+    val missingTitle = attempted && title.isBlank()
+    Column(
+        Modifier.fillMaxWidth().background(c.bg, RasulShapes.dialog).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+            Text(stringResource(R.string.ux3c_chat_rename_title), style = RasulType.dialogTitle, color = c.ink)
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it },
+                enabled = !saving,
+                label = { Text(stringResource(R.string.ux3c_chat_title)) },
+                isError = missingTitle,
+                supportingText = if (missingTitle) { { Text(stringResource(R.string.ux3c_chat_title_required)) } } else null,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            serverError?.takeIf { it.isNotBlank() }?.let { Text(it, style = RasulType.meta, color = c.danger) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                SmallOutlineButton(stringResource(R.string.cancel), onCancel, enabled = !saving, width = if (androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "ar") 58.dp else 74.dp)
+                SmallOutlineButton(
+                    stringResource(R.string.save),
+                    {
+                        attempted = true
+                        val capturedTitle = title.trim()
+                        if (capturedTitle.isNotEmpty()) onSave(capturedTitle)
+                    },
+                    enabled = !saving, width = if (androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "ar") 58.dp else 60.dp,
+                )
+            }
+    }
+}
+
+@Composable
+internal fun SessionDeleteConfirmDialog(title: String, onCancel: () -> Unit, onConfirm: () -> Unit) {
+    ConfirmDialog(
+        title = stringResource(R.string.ux3c_chat_delete_title),
+        body = stringResource(R.string.ux3c_chat_delete_body, title),
+        cancelText = stringResource(R.string.cancel),
+        confirmText = stringResource(R.string.ux3c_chat_delete),
+        onCancel = onCancel,
+        onConfirm = onConfirm,
+        destructive = true,
+    )
+}
+
+internal fun sessionValidationText(error: HermesError.Server, context: Context): String =
+    if (error.serverCode == "invalid_title") {
+        context.getString(R.string.ux3c_session_validation_invalid_title)
+    } else {
+        context.getString(R.string.ux3c_session_validation_fallback, error.message.orEmpty())
+    }
+
+@Composable
+private fun HermesError.sessionValidationMessage(): String = when (this) {
+    is HermesError.Server -> sessionValidationText(this, LocalContext.current)
+    else -> text()
+}
+
+@Composable
+private fun HermesError.sessionMessage(): String =
+    (this as? HermesError.Server)?.message?.takeIf { it.isNotBlank() } ?: text()
+
+@Composable
+private fun relativeSessionTime(value: kotlinx.serialization.json.JsonElement?, nowMillis: Long): String? {
+    val primitive = value as? JsonPrimitive ?: return timeText(value)
+    val millis = primitive.doubleOrNull?.let { (it * 1000.0).toLong() } ?: try {
+        java.time.OffsetDateTime.parse(primitive.content).toInstant().toEpochMilli()
+    } catch (_: java.time.DateTimeException) {
+        return timeText(value)
+    }
+    val context = LocalContext.current
+    val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+    val zone = TimeZone.getDefault()
+    return formatRelativeTime(
+        millis, nowMillis, locale,
+        RelativeTimeLabels(
+            now = context.getString(R.string.relative_now),
+            minutes = { count, localized -> context.resources.getQuantityString(R.plurals.relative_minutes, count, localized) },
+            hours = { count, localized -> context.resources.getQuantityString(R.plurals.relative_hours, count, localized) },
+            yesterday = context.getString(R.string.relative_yesterday),
+            date = { millis, dateLocale, timeZone ->
+                DateFormat.getDateInstance(DateFormat.MEDIUM, dateLocale).apply { this.timeZone = timeZone }.format(Date(millis))
+            },
+        ),
+        zone,
+    )
+}
+
+@Composable
 fun TranscriptScreen(vm: TranscriptViewModel, onBack: () -> Unit) {
     val state by vm.state.collectAsState()
-    Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
-        RasulNavBar(stringResource(R.string.transcript_title), stringResource(R.string.back), onBack)
+    Column(Modifier.fillMaxSize().background(Rasul.colors.bg).padding(top = 16.dp)) {
+        RasulNavBar(stringResource(R.string.transcript_title), stringResource(R.string.back), onBack, horizontalPadding = 40.dp, leadingAlignment = Alignment.Center)
         LoadView(state, onRetry = vm::refresh) { msgs -> TranscriptMessages(msgs) }
     }
 }
@@ -131,17 +363,18 @@ internal fun TranscriptMessages(msgs: List<SessionMessageDto>) {
         )
     } else {
         LazyColumn(
-            Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp, top = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(msgs) { m ->
                 Column(Modifier.fillMaxWidth()) {
                     Text(
                         listOfNotNull(m.role?.let { roleLabel(it) }, m.toolName).joinToString(" · "),
-                        style = RasulType.chip,
+                        style = RasulType.chip.copy(lineHeight = 15.sp),
+                        modifier = Modifier.heightIn(min = 18.dp),
                         color = Rasul.colors.accent,
                     )
-                    Text(m.text(), style = RasulType.body, color = Rasul.colors.ink)
+                    Text(m.text(), style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.heightIn(min = 21.dp))
                 }
             }
         }
@@ -159,14 +392,14 @@ private fun roleLabel(role: String): String = when (role) {
 }
 
 private val sampleSessions = listOf(
-    SessionDto("1", "Nightly deploy summary", preview = "Research", startedAt = JsonPrimitive(1_700_000_000), messageCount = 12),
+    SessionDto("1", "Nightly deploy summary", preview = "The report is ready to review.", startedAt = JsonPrimitive(1_759_999_700), messageCount = 12),
     SessionDto(
-        "2", "Fix flaky login test", preview = "Hermes", startedAt = JsonPrimitive(1_699_990_000),
-        endedAt = JsonPrimitive(1_699_999_000), messageCount = 4,
+        "2", "Fix flaky login test", preview = "I found the timing issue.", startedAt = JsonPrimitive(1_759_992_800),
+        endedAt = JsonPrimitive(1_759_999_000), messageCount = 4,
     ),
 )
 
-private val samplePcs = listOf(Connection("a", "Home PC", "http://100.64.0.7:8642", "default"))
+private val samplePcs = listOf(Connection("a", "Home PC", "http://192.0.2.7:8642", "default"))
 
 private val sampleMessages = listOf(
     SessionMessageDto(role = "user", content = JsonPrimitive("Summarize last night's deploy.")),
@@ -176,8 +409,8 @@ private val sampleMessages = listOf(
 
 @Composable
 private fun TranscriptPreviewBody() = RasulTheme(false) {
-    Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
-        RasulNavBar(stringResource(R.string.transcript_title), stringResource(R.string.back), {})
+    Column(Modifier.fillMaxSize().background(Rasul.colors.bg).padding(top = 16.dp)) {
+        RasulNavBar(stringResource(R.string.transcript_title), stringResource(R.string.back), {}, horizontalPadding = 40.dp, leadingAlignment = Alignment.Center)
         TranscriptMessages(sampleMessages)
     }
 }
@@ -193,9 +426,12 @@ private fun TranscriptAr() = TranscriptPreviewBody()
 @Composable
 private fun SessionsPreviewBody() = RasulTheme(false) {
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
-        ScreenHeader(stringResource(R.string.tab_sessions)) { GlassText(stringResource(R.string.refresh), {}) }
-        PcSwitcherHost(PcPicker(samplePcs, "a"), {})
-        SessionList(sampleSessions) {}
+        ScreenHeader(stringResource(R.string.tab_sessions), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 0.dp), actionHorizontalPadding = 7.dp, actionInset = 4.dp, rightInset = 9.dp) {
+            PrimaryScreenActions({}, {}, {})
+            GlassText(stringResource(R.string.refresh), {})
+        }
+        SessionPcSwitcherHost(PcPicker(samplePcs, "a"), {})
+        SessionList(sampleSessions, "a", 1_760_000_000_000L, onOpen = {})
     }
 }
 
@@ -206,3 +442,48 @@ private fun SessionsEn() = SessionsPreviewBody()
 @Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
 @Composable
 private fun SessionsAr() = SessionsPreviewBody()
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700)
+@Composable
+private fun SessionRenameEn() = RasulTheme(false) {
+    SessionRenameDialog("Nightly summary", saving = false, serverError = null, onCancel = {}, onSave = {})
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
+@Composable
+private fun SessionRenameAr() = RasulTheme(false) {
+    SessionRenameDialog("Nightly summary", saving = false, serverError = null, onCancel = {}, onSave = {})
+}
+
+@Composable
+private fun BridgePcPreviewBody(state: Load<Nothing>) = RasulTheme(false) {
+    val pcId = "bridge:sample:default"
+    val pc = Connection(pcId, "Studio PC · Default", "", "default")
+    Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
+        ScreenHeader(stringResource(R.string.tab_sessions), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 0.dp), actionHorizontalPadding = 7.dp, actionInset = 4.dp, rightInset = 9.dp) { GlassText(stringResource(R.string.refresh), {}) }
+        SessionPcSwitcherHost(
+            PcPicker(
+                pcs = listOf(pc), activeId = pcId, target = ActiveTarget.Failed(app.rasul.data.HermesError.BridgeUnreachable),
+                loaded = true, targetLoaded = true,
+            ),
+            {},
+        )
+        LoadView(state, onRetry = {}) {}
+    }
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700)
+@Composable
+private fun BridgePcUnreachableEn() = BridgePcPreviewBody(Load.BridgeUnreachable("Studio PC"))
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
+@Composable
+private fun BridgePcUnreachableAr() = BridgePcPreviewBody(Load.BridgeUnreachable("Studio PC"))
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700)
+@Composable
+private fun BridgePcNoReadyBotsEn() = BridgePcPreviewBody(Load.BridgeNoReadyBots("Studio PC"))
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
+@Composable
+private fun BridgePcNoReadyBotsAr() = BridgePcPreviewBody(Load.BridgeNoReadyBots("Studio PC"))

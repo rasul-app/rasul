@@ -14,10 +14,13 @@ data class CapabilitiesDto(
     val model: String? = null,
     val auth: AuthDto? = null,
     val features: Map<String, JsonElement> = emptyMap(),
+    val endpoints: Map<String, CapabilityEndpointDto> = emptyMap(),
 ) {
     /** Names of features whose value is exactly `true`. */
     fun enabledFeatures(): Set<String> =
         features.filterValues { (it as? JsonPrimitive)?.booleanOrNull == true }.keys
+
+    fun advertisesEndpoint(name: String): Boolean = name in endpoints
 
     companion object {
         const val OBJECT_TYPE = "hermes.api_server.capabilities"
@@ -29,6 +32,49 @@ data class CapabilitiesDto(
 
 @Serializable
 data class AuthDto(val type: String? = null, val required: Boolean? = null)
+
+@Serializable
+data class CapabilityEndpointDto(val method: String? = null, val path: String? = null)
+
+@Serializable
+data class SkillDto(val name: String, val description: String? = null, val category: String? = null)
+
+@Serializable
+data class SkillsListDto(
+    @SerialName("object") val objectType: String? = null,
+    val data: List<SkillDto>,
+)
+
+@Serializable
+data class ToolsetDto(
+    val name: String,
+    val label: String? = null,
+    val description: String? = null,
+    val enabled: Boolean? = null,
+    val configured: Boolean? = null,
+    val tools: List<String> = emptyList(),
+)
+
+@Serializable
+data class ToolsetsListDto(
+    @SerialName("object") val objectType: String? = null,
+    val platform: String? = null,
+    val data: List<ToolsetDto>,
+)
+
+@Serializable
+data class ModelOptionsDto(
+    val providers: List<ModelOptionsProviderDto>,
+    val model: String? = null,
+    val provider: String? = null,
+)
+
+@Serializable
+data class ModelOptionsProviderDto(
+    val slug: String,
+    val name: String,
+    val models: List<String> = emptyList(),
+)
 
 /** Specific failure causes. No generic case on purpose. */
 sealed interface HermesError {
@@ -52,7 +98,7 @@ sealed interface HermesError {
     data class ProfileUnknown(val profile: String) : HermesError
     data class Unreachable(val detail: String) : HermesError
     data class Incompatible(val missing: List<String>) : HermesError
-    data class Server(val code: Int) : HermesError
+    data class Server(val code: Int, val message: String? = null, val serverCode: String? = null) : HermesError
     data class InvalidAddress(val detail: String) : HermesError
 
     /** Plain http to a host outside the allowed local/Tailscale ranges. */

@@ -54,7 +54,11 @@ sealed interface RunEvent {
     data class ReplayTruncated(val oldestRetainedSeq: Long?) : RunEvent
 
     /** `run.completed` (api_server_runs.py:978 via _finish): final answer is [output]. */
-    data class Completed(val output: String, override val pendingSteer: String? = null) : RunEvent
+    data class Completed(
+        val output: String,
+        override val pendingSteer: String? = null,
+        val usage: RunTokenUsage? = null,
+    ) : RunEvent
 
     /** `run.failed` (api_server_runs.py:972-985). */
     data class Failed(val error: String?, override val pendingSteer: String? = null) : RunEvent
@@ -78,6 +82,44 @@ sealed interface RunEvent {
 /** A parsed event with its SSE `id:` (the server's seq) when present. */
 data class RunFrame(val seq: Long?, val event: RunEvent)
 
+data class RunTokenUsage(
+    val inputTokens: Long? = null,
+    val outputTokens: Long? = null,
+    val totalTokens: Long? = null,
+) {
+    companion object {
+        fun from(value: kotlinx.serialization.json.JsonElement?): RunTokenUsage? {
+            val obj = value as? JsonObject ?: return null
+            fun count(key: String) = (obj[key] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+            return RunTokenUsage(count("input_tokens"), count("output_tokens"), count("total_tokens"))
+        }
+    }
+}
+
+data class RunModelSelection(val provider: String, val model: String)
+
+@kotlinx.serialization.Serializable
+data class TokenUsageSummary(
+    val completedRuns: Int = 0,
+    val reportedRuns: Int = 0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val totalTokens: Long = 0,
+) {
+    val isReported: Boolean get() = reportedRuns > 0
+
+    fun include(usage: RunTokenUsage?): TokenUsageSummary = copy(
+        completedRuns = completedRuns + 1,
+        reportedRuns = reportedRuns + if (usage?.let { it.inputTokens != null || it.outputTokens != null || it.totalTokens != null } == true) 1 else 0,
+        inputTokens = inputTokens + (usage?.inputTokens ?: 0),
+        outputTokens = outputTokens + (usage?.outputTokens ?: 0),
+        totalTokens = totalTokens + (usage?.totalTokens ?: 0),
+    )
+}
+
+fun sumRunTokenUsage(usages: Iterable<RunTokenUsage?>): TokenUsageSummary =
+    usages.fold(TokenUsageSummary()) { summary, usage -> summary.include(usage) }
+
 /** A response from POST /v1/runs (202 `{"run_id","status","replayed"}`, api_server_runs.py:466-467). */
 data class StartedRun(val runId: String)
 
@@ -94,10 +136,11 @@ data class RunStatus(
     val pendingSteer: String? = null,
     /** The open approval a waiting run carries (api_server_runs.py:857); the status may omit it, so merge add-only. */
     val approval: RunEvent.ApprovalRequest? = null,
+    val usage: RunTokenUsage? = null,
 ) {
     /** The event a client would have seen had it been connected; null while the run is still going. */
     fun terminalEvent(): RunEvent? = when (status) {
-        "completed" -> RunEvent.Completed(output.orEmpty(), pendingSteer)
+        "completed" -> RunEvent.Completed(output.orEmpty(), pendingSteer, usage)
         "failed" -> RunEvent.Failed(error, pendingSteer)
         "cancelled" -> RunEvent.Cancelled(pendingSteer)
         "interrupted" -> RunEvent.Interrupted(error, pendingSteer)
@@ -149,7 +192,7 @@ fun parseRunFrame(frame: SseFrame): RunFrame {
         "run.steered" -> RunEvent.Steered
         "run.stopping" -> RunEvent.Stopping
         "replay.truncated" -> RunEvent.ReplayTruncated((obj["oldest_retained_seq"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull())
-        "run.completed" -> RunEvent.Completed(obj.str("output").orEmpty(), obj.steer())
+        "run.completed" -> RunEvent.Completed(obj.str("output").orEmpty(), obj.steer(), RunTokenUsage.from(obj["usage"]))
         "run.failed" -> RunEvent.Failed(obj.str("error"), obj.steer())
         "run.cancelled" -> RunEvent.Cancelled(obj.steer())
         "run.interrupted" -> RunEvent.Interrupted(obj.str("error"), obj.steer())

@@ -36,8 +36,8 @@ class ActivePcTest {
     @Test fun pickedPcIsActiveAndSurvivesNewStoreInstance() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val s = store("p.preferences_pb", scope)
-        val a = s.save(Connection("", "Home", "http://100.64.0.5:8642"), "ka")
-        val b = s.save(Connection("", "Laptop", "http://100.64.0.9:8642"), "kb")
+        val a = s.save(Connection("", "Home", "http://192.0.2.5:8642"), "ka")
+        val b = s.save(Connection("", "Laptop", "http://192.0.2.9:8642"), "kb")
 
         // nothing picked: the first saved one
         assertEquals(a, s.active()?.id)
@@ -55,8 +55,8 @@ class ActivePcTest {
 
     @Test fun deletedPickFallsBackToFirst() = runBlocking {
         val s = store("q.preferences_pb")
-        val a = s.save(Connection("", "Home", "http://100.64.0.5:8642"), "ka")
-        val b = s.save(Connection("", "Laptop", "http://100.64.0.9:8642"), "kb")
+        val a = s.save(Connection("", "Home", "http://192.0.2.5:8642"), "ka")
+        val b = s.save(Connection("", "Laptop", "http://192.0.2.9:8642"), "kb")
         s.setActive(b)
         s.delete(b)
         assertEquals(a, s.active()?.id)

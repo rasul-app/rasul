@@ -1,16 +1,20 @@
 package app.rasul
 
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import app.rasul.chat.Anchor
 import app.rasul.chat.ChatFailure
 import app.rasul.chat.ChatViewModel
 import app.rasul.chat.MessageKind
 import app.rasul.chat.RunMemory
+import app.rasul.chat.newChatRunMemory
 import app.rasul.chat.StatusLabel
 import app.rasul.chat.TargetLoader
 import app.rasul.data.ApprovalChoice
+import app.rasul.data.ConnectionStore
 import app.rasul.data.HermesError
 import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
+import app.rasul.data.SecretCipher
 import app.rasul.data.RunEvent
 import app.rasul.data.RunFrame
 import app.rasul.data.RunStatus
@@ -28,19 +32,26 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /** A RunsApi whose replies can be held and released, so the tests run on the test scheduler only (no IO threads). */
 private class FakeRuns : RunsApi {
@@ -109,16 +120,19 @@ private class FakeSessions : SessionsApi {
 
 private class FakeMemory(var active: String? = null, var cursor: Long? = null) : RunMemory {
     val writes = mutableListOf<String?>()
+    val sessionWrites = mutableListOf<String>()
 
     /** When set, activeRun() / setActiveRun() suspend until the gate is released. */
     var readGate: CompletableDeferred<Unit>? = null
     var writeGate: CompletableDeferred<Unit>? = null
     var sessionFailure = false
+    var storedSession = "sess-1"
     var storedAnchor: Anchor = Anchor.Unknown
     override suspend fun anchor() = storedAnchor
+    override suspend fun currentSessionId() = storedSession
     override suspend fun sessionId(): String {
         check(!sessionFailure)
-        return "sess-1"
+        return storedSession
     }
     override suspend fun activeRun(): String? {
         readGate?.await()
@@ -126,6 +140,11 @@ private class FakeMemory(var active: String? = null, var cursor: Long? = null) :
     }
 
     override suspend fun lastEventId(): Long? = cursor
+
+    override suspend fun setSessionId(sessionId: String) {
+        storedSession = sessionId
+        sessionWrites += sessionId
+    }
 
     override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) {
         writeGate?.await()
@@ -138,6 +157,7 @@ private class FakeMemory(var active: String? = null, var cursor: Long? = null) :
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest {
+    @get:Rule val tmp = TemporaryFolder()
     private val sched = TestCoroutineScheduler()
     private val fake = FakeRuns()
     private val sessions = FakeSessions()
@@ -155,7 +175,7 @@ class ChatViewModelTest {
     private val writer = app.rasul.chat.OrderedWriter(CoroutineScope(StandardTestDispatcher(sched)))
 
     private fun build(mem: RunMemory = memory): ChatViewModel {
-        val t = HermesTarget("http://localhost/", null, "k")
+        val t = HermesTarget("http://example.invalid/", null, "k")
         return ChatViewModel(
             TargetLoader { HermesResult.Ok(t) }, fake, sessions, mem, writer, now = { 0L },
             follow = { _, _, after -> followAfter += after; MutableSharedFlow<RunUpdate>(replay = 64).also { flows += it } },
@@ -166,7 +186,7 @@ class ChatViewModelTest {
     private fun vm(): ChatViewModel = build().also { idle() }
 
     private fun buildUsingFrameFollow(mem: RunMemory = memory): ChatViewModel {
-        val t = HermesTarget("http://localhost/", null, "k")
+        val t = HermesTarget("http://example.invalid/", null, "k")
         return ChatViewModel(
             TargetLoader { HermesResult.Ok(t) }, fake, sessions, mem, writer,
             now = { 0L }, newKey = { "key${++keyN}" },
@@ -175,6 +195,58 @@ class ChatViewModelTest {
 
     private fun user(text: String) = SessionMessageDto(role = "user", content = JsonPrimitive(text))
     private fun assistant(text: String) = SessionMessageDto(role = "assistant", content = JsonPrimitive(text))
+
+    @Test fun deletingSessionDropsStoredRunSoReopenedChatCanSend() {
+        val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val id = "connection"
+            val store = ConnectionStore(
+                PreferenceDataStoreFactory.create(scope = storeScope) { tmp.root.resolve("deleted-session.preferences_pb") },
+                object : SecretCipher {
+                    override fun encrypt(plain: String) = plain
+                    override fun decrypt(token: String) = token
+                },
+            )
+            val deletedSession = runBlocking {
+                store.sessionId(id, null).also { session ->
+                    store.setActiveRun(id, null, "run_old", 8L, "old-anchor")
+                    store.clearSessionPointers(session)
+                }
+            }
+            val persistedMemory = object : RunMemory {
+                override suspend fun sessionId() = runBlocking { store.sessionId(id, null) }
+                override suspend fun activeRun() = runBlocking { store.activeRun(id, null) }
+                override suspend fun lastEventId() = runBlocking { store.lastEventId(id, null) }
+                override suspend fun anchor(): Anchor = runBlocking {
+                    store.runAnchor(id, null)?.let { Anchor.Known(it) } ?: Anchor.Unknown
+                }
+                override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) {
+                    runBlocking {
+                        store.setActiveRun(
+                            id, null, runId, lastEventId,
+                            (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null,
+                        )
+                    }
+                }
+            }
+            val reopened = build(persistedMemory)
+            idle()
+            val newSession = runBlocking { store.sessionId(id, null) }
+            assertTrue(deletedSession != newSession)
+            assertNull(reopened.state.value.run)
+            assertTrue(fake.calls.none { it == "status run_old" })
+            assertEquals(listOf(newSession), sessions.calls)
+
+            reopened.onDraft("hello")
+            reopened.send()
+            idle()
+            assertEquals(1, fake.startN)
+            assertTrue(fake.calls.contains("start hello session=$newSession"))
+            assertEquals("run_1", reopened.state.value.run?.runId)
+        } finally {
+            storeScope.cancel()
+        }
+    }
 
     private fun emit(u: RunUpdate) {
         flows.last().tryEmit(u)
@@ -199,6 +271,83 @@ class ChatViewModelTest {
 
     private fun errors(v: ChatViewModel) = v.state.value.messages.filter { it.kind == MessageKind.Error }
 
+    @Test fun restoredBridgeChatWaitsForProfilesThenRestoresHistoryAndControls() = kotlinx.coroutines.runBlocking {
+        val snapshots = kotlinx.coroutines.flow.MutableStateFlow(androidx.datastore.preferences.core.emptyPreferences())
+        val dataStore = object : androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
+            override val data = snapshots
+            override suspend fun updateData(transform: suspend (androidx.datastore.preferences.core.Preferences) -> androidx.datastore.preferences.core.Preferences): androidx.datastore.preferences.core.Preferences {
+                snapshots.value = transform(snapshots.value)
+                return snapshots.value
+            }
+        }
+        val cipher = object : app.rasul.data.SecretCipher {
+            override fun encrypt(plain: String) = plain
+            override fun decrypt(token: String) = token
+        }
+        val scope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val store = app.rasul.bridge.BridgeStore(dataStore, cipher)
+        val transports = mutableListOf<app.rasul.bridge.BridgeTransport>()
+        val clients = app.rasul.bridge.BridgeClients(store, scope, { _, urls, _ ->
+            app.rasul.bridge.BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }).also { transports += it }
+        }, {})
+        val profiles = CompletableDeferred<app.rasul.bridge.ProfileSnapshot>()
+        val entered = CompletableDeferred<Unit>()
+        val repository = app.rasul.bridge.BridgeBotsRepository(store, clients) { object : app.rasul.bridge.ProfilesApi {
+            override suspend fun list(): app.rasul.bridge.ProfileSnapshot { entered.complete(Unit); return profiles.await() }
+            override fun events(): Flow<app.rasul.bridge.ProfileSnapshot> = kotlinx.coroutines.flow.flow { kotlinx.coroutines.awaitCancellation() }
+        } }
+        val saved = app.rasul.bridge.SavedBridge("one", "PC", listOf(java.net.URI("wss", java.util.UUID.randomUUID().toString(), null, null).toString()), "", "", "")
+        val views = ViewModelStore()
+        var following: kotlinx.coroutines.Job? = null
+        try {
+            store.save(saved)
+            memory.active = "run_9"
+            sessions.result = HermesResult.Ok(listOf(user("saved question"), assistant("saved answer")))
+            val approval = RunEvent.ApprovalRequest("A", "cmd A", null, listOf("once", "deny"))
+            fake.onStatus = { HermesResult.Ok(RunStatus("waiting_for_approval", null, null, approval = approval)) }
+            val v = ChatViewModel(app.rasul.ui.bridgeChatTargetLoader(repository, saved.bridgeId, "default"), fake, sessions, memory, writer,
+                follow = { _, _, after -> followAfter += after; MutableSharedFlow<RunUpdate>(replay = 64).also { flows += it } })
+            views.put("chat", v)
+            sched.runCurrent()
+            assertEquals(app.rasul.chat.ChatLoad.Loading, v.state.value.load)
+            assertTrue(sessions.calls.isEmpty())
+            assertTrue(fake.calls.isEmpty())
+            following = scope.launch { repository.follow() }
+            kotlinx.coroutines.withTimeout(5000) { entered.await() }
+            sched.runCurrent()
+            assertEquals(app.rasul.chat.ChatLoad.Loading, v.state.value.load)
+            profiles.complete(app.rasul.bridge.ProfileSnapshot(1, listOf(app.rasul.bridge.BridgeProfile("default", "default", "Default", true, true))))
+            kotlinx.coroutines.withTimeout(5000) { repository.state.first { it.groups.singleOrNull()?.loading == false } }
+            // The loader reads saved metadata on IO before continuing on the test dispatcher.
+            val loaded = CompletableDeferred<Unit>()
+            sessions.historyRequested = loaded
+            kotlinx.coroutines.withTimeout(5000) {
+                while (!loaded.isCompleted) { sched.runCurrent(); kotlinx.coroutines.yield() }
+            }
+            idle()
+            assertEquals(app.rasul.chat.ChatLoad.Ready, v.state.value.load)
+            assertEquals(listOf("saved question", "saved answer"), v.state.value.messages.map { it.text })
+            assertEquals("run_9", v.state.value.run?.runId)
+            assertEquals("A", v.state.value.approval?.requestId)
+            v.answerApproval("A", ApprovalChoice.Once)
+            idle()
+            v.type("continue")
+            v.stop()
+            idle()
+            assertTrue(fake.calls.contains("approve run_9 once A"))
+            assertTrue(fake.calls.contains("steer run_9 continue"))
+            assertTrue(fake.calls.contains("stop run_9"))
+            assertEquals(listOf("sess-1"), sessions.calls)
+        } finally {
+            views.clear()
+            following?.cancel()
+            following?.join()
+            transports.forEach { it.close() }
+            scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+            scope.coroutineContext[kotlinx.coroutines.Job]!!.join()
+        }
+    }
+
     @Test fun idleSendStartsARunAndSecondSendWhileRunningSteers() {
         val v = vm()
         v.type("first")
@@ -206,6 +355,85 @@ class ChatViewModelTest {
         assertEquals(listOf("start first session=sess-1", "steer run_1 also use python"), fake.calls)
         assertEquals(listOf(MessageKind.User, MessageKind.UserSteer), v.state.value.messages.map { it.kind })
         assertEquals("", v.state.value.draft)
+    }
+
+    @Test fun newChatPersistsItsSessionAndActiveRunForReopen() {
+        memory.storedSession = "old-session"
+        memory.active = null
+        val newChat = build(newChatRunMemory(memory, "rasul-fixed"))
+        idle()
+        assertNull(newChat.state.value.run)
+        assertTrue(memory.sessionWrites.isEmpty())
+        assertTrue(memory.writes.isEmpty())
+
+        newChat.type("first")
+        val startedSession = sessions.calls.first()
+        assertEquals("rasul-fixed", startedSession)
+        assertTrue(startedSession != "old-session")
+        assertEquals(startedSession, memory.storedSession)
+        assertEquals("run_1", memory.active)
+        assertEquals(listOf("run_1"), memory.writes)
+        assertEquals(listOf(startedSession), memory.sessionWrites)
+
+        val reopened = build(newChatRunMemory(memory, "rasul-fixed"))
+        idle()
+        assertEquals(startedSession, sessions.calls.last())
+        assertEquals("run_1", reopened.state.value.run?.runId)
+        reopened.type("continue")
+        assertTrue(fake.calls.contains("steer run_1 continue"))
+        reopened.stop()
+        idle()
+        assertTrue(fake.calls.contains("stop run_1"))
+        assertEquals(startedSession, memory.storedSession)
+    }
+
+    @Test fun firstNewChatSendKeepsPreviousActiveRunReachable() {
+        memory.active = "old-run"
+        val newChat = build(newChatRunMemory(memory, "rasul-fixed"))
+        idle()
+        newChat.type("first")
+        assertEquals("old-run", memory.active)
+        assertEquals("sess-1", memory.storedSession)
+        assertEquals(0, fake.startN)
+        assertEquals(ChatFailure.PreviousRunActive, errors(newChat).last().error)
+    }
+
+    @Test fun suspendedNewChatCheckCapturesDraftAndKeepsPreviousRun() {
+        val newChat = build(newChatRunMemory(memory, "rasul-fixed"))
+        idle()
+        memory.readGate = CompletableDeferred()
+        newChat.onDraft("first")
+        newChat.send()
+        sched.runCurrent()
+        newChat.onDraft("changed")
+        memory.active = "old-run"
+        memory.readGate!!.complete(Unit)
+        idle()
+        assertEquals("first", newChat.state.value.draft)
+        assertEquals("old-run", memory.active)
+        assertEquals(0, fake.startN)
+        assertEquals(ChatFailure.PreviousRunActive, errors(newChat).last().error)
+    }
+
+    @Test fun leavingAnUnsentNewChatPreservesPreviousSessionBreadcrumbs() {
+        memory.storedSession = "old-session"
+        memory.active = "old-run"
+        memory.cursor = 17L
+        memory.storedAnchor = Anchor.Known("old-anchor")
+        val newChat = build(newChatRunMemory(memory, "rasul-fixed"))
+        idle()
+        assertNull(newChat.state.value.run)
+        assertTrue(memory.sessionWrites.isEmpty())
+        assertTrue(memory.writes.isEmpty())
+        assertEquals("old-session", memory.storedSession)
+        assertEquals("old-run", memory.active)
+        assertEquals(17L, memory.cursor)
+        assertEquals(Anchor.Known("old-anchor"), memory.storedAnchor)
+
+        val reopened = build(memory)
+        idle()
+        assertEquals("old-session", sessions.calls.last())
+        assertEquals("old-run", reopened.state.value.run?.runId)
     }
 
     @Test fun afterTerminalEventTheNextSendStartsANewRun() {
@@ -1420,6 +1648,19 @@ class ChatViewModelTest {
         sessions.result = HermesResult.Ok(listOf(row("q0", "user", "q0"), row("a0", "assistant", "a0"), row("q1", "user", "q₁"), row("a1", "assistant", "a₁")))
         emit(ev(RunEvent.Completed("A")))
         display(v, "q0", "a0", "q₁", "a₁")
+    }
+
+    @Test fun anOpenChatRereadsItsSessionPointerBeforeSending() {
+        val vm = vm()
+        memory.storedSession = "sess-2"
+
+        vm.onDraft("hello")
+        vm.send()
+        idle()
+
+        assertEquals(listOf("sess-1", "sess-2"), sessions.calls)
+        assertTrue(fake.calls.contains("start hello session=sess-2"))
+        assertFalse(fake.calls.contains("start hello session=sess-1"))
     }
 
     @Test fun sessionReadFailureShowsSpecificFailureAndCanRetry() {

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,7 +24,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
@@ -47,27 +47,53 @@ import app.rasul.ui.theme.RasulShapes
 import app.rasul.ui.theme.RasulTheme
 import app.rasul.ui.theme.RasulType
 
+internal enum class FeatureErrorSurface {
+    SkillsCapabilities, Skills, Toolsets, ModelOptions,
+}
+
+internal fun errorMessageResourceId(error: HermesError, surface: FeatureErrorSurface): Int? = when (error) {
+    is HermesError.Incompatible -> when (surface) {
+        FeatureErrorSurface.SkillsCapabilities ->
+            if (listOf("skills", "toolsets").all { it in error.missing }) R.string.ux3b_skills_tools_not_supported
+            else R.string.ux3b_skills_tools_capabilities_error
+        FeatureErrorSurface.Skills -> R.string.ux3b_skills_load_error
+        FeatureErrorSurface.Toolsets -> R.string.ux3b_toolsets_load_error
+        FeatureErrorSurface.ModelOptions -> R.string.ux3b_model_options_load_error
+    }
+    is HermesError.Server -> when (surface) {
+        FeatureErrorSurface.SkillsCapabilities -> R.string.ux3b_skills_tools_capabilities_error
+        FeatureErrorSurface.Skills -> R.string.ux3b_skills_load_error
+        FeatureErrorSurface.Toolsets -> R.string.ux3b_toolsets_load_error
+        FeatureErrorSurface.ModelOptions -> R.string.ux3b_model_options_load_error
+    }
+    else -> null
+}
+
 @Composable
-internal fun HermesError.text(): String = when (this) {
-    HermesError.BridgeUnreachable -> stringResource(R.string.bridge_unreachable)
-    HermesError.DeviceRevoked -> stringResource(R.string.bridge_revoked)
-    HermesError.DeviceKeyRepair -> stringResource(R.string.bridge_key_repair)
-    HermesError.BridgeTimeout -> stringResource(R.string.bridge_timeout)
-    HermesError.ProfileNotReady -> stringResource(R.string.bridge_profile_not_ready)
-    HermesError.BridgeResponseInvalid -> stringResource(R.string.bridge_response_invalid)
-    HermesError.Unauthorized -> stringResource(R.string.err_unauthorized)
-    HermesError.NotFound -> stringResource(R.string.err_not_found)
-    HermesError.ResourceNotFound -> stringResource(R.string.err_resource_not_found)
-    HermesError.ConnectionChanged -> stringResource(R.string.err_connection_changed)
-    is HermesError.Storage -> stringResource(R.string.connections_load_error, detail)
-    is HermesError.ProfileUnknown -> stringResource(R.string.err_profile_unknown, profile)
-    is HermesError.Unreachable -> stringResource(R.string.err_unreachable, detail)
-    is HermesError.Incompatible -> stringResource(R.string.err_incompatible, missing.joinToString())
-    is HermesError.Server -> stringResource(R.string.err_server, code)
-    is HermesError.InvalidAddress -> stringResource(R.string.addr_invalid)
-    HermesError.AddressRejected -> stringResource(R.string.addr_cleartext_rejected)
-    HermesError.InvalidKey -> stringResource(R.string.err_invalid_key)
-    is HermesError.Redirected -> stringResource(R.string.err_redirected, code)
+internal fun HermesError.text(surface: FeatureErrorSurface? = null): String {
+    val specificMessage = surface?.let { errorMessageResourceId(this, it) }
+    if (specificMessage != null) return stringResource(specificMessage)
+    return when (this) {
+        HermesError.BridgeUnreachable -> stringResource(R.string.bridge_unreachable)
+        HermesError.DeviceRevoked -> stringResource(R.string.bridge_revoked)
+        HermesError.DeviceKeyRepair -> stringResource(R.string.bridge_key_repair)
+        HermesError.BridgeTimeout -> stringResource(R.string.bridge_timeout)
+        HermesError.ProfileNotReady -> stringResource(R.string.bridge_profile_not_ready)
+        HermesError.BridgeResponseInvalid -> stringResource(R.string.bridge_response_invalid)
+        HermesError.Unauthorized -> stringResource(R.string.err_unauthorized)
+        HermesError.NotFound -> stringResource(R.string.err_not_found)
+        HermesError.ResourceNotFound -> stringResource(R.string.err_resource_not_found)
+        HermesError.ConnectionChanged -> stringResource(R.string.err_connection_changed)
+        is HermesError.Storage -> stringResource(R.string.connections_load_error, detail)
+        is HermesError.ProfileUnknown -> stringResource(R.string.err_profile_unknown, profile)
+        is HermesError.Unreachable -> stringResource(R.string.err_unreachable, detail)
+        is HermesError.Incompatible -> stringResource(R.string.err_incompatible, missing.joinToString())
+        is HermesError.Server -> stringResource(R.string.err_server, code)
+        is HermesError.InvalidAddress -> stringResource(R.string.addr_invalid)
+        HermesError.AddressRejected -> stringResource(R.string.addr_cleartext_rejected)
+        HermesError.InvalidKey -> stringResource(R.string.err_invalid_key)
+        is HermesError.Redirected -> stringResource(R.string.err_redirected, code)
+    }
 }
 
 /** Add/edit form with labelled fields, network hint, test action, and result card. */
@@ -122,7 +148,7 @@ fun EditConnectionContent(
                     ),
                     color = c.danger, style = RasulType.bodySmall,
                 )
-                AddressVerdict.AllowedPublicHttps -> Text(stringResource(R.string.addr_public_warning), color = c.warnText, style = RasulType.bodySmall)
+                AddressVerdict.AllowedPublicHttps -> Text(stringResource(R.string.addr_public_warning), color = c.warnText, style = RasulType.bodySmall, modifier = Modifier.padding(bottom = 2.dp))
                 else -> Unit
             }
             Field(stringResource(R.string.field_profile), s.profile, onProfile)
@@ -133,8 +159,8 @@ fun EditConnectionContent(
             )
 
             Row(
-                Modifier.fillMaxWidth().background(c.accentSoft, RasulShapes.input).padding(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                Modifier.fillMaxWidth().heightIn(min = 60.dp).background(c.accentSoft, RasulShapes.input).padding(horizontal = 8.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Icon(RasulIcons.Info, null, tint = c.accent, modifier = Modifier.size(20.dp))
                 Text(stringResource(R.string.tailscale_hint), style = RasulType.bodySmall, color = c.accentHintText, modifier = Modifier.weight(1f))
@@ -181,17 +207,17 @@ private fun Field(
     hint: String? = null,
 ) {
     val c = Rasul.colors
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(label, style = RasulType.sectionLabel, color = c.muted)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = RasulType.sectionLabel.copy(lineHeight = 18.sp), color = c.muted, modifier = Modifier.heightIn(min = 18.dp))
         BasicTextField(
             value, onChange, Modifier.fillMaxWidth().semantics { contentDescription = label }, singleLine = true,
-            textStyle = RasulType.body.copy(fontSize = 16.sp, color = c.ink),
+            textStyle = RasulType.body.copy(color = c.ink),
             cursorBrush = SolidColor(c.accent),
             visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
             decorationBox = { inner ->
                 Row(
-                    Modifier.fillMaxWidth().background(c.fill, RasulShapes.input).padding(horizontal = 14.dp, vertical = 11.dp),
+                    Modifier.fillMaxWidth().heightIn(min = 49.dp).background(c.fill, RasulShapes.input).padding(horizontal = 14.dp, vertical = 14.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -215,8 +241,8 @@ private fun ResultCard(ok: Boolean, title: String, body: String?) {
         Modifier.fillMaxWidth().background(if (ok) c.successSoft else c.dangerSoft, RasulShapes.result).padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Box(Modifier.size(28.dp).background(if (ok) c.success else c.danger, CircleShape), contentAlignment = Alignment.Center) {
-            Icon(if (ok) RasulIcons.Check else RasulIcons.X, null, tint = Color.White, modifier = Modifier.size(14.dp))
+        Box(Modifier.size(25.dp).background(if (ok) c.success else c.danger, CircleShape), contentAlignment = Alignment.Center) {
+            Icon(if (ok) RasulIcons.Check else RasulIcons.X, null, tint = c.onAccent, modifier = Modifier.size(14.dp))
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = RasulType.rowTitle.copy(fontSize = 15.sp), color = if (ok) c.successText else c.dangerText)
@@ -228,7 +254,7 @@ private fun ResultCard(ok: Boolean, title: String, body: String?) {
 @Composable
 private fun EditPreviewBody() = RasulTheme(false) {
     EditConnectionContent(
-        EditState(name = "Home PC", url = "https://example.com", profile = "default", key = "secret", test = TestState.Failure(HermesError.Unreachable("timed out"))),
+        EditState(name = "My PC", url = "https://example.invalid", profile = "default", key = "secret", test = TestState.Failure(HermesError.Unreachable("timed out"))),
         {}, {}, {}, {}, {}, {}, {},
     )
 }

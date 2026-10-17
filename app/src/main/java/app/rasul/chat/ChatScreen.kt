@@ -29,6 +29,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +46,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,7 +60,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -69,6 +71,11 @@ import androidx.compose.ui.unit.sp
 import app.rasul.R
 import app.rasul.data.ApprovalChoice
 import app.rasul.data.HermesError
+import app.rasul.data.HermesResult
+import app.rasul.data.ModelOptionsDto
+import app.rasul.data.RunModelSelection
+import app.rasul.data.RunsClient
+import app.rasul.data.TokenUsageSummary
 import app.rasul.ui.components.BotAvatar
 import app.rasul.ui.components.PrimaryButton
 import app.rasul.ui.components.RasulIcons
@@ -77,6 +84,7 @@ import app.rasul.ui.theme.Rasul
 import app.rasul.ui.theme.RasulShapes
 import app.rasul.ui.theme.RasulTheme
 import app.rasul.ui.theme.RasulType
+import app.rasul.ui.theme.RasulMonoFontFamily
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -86,19 +94,63 @@ private val ChatCodeShape = RoundedCornerShape(12.dp)
 private val ChatChipShape = RoundedCornerShape(8.dp)
 
 @Composable
-fun ChatScreen(vm: ChatViewModel, title: String, onBack: () -> Unit) {
+fun ChatScreen(
+    vm: ChatViewModel,
+    title: String,
+    onBack: () -> Unit,
+    runs: RunsClient,
+    modelOptionsLoader: suspend (Boolean) -> HermesResult<ModelOptionsDto>,
+) {
     val state by vm.state.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val preferences = androidx.compose.runtime.remember { context.getSharedPreferences("notification_permission", android.content.Context.MODE_PRIVATE) }
+    var rationale by androidx.compose.runtime.remember { mutableStateOf(false) }
+    val request = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { }
+    if (rationale) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { rationale = false },
+            text = { Text(stringResource(R.string.run_permission_rationale)) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = {
+                rationale = false
+                if (android.os.Build.VERSION.SDK_INT >= 33) request.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }) { Text(stringResource(R.string.run_permission_allow)) } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { rationale = false }) { Text(stringResource(R.string.run_permission_later)) } },
+        )
+    }
+    val usageBySession by runs.usageBySession.collectAsState()
+    var selectedModel by remember(state.sessionId) {
+        mutableStateOf(state.sessionId?.let(runs::selectedModelForChat))
+    }
     ChatScreenContent(
         state = state,
         title = title,
         onBack = onBack,
         onDraft = vm::onDraft,
-        onSend = vm::send,
+        onSend = {
+            if (android.os.Build.VERSION.SDK_INT >= 33 && !preferences.getBoolean("asked", false) && state.draft.isNotBlank()) {
+                preferences.edit().putBoolean("asked", true).apply()
+                rationale = true
+            }
+            vm.send()
+        },
         onStop = vm::stop,
         onReconnect = vm::reconnect,
         onRefresh = vm::refresh,
         onAnswerApproval = vm::answerApproval,
         onRetryHistory = vm::retryHistory,
+        modelOptionsLoader = modelOptionsLoader,
+        selectedModel = selectedModel,
+        tokenUsage = state.sessionId?.let(usageBySession::get),
+        onSelectModel = { selection ->
+            val current = vm.state.value
+            val session = current.sessionId
+            if (session != null && session == state.sessionId && current.canChooseModel) {
+                runs.selectModelForChat(session, selection)
+                selectedModel = selection
+            }
+        },
     )
 }
 
@@ -114,14 +166,44 @@ private fun ChatScreenContent(
     onRefresh: () -> Unit,
     onAnswerApproval: (String?, ApprovalChoice) -> Unit,
     onRetryHistory: () -> Unit,
+    modelOptionsLoader: suspend (Boolean) -> HermesResult<ModelOptionsDto>,
+    selectedModel: RunModelSelection?,
+    tokenUsage: TokenUsageSummary?,
+    onSelectModel: (RunModelSelection?) -> Unit,
 ) {
     val colors = Rasul.colors
     var hiddenFor by remember { mutableStateOf<ApprovalUi?>(null) }
+    var modelPickerOpen by remember(state.sessionId) { mutableStateOf(false) }
+    var tokenUsageOpen by remember { mutableStateOf(false) }
+    var modelRequestVersion by remember(state.sessionId) { mutableIntStateOf(0) }
+    var refreshModelOptions by remember(state.sessionId) { mutableStateOf(false) }
+    var modelPickerState by remember(state.sessionId) { mutableStateOf<ModelPickerUiState>(ModelPickerUiState.Loading) }
+    val modelPickerEnabled = state.canChooseModel
+    LaunchedEffect(modelPickerOpen, modelRequestVersion, state.sessionId) {
+        if (modelPickerOpen && modelPickerEnabled) {
+            val shouldRefresh = refreshModelOptions
+            val loadOptions = modelOptionsLoader
+            refreshModelOptions = false
+            modelPickerState = ModelPickerUiState.Loading
+            modelPickerState = when (val result = loadOptions(shouldRefresh)) {
+                is HermesResult.Err -> ModelPickerUiState.Error(result.error)
+                is HermesResult.Ok -> ModelPickerUiState.Ready(result.value)
+            }
+        }
+    }
     val approval = state.approval
     val reviewHidden = approval != null && hiddenFor == approval
 
     Column(Modifier.fillMaxSize().background(colors.bg)) {
-        ChatTopBar(title = title, active = state.run != null, onBack = onBack)
+        ChatTopBar(
+            title = title,
+            active = state.run != null,
+            selectedModel = selectedModel?.model,
+            modelPickerEnabled = modelPickerEnabled,
+            onBack = onBack,
+            onChooseModel = { modelPickerOpen = true },
+            onShowUsage = { tokenUsageOpen = true },
+        )
         when (val load = state.load) {
             ChatLoad.Loading -> Box(
                 Modifier.weight(1f).fillMaxWidth(),
@@ -181,6 +263,25 @@ private fun ChatScreenContent(
         }
     }
 
+    if (modelPickerOpen && modelPickerEnabled) {
+        ModelPickerSheet(
+            state = modelPickerState,
+            selectedModel = selectedModel,
+            onDismiss = { modelPickerOpen = false },
+            onChoose = { model ->
+                if (state.canChooseModel) {
+                    onSelectModel(model)
+                    modelPickerOpen = false
+                }
+            },
+            onRefresh = {
+                refreshModelOptions = true
+                modelRequestVersion += 1
+            },
+        )
+    }
+    if (tokenUsageOpen) TokenUsageDialog(tokenUsage, onDismiss = { tokenUsageOpen = false })
+
     approval?.let { pending ->
         // Outside tap or Back hides this sheet; swipe cannot hide it. Review on the card opens it again.
         if (!reviewHidden) {
@@ -196,8 +297,17 @@ private fun ChatScreenContent(
 }
 
 @Composable
-private fun ChatTopBar(title: String, active: Boolean, onBack: () -> Unit) {
+private fun ChatTopBar(
+    title: String,
+    active: Boolean,
+    selectedModel: String?,
+    modelPickerEnabled: Boolean,
+    onBack: () -> Unit,
+    onChooseModel: () -> Unit,
+    onShowUsage: () -> Unit,
+) {
     val colors = Rasul.colors
+    var menuExpanded by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(horizontal = 8.dp, vertical = 4.dp).heightIn(min = 52.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -235,12 +345,43 @@ private fun ChatTopBar(title: String, active: Boolean, onBack: () -> Unit) {
                 )
             }
         }
-        Icon(
-            RasulIcons.Dots,
-            contentDescription = null,
-            tint = colors.ink,
-            modifier = Modifier.size(22.dp),
-        )
+        Box {
+            IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    RasulIcons.Dots,
+                    contentDescription = stringResource(R.string.ux3b_chat_options),
+                    tint = colors.ink,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(stringResource(R.string.ux3b_model_picker_menu))
+                            Text(
+                                selectedModel ?: stringResource(R.string.ux3b_model_server_default),
+                                style = RasulType.meta,
+                                color = colors.muted,
+                                maxLines = 1,
+                            )
+                        }
+                    },
+                    enabled = modelPickerEnabled,
+                    onClick = {
+                        menuExpanded = false
+                        onChooseModel()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.ux3b_token_usage_menu)) },
+                    onClick = {
+                        menuExpanded = false
+                        onShowUsage()
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -485,7 +626,7 @@ private fun ProgressHeader(run: ActiveRun, elapsed: Long) {
         )
         CodeText(
             timeText,
-            style = RasulType.meta.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium),
+            style = RasulType.meta.copy(fontFamily = RasulMonoFontFamily, fontWeight = FontWeight.Medium),
             color = colors.muted,
         )
     }
@@ -527,7 +668,7 @@ private fun ProgressStep(
                 it,
                 modifier = Modifier.background(colors.fill, ChatChipShape)
                     .padding(horizontal = 8.dp, vertical = 2.dp),
-                style = RasulType.chip.copy(fontFamily = FontFamily.Monospace),
+                style = RasulType.chip.copy(fontFamily = RasulMonoFontFamily),
                 color = colors.ink,
             )
         }
@@ -642,82 +783,84 @@ private fun ApprovalSheet(
             }
         },
     ) {
-        Column(
-            Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+        app.rasul.WindowHapticFeedbackProvider {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Box(
-                    Modifier.size(44.dp).background(colors.warn.copy(alpha = 0.12f), CircleShape),
-                    contentAlignment = Alignment.Center,
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Icon(RasulIcons.Info, contentDescription = null, tint = colors.warn, modifier = Modifier.size(22.dp))
+                    Box(
+                        Modifier.size(44.dp).background(colors.warn.copy(alpha = 0.12f), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(RasulIcons.Info, contentDescription = null, tint = colors.warn, modifier = Modifier.size(22.dp))
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(stringResource(R.string.approval_title), style = RasulType.dialogTitle, color = colors.ink)
+                        approval.description?.let { Text(it, style = RasulType.rowSub, color = colors.muted) }
+                    }
                 }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(stringResource(R.string.approval_title), style = RasulType.dialogTitle, color = colors.ink)
-                    approval.description?.let { Text(it, style = RasulType.rowSub, color = colors.muted) }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        stringResource(R.string.approval_command_label),
+                        style = RasulType.chip,
+                        color = colors.muted,
+                    )
+                    Column(
+                        Modifier.fillMaxWidth().background(colors.ink, ChatCodeShape)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                    ) {
+                        CodeText(
+                            approval.command,
+                            style = RasulType.body.copy(fontFamily = RasulMonoFontFamily, fontSize = 13.sp),
+                            color = colors.bg,
+                        )
+                    }
                 }
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    stringResource(R.string.approval_command_label),
-                    style = RasulType.chip,
-                    color = colors.muted,
-                )
-                Column(
-                    Modifier.fillMaxWidth().background(colors.ink, ChatCodeShape)
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                Row(
+                    Modifier.fillMaxWidth().background(colors.dangerSoft, ChatCodeShape).padding(12.dp),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    CodeText(
-                        approval.command,
-                        style = RasulType.body.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
-                        color = colors.bg,
+                    Icon(RasulIcons.Info, contentDescription = null, tint = colors.danger, modifier = Modifier.size(20.dp))
+                    Text(
+                        stringResource(R.string.approval_warning),
+                        modifier = Modifier.weight(1f),
+                        style = RasulType.bodySmall.copy(lineHeight = 18.sp),
+                        color = colors.dangerText,
                     )
                 }
-            }
-            Row(
-                Modifier.fillMaxWidth().background(colors.dangerSoft, ChatCodeShape).padding(12.dp),
-                verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Icon(RasulIcons.Info, contentDescription = null, tint = colors.danger, modifier = Modifier.size(20.dp))
-                Text(
-                    stringResource(R.string.approval_warning),
-                    modifier = Modifier.weight(1f),
-                    style = RasulType.bodySmall.copy(lineHeight = 18.sp),
-                    color = colors.dangerText,
-                )
-            }
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                PrimaryButton(
-                    text = stringResource(R.string.approval_once),
-                    onClick = onOnce,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 51.dp),
-                    enabled = !busy,
-                )
-                OutlinedButton(
-                    onClick = onDeny,
-                    enabled = approval.canDeny && !busy,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                    shape = ChatBubbleShape,
-                    border = BorderStroke(1.dp, colors.danger.copy(alpha = 0.35f)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-                ) {
-                    Text(stringResource(R.string.approval_deny), style = RasulType.button)
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    PrimaryButton(
+                        text = stringResource(R.string.approval_once),
+                        onClick = onOnce,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 51.dp),
+                        enabled = !busy,
+                    )
+                    OutlinedButton(
+                        onClick = onDeny,
+                        enabled = approval.canDeny && !busy,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        shape = ChatBubbleShape,
+                        border = BorderStroke(1.dp, colors.danger.copy(alpha = 0.35f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                    ) {
+                        Text(stringResource(R.string.approval_deny), style = RasulType.button)
+                    }
                 }
+                Text(
+                    stringResource(R.string.approval_applies_only),
+                    modifier = Modifier.fillMaxWidth(),
+                    style = RasulType.bodySmall,
+                    color = colors.muted,
+                    textAlign = TextAlign.Center,
+                )
             }
-            Text(
-                stringResource(R.string.approval_applies_only),
-                modifier = Modifier.fillMaxWidth(),
-                style = RasulType.bodySmall,
-                color = colors.muted,
-                textAlign = TextAlign.Center,
-            )
         }
     }
 }
@@ -737,7 +880,7 @@ private fun statusText(status: StatusLabel): String = when (status) {
 }
 
 @Composable
-private fun failureText(failure: ChatFailure): String = when (failure) {
+internal fun failureText(failure: ChatFailure): String = when (failure) {
     is ChatFailure.Api -> when (val error = failure.error) {
         HermesError.BridgeUnreachable -> stringResource(R.string.bridge_unreachable)
         HermesError.DeviceRevoked -> stringResource(R.string.bridge_revoked)
@@ -764,6 +907,7 @@ private fun failureText(failure: ChatFailure): String = when (failure) {
     is ChatFailure.RunInterrupted -> stringResource(R.string.chat_err_run_interrupted, failure.detail ?: "-")
     ChatFailure.ConnectionMissing -> stringResource(R.string.chat_err_connection_missing)
     ChatFailure.KeyMissing -> stringResource(R.string.chat_err_key_missing)
+    ChatFailure.PreviousRunActive -> stringResource(R.string.chat_err_previous_run_active)
     ChatFailure.SessionUnavailable -> stringResource(R.string.chat_err_session_unavailable)
     ChatFailure.AnswerUnsaved -> stringResource(R.string.chat_err_answer_unsaved)
 }
@@ -820,6 +964,10 @@ private fun ChatPreviewBody(kind: ChatPreviewKind) = RasulTheme(dark = false) {
         onRefresh = {},
         onAnswerApproval = { _, _ -> },
         onRetryHistory = {},
+        modelOptionsLoader = { HermesResult.Err(HermesError.NotFound) },
+        selectedModel = null,
+        tokenUsage = null,
+        onSelectModel = {},
     )
 }
 

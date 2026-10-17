@@ -72,11 +72,11 @@ fun CreateBotContent(
     val colors = Rasul.colors
     Column(Modifier.fillMaxSize().background(colors.bg).verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text(stringResource(R.string.create_bot), style = RasulType.title, color = colors.ink)
-        Text(bridgeName, style = RasulType.body, color = colors.muted)
+        Text(bridgeName, style = RasulType.body, color = colors.muted, modifier = Modifier.heightIn(min = 21.dp))
         OutlinedTextField(
             state.name, onName,
             label = { Text(stringResource(R.string.create_name)) },
-            supportingText = { Text(stringResource(R.string.create_invalid_name)) },
+            supportingText = { Text(stringResource(R.string.create_invalid_name), modifier = Modifier.absoluteOffset(x = (-16).dp)) },
             isError = state.name.isNotEmpty() && !validBotName(state.name),
             enabled = state.editable && !state.loading,
             singleLine = true,
@@ -94,7 +94,9 @@ fun CreateBotContent(
                 RasulRow(
                     selected = state.template == template.id,
                     onClick = if (state.editable) ({ onTemplate(template.id) }) else null,
-                    hairlineStart = 0.dp,
+                    modifier = Modifier.padding(end = 16.dp),
+                    hairlineStart = 0.dp, hairlineEnd = 0.dp, textSpacing = 4.dp,
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 16.dp),
                 ) {
                     RowTitle(template.label.ifBlank { template.id })
                     if (state.template == template.id) RowSub(stringResource(R.string.create_selected))

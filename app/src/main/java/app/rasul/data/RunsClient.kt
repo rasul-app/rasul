@@ -5,12 +5,19 @@ import app.rasul.bridge.bridgeError
 import app.rasul.bridge.bridgeStreamClient
 import app.rasul.bridge.bridgeStatus
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -27,6 +34,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /** The SSE connection failed or broke; [error] says why. */
@@ -42,6 +50,8 @@ interface RunsApi {
     fun events(target: HermesTarget, runId: String, lastSeq: Long? = null): Flow<RunFrame>
 }
 
+private data class PendingRunSelection(val idempotencyKey: String, val selection: RunModelSelection?)
+
 /**
  * Runs API (docs/reference "Runs API"; routes api_server_runs.py:236-240). Same rules as [HermesClient]:
  * address policy checked before each request, redirects never followed, key never logged or echoed.
@@ -52,6 +62,8 @@ class RunsClient(
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .build(),
+    private val usageStore: ConnectionStore? = null,
+    scope: CoroutineScope? = null,
 ) : RunsApi {
     private val http = base.newBuilder().followRedirects(false).followSslRedirects(false).build()
 
@@ -59,14 +71,52 @@ class RunsClient(
     private val sseHttp = http.newBuilder().readTimeout(45, TimeUnit.SECONDS).build()
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonType = "application/json".toMediaType()
+    private val selectedModels = MutableStateFlow<Map<String, RunModelSelection>>(emptyMap())
+    private val pendingSelectionBySession = ConcurrentHashMap<String, PendingRunSelection>()
+    private val sessionByRun = ConcurrentHashMap<String, String>()
+    private val recordedUsageRuns = ConcurrentHashMap.newKeySet<String>()
+    private val mutableUsageBySession = MutableStateFlow<Map<String, TokenUsageSummary>>(emptyMap())
+    val usageBySession: StateFlow<Map<String, TokenUsageSummary>> = mutableUsageBySession
+    private val usageScope = scope ?: CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        usageStore?.let { store ->
+            usageScope.launch {
+                store.runUsageBySession
+                    .catch { mutableUsageBySession.value = emptyMap() }
+                    .collect { mutableUsageBySession.value = it }
+            }
+        }
+    }
+
+    fun selectModelForChat(sessionId: String, selection: RunModelSelection?) {
+        require(sessionId.isNotBlank())
+        selectedModels.update { current ->
+            if (selection == null) current - sessionId else current + (sessionId to selection)
+        }
+    }
+
+    fun selectedModelForChat(sessionId: String): RunModelSelection? = selectedModels.value[sessionId]
 
     /**
      * POST /v1/runs. [idempotencyKey] goes in `Idempotency-Key`, so a retry after a lost reply returns the same run
      * (api_server_runs.py:636-642, 470-478). Body `input` (+ `session_id`), reply 202 `{"run_id"}` (api_server_runs.py:650-657, 466-467). */
     override suspend fun startRun(target: HermesTarget, input: String, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
+        val selectedNow = sessionId?.let(::selectedModelForChat)
+        val pendingSelection = if (sessionId != null && idempotencyKey != null) {
+            pendingSelectionBySession.compute(sessionId) { _, current ->
+                if (current?.idempotencyKey == idempotencyKey) current
+                else PendingRunSelection(idempotencyKey, selectedNow)
+            }
+        } else null
+        val selection = if (pendingSelection == null) selectedNow else pendingSelection.selection
         val body = buildJsonObject {
             put("input", input)
             if (sessionId != null) put("session_id", sessionId)
+            if (selection != null) {
+                put("provider", selection.provider)
+                put("model", selection.model)
+            }
         }
         return when (val r = post(target, "v1/runs", body, idempotencyKey)) {
             is HermesResult.Err -> r
@@ -77,7 +127,24 @@ class RunsClient(
                     null
                 }
                 if (id.isNullOrBlank()) HermesResult.Err(HermesError.Incompatible(listOf("run_id")))
-                else HermesResult.Ok(StartedRun(id))
+                else {
+                    sessionId?.let { session ->
+                        if (usageStore == null) sessionByRun[id] = session
+                        else {
+                            try {
+                                usageStore.rememberRunSession(id, session)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                // Usage tracking must not prevent the accepted run id from reaching the caller.
+                            }
+                        }
+                    }
+                    if (sessionId != null && pendingSelection != null) {
+                        pendingSelectionBySession.remove(sessionId, pendingSelection)
+                    }
+                    HermesResult.Ok(StartedRun(id))
+                }
             }
         }
     }
@@ -91,7 +158,11 @@ class RunsClient(
                 fun str(k: String) = (o[k] as? JsonPrimitive)?.contentOrNull
                 val st = str("status")
                 if (st.isNullOrBlank()) HermesResult.Err(HermesError.Incompatible(listOf("status")))
-                else HermesResult.Ok(RunStatus(st, str("output"), str("error"), o.steer(), approvalOf(o["approval"])))
+                else {
+                    val usage = RunTokenUsage.from(o["usage"])
+                    if (st == "completed") recordCompletedUsage(runId, usage)
+                    HermesResult.Ok(RunStatus(st, str("output"), str("error"), o.steer(), approvalOf(o["approval"]), usage))
+                }
             } catch (e: Exception) {
                 HermesResult.Err(HermesError.Incompatible(listOf("status")))
             }
@@ -153,7 +224,11 @@ class RunsClient(
                         (if (target.bridge != null) bridgeStatus(resp.code, HermesError.NotFound) else mapStatus(resp.code, resp.isRedirect))?.let { throw RunStreamException(it) }
                         val source = resp.body?.source()
                             ?: throw RunStreamException(HermesError.Unreachable("empty response body"))
-                        for (frame in source.sseFrames()) send(parseRunFrame(frame))
+                        for (frame in source.sseFrames()) {
+                            val parsed = parseRunFrame(frame)
+                            if (parsed.event is RunEvent.Completed) recordCompletedUsage(runId, parsed.event.usage)
+                            send(parsed)
+                        }
                     }
                 } catch (e: IOException) {
                     if (!currentCoroutineContext()[Job]!!.isActive) throw CancellationException("cancelled")
@@ -162,6 +237,26 @@ class RunsClient(
             }
         } finally {
             watcher.cancel()
+        }
+    }
+
+    private suspend fun recordCompletedUsage(runId: String, usage: RunTokenUsage?) {
+        usageStore?.let { store ->
+            val updated = try {
+                store.recordCompletedRunUsage(runId, usage)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            updated?.let { mutableUsageBySession.value = it }
+            return
+        }
+        val sessionId = sessionByRun[runId] ?: return
+        if (!recordedUsageRuns.add(runId)) return
+        mutableUsageBySession.update { current ->
+            val summary = (current[sessionId] ?: TokenUsageSummary()).include(usage)
+            current + (sessionId to summary)
         }
     }
 

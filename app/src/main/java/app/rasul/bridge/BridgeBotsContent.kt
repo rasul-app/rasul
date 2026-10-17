@@ -1,6 +1,9 @@
 package app.rasul.bridge
 
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
@@ -24,7 +27,7 @@ fun LazyListScope.bridgeBotItems(state: BridgeBotsState, onOpen: (String, String
     }
     state.groups.forEach { group ->
         item(key = "group:" + group.id) {
-            androidx.compose.foundation.layout.Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+            androidx.compose.foundation.layout.Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 16.dp)) {
                 Text(group.name, style = RasulType.rowTitle, color = Rasul.colors.ink)
                 SecondaryButton(stringResource(R.string.create_on_bridge, group.name), { onCreate(group.id) }, modifier = Modifier.fillMaxWidth(), enabled = group.error != HermesError.DeviceRevoked && group.error != HermesError.DeviceKeyRepair)
             }
@@ -40,14 +43,22 @@ fun LazyListScope.bridgeBotItems(state: BridgeBotsState, onOpen: (String, String
             val enabled = profile.ready && !group.loading && group.error == null
             RasulRow(
                 onClick = if (enabled) ({ onOpen(group.id, profile.id) }) else null,
+                hairlineStart = 20.dp, hairlineEnd = 70.dp,
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 0.dp, bottom = 16.dp),
+                textSpacing = if (profile.ready) 3.dp else 4.dp,
                 leading = { BotAvatar(avatarStyleFor(bridgeBotId(group.id, profile.id))) },
                 trailing = {
                     StatusChip(stringResource(if (profile.ready) R.string.bridge_ready else R.string.bridge_not_ready),
-                        if (profile.ready) ChipKind.Done else ChipKind.Neutral)
+                        if (profile.ready) ChipKind.Done else ChipKind.Neutral,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.widthIn(min = if (LocalConfiguration.current.locales[0].language == "ar") {
+                            if (profile.ready) 48.dp else 72.dp
+                        } else if (profile.ready) 51.dp else 79.dp))
                 },
             ) {
                 RowTitle(profile.displayName)
-                if (!profile.ready) RowSub(stringResource(R.string.bridge_profile_not_ready))
+                if (!profile.ready) RowSub(stringResource(R.string.bridge_profile_not_ready), maxLines = Int.MAX_VALUE)
             }
         }
     }

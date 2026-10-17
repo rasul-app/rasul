@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -22,9 +23,9 @@ import app.rasul.ui.theme.RasulType
 fun AppLockScreen(readError: Boolean = false, onRetry: () -> Unit = {}, authenticationAvailable: Boolean = true, onOpenSecuritySettings: () -> Unit = {}, onUnlock: () -> Unit) {
     val colors = Rasul.colors
     Column(
-        Modifier.fillMaxSize().background(colors.bg).padding(horizontal = 32.dp),
+        Modifier.fillMaxSize().background(colors.bg).padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterVertically),
+        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
     ) {
         Text(stringResource(R.string.lock_title), style = RasulType.emptyTitle, color = colors.ink)
         Text(
@@ -35,7 +36,7 @@ fun AppLockScreen(readError: Boolean = false, onRetry: () -> Unit = {}, authenti
         )
         if (readError) PrimaryButton(stringResource(R.string.retry), onRetry)
         if (authenticationAvailable) {
-            PrimaryButton(stringResource(R.string.lock_unlock), onUnlock)
+            PrimaryButton(stringResource(R.string.lock_unlock), onUnlock, modifier = Modifier.widthIn(min = 120.dp))
         } else {
             Text(stringResource(R.string.lock_unavailable), style = RasulType.body, color = colors.muted)
             PrimaryButton(stringResource(R.string.lock_open_settings), onOpenSecuritySettings)

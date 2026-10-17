@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import suppress
+from email.message import Message
 from http import HTTPStatus
 import json
 import logging
@@ -32,6 +33,17 @@ UPGRADE_TIMEOUT = 3
 TLS_TIMEOUT = 10
 ANONYMOUS_TIMEOUT = 5
 ANONYMOUS_MAX_BODY = 16 * 1024
+
+
+def _has_unsupported_charset(head):
+    content_type = Message()
+    content_type["content-type"] = head.get("content-type", "")
+    parameters = content_type.get_params(header="content-type", unquote=True) or []
+    for name, value in parameters[1:]:
+        if name.casefold() == "charset" and (
+                not isinstance(value, str) or value.casefold() != "utf-8"):
+            return True
+    return False
 
 
 class AcceptedConnection(ServerConnection):
@@ -311,13 +323,30 @@ class Bridge:
                     profile = None
                     raise HTTPError(404, "Route not found")
                 route = "/v1/profiles/{id}/hermes" + template
+                forward_head, forward_body = head, body
+                if body and _has_unsupported_charset(head):
+                    raise HTTPError(400, "unsupported_charset")
+                if method == "PATCH" and template == "/api/sessions/{id}":
+                    try:
+                        patch_text = body.decode("utf-8", errors="strict")
+                        patch = json.loads(patch_text)
+                    except (UnicodeError, ValueError, TypeError):
+                        raise HTTPError(400, "session_patch_invalid_fields") from None
+                    if not isinstance(patch, dict) or set(patch) - {"title"}:
+                        raise HTTPError(400, "session_patch_invalid_fields")
+                    if ("title" in patch and patch["title"] is not None
+                            and not isinstance(patch["title"], str)):
+                        raise HTTPError(400, "session_patch_invalid_fields")
+                    forward_head = {**head, "content-type": "application/json"}
+                    forward_body = json.dumps(patch, ensure_ascii=False).encode("utf-8")
                 if profile not in self.profiles.directories():
                     profile = None
                     raise HTTPError(404, "Profile not found")
                 key = self.profiles.key(profile)
                 if not key:
                     raise HTTPError(503, "Profile key needs local initialization")
-                status = await self.upstream.forward(link, method, self.profiles.target(profile, suffix), key, head, body)
+                status = await self.upstream.forward(link, method, self.profiles.target(profile, suffix),
+                                                     key, forward_head, forward_body)
         except StreamAborted:
             status = 502
             raise EOFError from None

@@ -99,6 +99,8 @@ The debug APK is written to `app/build/outputs/apk/debug/`.
 
 Built with Kotlin, Jetpack Compose (Material 3), OkHttp, kotlinx.serialization and DataStore.
 
+**Fonts:** Readex Pro, IBM Plex Sans Arabic and IBM Plex Mono are licensed under the SIL Open Font License 1.1; see `third_party/fonts/`.
+
 ## Contributing
 
 Issues and pull requests are welcome. Please keep each pull request to one change, add tests for behaviour changes, keep English and Arabic strings in step, and run the unit and screenshot tests before you open it.
@@ -132,6 +134,7 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 - **المهام المجدولة:** اعرض المهام، أوقفها مؤقتًا، استأنفها أو شغّلها الآن.
 - **أكثر من حاسوب وملف تعريف:** احفظ كل حاسوب مرة واحدة وبدّل بينها، مع دعم ملفات تعريف Hermes.
 - **العربية والإنجليزية:** اختر اللغة من داخل التطبيق، والواجهة العربية من اليمين إلى اليسار بالكامل.
+- **الخطوط:** Readex Pro وIBM Plex Sans Arabic وIBM Plex Mono مرخّصة بموجب رخصة SIL Open Font License 1.1؛ راجع `third_party/fonts/`.
 - **سمة فاتحة وداكنة.**
 
 لا يوجد خادم لرسول. التطبيق يتصل بحاسوبك فقط، بلا حسابات ولا تتبّع ولا تحليلات ولا إعلانات.

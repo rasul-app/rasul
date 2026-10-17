@@ -1,6 +1,9 @@
 package app.rasul
 
 import android.content.res.Configuration
+import android.content.ActivityNotFoundException
+import android.content.ContextWrapper
+import android.content.Intent
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -41,9 +44,21 @@ class BridgeMessagesTest {
             Triple(R.string.bridge_bots_storage_error, "Saved bridges could not be read.", "تعذّرت قراءة الجسور المحفوظة."),
             Triple(R.string.bridge_open_bot, "Open %1\$s", "فتح %1\$s"),
             Triple(R.string.bridge_direct_connections, "Direct connections", "اتصالات مباشرة"),
+            Triple(R.string.external_link_unavailable_title, "Can’t open this link", "تعذّر فتح هذا الرابط"),
+            Triple(R.string.external_link_unavailable, "No app can open this link. Copy the URL: %1\$s", "لا يوجد تطبيق يمكنه فتح هذا الرابط. انسخ عنوان URL: %1\$s"),
         ).forEach { (id, english, arabic) ->
             assertEquals(english, en.getString(id))
             assertEquals(arabic, ar.getString(id))
         }
+        val unavailableContext = object : ContextWrapper(context) {
+            override fun startActivity(intent: Intent) {
+                throw ActivityNotFoundException()
+            }
+        }
+        var unavailableAddress: String? = null
+        app.rasul.ui.launchExternal(unavailableContext, "url") { unavailableAddress = it }
+        assertEquals("url", unavailableAddress)
+        assertEquals("No app can open this link. Copy the URL: url", en.getString(R.string.external_link_unavailable, unavailableAddress))
+        assertEquals("لا يوجد تطبيق يمكنه فتح هذا الرابط. انسخ عنوان URL: url", ar.getString(R.string.external_link_unavailable, unavailableAddress))
     }
 }

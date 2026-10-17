@@ -35,13 +35,13 @@ class ConnectionStoreTest {
         val s = store()
         assertEquals(emptyList<Connection>(), s.connections.first())
 
-        val id = s.save(Connection("", " Home ", "http://100.64.0.5:8642", " alice "), "k-123")
+        val id = s.save(Connection("", " Home ", "http://192.0.2.5:8642", " alice "), "k-123")
         val got = s.connections.first().single()
-        assertEquals(Connection(id, "Home", "http://100.64.0.5:8642", "alice"), got)
+        assertEquals(Connection(id, "Home", "http://192.0.2.5:8642", "alice"), got)
         assertEquals("k-123", s.apiKey(id))
 
         // edit with null key keeps the old key
-        s.save(Connection(id, "Home2", "http://100.64.0.5:8642", ""), null)
+        s.save(Connection(id, "Home2", "http://192.0.2.5:8642", ""), null)
         assertEquals("Home2", s.get(id)?.name)
         assertNull(s.get(id)?.profile)
         assertEquals("k-123", s.apiKey(id))
@@ -72,6 +72,12 @@ class ConnectionStoreTest {
         s.setActiveRun("c1", "bob", null)
         assertNull(s.activeRun("c1", "bob"))
         assertNull(s.lastEventId("c1", "bob"))
+
+        s.setCurrentSessionRun("c1", "bob", "session-new", "run_6", null, "")
+        assertEquals("session-new", s.sessionId("c1", "bob"))
+        assertEquals("run_6", s.activeRun("c1", "bob"))
+        assertNull(s.lastEventId("c1", "bob"))
+        assertEquals("", s.runAnchor("c1", "bob"))
     }
 
     @Test fun activeRunIsKeyedByConnectionAndProfile() = runBlocking {

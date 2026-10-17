@@ -8,6 +8,7 @@ import app.rasul.data.SecretCipher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -24,15 +25,36 @@ data class SavedBridge(
     val lastWorkingUrl: String? = null,
 )
 
+data class BridgeSelection(val bridgeId: String, val profileId: String)
+
 /** All bridge metadata is encrypted before it enters the backup-excluded preferences. */
 class BridgeStore(private val ds: DataStore<Preferences>, private val cipher: SecretCipher) {
     private val key = stringPreferencesKey("bridges_v1")
+    private val activeBridgeKey = stringPreferencesKey("active_bridge_id")
+    private val activeProfileKey = stringPreferencesKey("active_bridge_profile")
     private val json = Json
     private fun Preferences.read(): List<SavedBridge> = this[key]?.let {
         json.decodeFromString<List<SavedBridge>>(cipher.decrypt(it))
     } ?: emptyList()
     val bridges = ds.data.map { withContext(Dispatchers.IO) { it.read() } }
+    val activeSelection = ds.data.map { p ->
+        val bridgeId = p[activeBridgeKey]
+        val profileId = p[activeProfileKey]
+        if (bridgeId.isNullOrBlank() || profileId.isNullOrBlank()) null else BridgeSelection(bridgeId, profileId)
+    }.distinctUntilChanged()
     suspend fun get(id: String) = bridges.first().firstOrNull { it.bridgeId == id }
+    suspend fun setActiveSelection(selection: BridgeSelection?) = withContext(Dispatchers.IO) {
+        ds.edit { p ->
+            val saved = selection?.takeIf { selected -> p.read().any { it.bridgeId == selected.bridgeId } }
+            if (saved == null) {
+                p.remove(activeBridgeKey)
+                p.remove(activeProfileKey)
+            } else {
+                p[activeBridgeKey] = saved.bridgeId
+                p[activeProfileKey] = saved.profileId
+            }
+        }
+    }
     suspend fun save(bridge: SavedBridge) = withContext(Dispatchers.IO) {
         ds.edit { p ->
             val all = p.read()
@@ -47,6 +69,12 @@ class BridgeStore(private val ds: DataStore<Preferences>, private val cipher: Se
         }
     }
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
-        ds.edit { p -> p[key] = cipher.encrypt(json.encodeToString(p.read().filterNot { it.bridgeId == id })) }
+        ds.edit { p ->
+            p[key] = cipher.encrypt(json.encodeToString(p.read().filterNot { it.bridgeId == id }))
+            if (p[activeBridgeKey] == id) {
+                p.remove(activeBridgeKey)
+                p.remove(activeProfileKey)
+            }
+        }
     }
 }

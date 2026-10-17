@@ -14,8 +14,8 @@ android {
         applicationId = "app.rasul"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
     }
 
     buildTypes {
@@ -29,10 +29,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
+    sourceSets.getByName("main").assets.srcDir(rootProject.file("third_party/fonts"))
     testOptions {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
+        unitTests.all { it.forkEvery = 1 }
     }
 }
 
@@ -60,6 +62,7 @@ dependencies {
     implementation(libs.biometric)
     implementation(libs.datastore.preferences)
 
+    testImplementation("androidx.navigation:navigation-testing:2.8.9")
     testImplementation(libs.junit)
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.okhttp.tls)

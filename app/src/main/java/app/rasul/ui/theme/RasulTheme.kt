@@ -3,16 +3,23 @@ package app.rasul.ui.theme
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalInspectionMode
+import app.rasul.R
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -69,27 +76,71 @@ val DarkRasulColors = RasulColors(
 )
 
 val LocalRasulColors = staticCompositionLocalOf { LightRasulColors }
+private val LocalRasulFontFamily = staticCompositionLocalOf<FontFamily> { FontFamily.Default }
 
-/** Text styles. System fonts only (Roboto / the system Arabic face): no FontFamily is set. */
+internal fun rasulFontFamily(language: String): FontFamily = if (language == "ar") {
+    FontFamily(
+        Font(R.font.ibm_plex_sans_arabic_regular, FontWeight.Normal),
+        Font(R.font.ibm_plex_sans_arabic_medium, FontWeight.Medium),
+        Font(R.font.ibm_plex_sans_arabic_semibold, FontWeight.SemiBold),
+        Font(R.font.ibm_plex_sans_arabic_bold, FontWeight.Bold),
+    )
+} else {
+    FontFamily(
+        Font(R.font.readex_pro_regular, FontWeight.Normal),
+        Font(R.font.readex_pro_medium, FontWeight.Medium),
+        Font(R.font.readex_pro_semibold, FontWeight.SemiBold),
+        Font(R.font.readex_pro_bold, FontWeight.Bold),
+    )
+}
+
+internal val RasulMonoFontFamily = FontFamily(
+    Font(R.font.ibm_plex_mono_regular, FontWeight.Normal),
+    Font(R.font.ibm_plex_mono_medium, FontWeight.Medium),
+)
+
+internal fun rasulTypography(fontFamily: FontFamily): Typography {
+    val base = Typography()
+    return base.copy(
+    displayLarge = base.displayLarge.copy(fontFamily = fontFamily),
+    displayMedium = base.displayMedium.copy(fontFamily = fontFamily),
+    displaySmall = base.displaySmall.copy(fontFamily = fontFamily),
+    headlineLarge = base.headlineLarge.copy(fontFamily = fontFamily),
+    headlineMedium = base.headlineMedium.copy(fontFamily = fontFamily),
+    headlineSmall = base.headlineSmall.copy(fontFamily = fontFamily),
+    titleLarge = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, fontFamily = fontFamily),
+    titleMedium = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold, fontFamily = fontFamily),
+    titleSmall = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold, fontFamily = fontFamily),
+    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 21.sp, fontFamily = fontFamily),
+    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 19.sp, fontFamily = fontFamily),
+    bodySmall = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontFamily = fontFamily),
+    labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold, fontFamily = fontFamily),
+    labelMedium = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium, fontFamily = fontFamily),
+    labelSmall = TextStyle(fontSize = 10.5.sp, fontWeight = FontWeight.Medium, fontFamily = fontFamily),
+    )
+}
+
+/** Text styles use the current app locale's Readex Pro or IBM Plex Sans Arabic family. */
 object RasulType {
-    val title = TextStyle(fontSize = 34.sp, fontWeight = FontWeight.Bold)
-    val sheetTitle = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold)
-    val dialogTitle = TextStyle(fontSize = 19.sp, fontWeight = FontWeight.Bold)
-    val emptyTitle = TextStyle(fontSize = 24.sp, fontWeight = FontWeight.Bold)
-    val rowTitle = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-    val rowSub = TextStyle(fontSize = 14.sp, lineHeight = 19.sp)
-    val body = TextStyle(fontSize = 15.sp, lineHeight = 21.sp)
-    val bodySmall = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
-    val meta = TextStyle(fontSize = 13.sp)
-    val sectionLabel = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium)
-    val chip = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium)
-    val tab = TextStyle(fontSize = 10.5.sp, fontWeight = FontWeight.Medium)
-    val button = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-    val buttonSmall = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-    val pill = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium)
-    val navBar = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-    val navAction = TextStyle(fontSize = 17.sp)
-    val optionTitle = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium)
+    private val family: FontFamily @Composable get() = LocalRasulFontFamily.current
+    val title: TextStyle @Composable get() = TextStyle(fontSize = 34.sp, fontWeight = FontWeight.Bold, fontFamily = family)
+    val sheetTitle: TextStyle @Composable get() = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, fontFamily = family)
+    val dialogTitle: TextStyle @Composable get() = TextStyle(fontSize = 19.sp, fontWeight = FontWeight.Bold, fontFamily = family)
+    val emptyTitle: TextStyle @Composable get() = TextStyle(fontSize = 24.sp, fontWeight = FontWeight.Bold, fontFamily = family)
+    val rowTitle: TextStyle @Composable get() = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold, fontFamily = family)
+    val rowSub: TextStyle @Composable get() = TextStyle(fontSize = 14.sp, lineHeight = 19.sp, fontFamily = family)
+    val body: TextStyle @Composable get() = TextStyle(fontSize = 15.sp, lineHeight = 21.sp, fontFamily = family)
+    val bodySmall: TextStyle @Composable get() = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontFamily = family)
+    val meta: TextStyle @Composable get() = TextStyle(fontSize = 13.sp, fontFamily = family)
+    val sectionLabel: TextStyle @Composable get() = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = family)
+    val chip: TextStyle @Composable get() = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium, fontFamily = family)
+    val tab: TextStyle @Composable get() = TextStyle(fontSize = 10.5.sp, fontWeight = FontWeight.Medium, fontFamily = family)
+    val button: TextStyle @Composable get() = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold, fontFamily = family)
+    val buttonSmall: TextStyle @Composable get() = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold, fontFamily = family)
+    val pill: TextStyle @Composable get() = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFamily = family)
+    val navBar: TextStyle @Composable get() = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.SemiBold, fontFamily = family)
+    val navAction: TextStyle @Composable get() = TextStyle(fontSize = 17.sp, fontFamily = family)
+    val optionTitle: TextStyle @Composable get() = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium, fontFamily = family)
 }
 
 object RasulShapes {
@@ -113,30 +164,48 @@ object Rasul {
 
 @Composable
 fun RasulTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
-    val c = if (dark) DarkRasulColors else LightRasulColors
-    val scheme = if (dark) {
+    val language = LocalConfiguration.current.locales[0].language
+    val fontFamily = remember(language) { rasulFontFamily(language) }
+    // Preview night mode uses the same palette and Material roles as the application.
+    val useDark = if (LocalInspectionMode.current) isSystemInDarkTheme() else dark
+    val c = if (useDark) DarkRasulColors else LightRasulColors
+    val scheme = if (useDark) {
         darkColorScheme(
             primary = c.accent, onPrimary = c.onAccent, background = c.bg, onBackground = c.ink,
             surface = c.bg, onSurface = c.ink, surfaceVariant = c.fill, onSurfaceVariant = c.muted,
-            outline = c.hairline, error = c.danger, surfaceContainerHigh = c.bg,
+            outline = c.cardBorder, outlineVariant = c.cardBorder,
+            primaryContainer = c.accentSoft, onPrimaryContainer = c.accentHintText,
+            secondary = c.accent, onSecondary = c.onAccent,
+            secondaryContainer = c.accentSoft, onSecondaryContainer = c.accentHintText,
+            error = c.danger, onError = c.onAccent,
+            errorContainer = c.dangerSoft, onErrorContainer = c.dangerText,
+            surfaceTint = Color.Transparent, scrim = c.scrim,
+            surfaceDim = c.bg, surfaceBright = c.bg,
+            surfaceContainerLowest = c.bg, surfaceContainerLow = c.bg,
+            surfaceContainer = c.bg, surfaceContainerHigh = c.bg, surfaceContainerHighest = c.fill,
         )
     } else {
         lightColorScheme(
             primary = c.accent, onPrimary = c.onAccent, background = c.bg, onBackground = c.ink,
             surface = c.bg, onSurface = c.ink, surfaceVariant = c.fill, onSurfaceVariant = c.muted,
-            outline = c.hairline, error = c.danger, surfaceContainerHigh = c.bg,
+            outline = c.cardBorder, outlineVariant = c.cardBorder,
+            primaryContainer = c.accentSoft, onPrimaryContainer = c.accentHintText,
+            secondary = c.accent, onSecondary = c.onAccent,
+            secondaryContainer = c.accentSoft, onSecondaryContainer = c.accentHintText,
+            error = c.danger, onError = c.onAccent,
+            errorContainer = c.dangerSoft, onErrorContainer = c.dangerText,
+            surfaceTint = Color.Transparent, scrim = c.scrim,
+            surfaceDim = c.bg, surfaceBright = c.bg,
+            surfaceContainerLowest = c.bg, surfaceContainerLow = c.bg,
+            surfaceContainer = c.bg, surfaceContainerHigh = c.bg, surfaceContainerHighest = c.fill,
         )
     }
-    val type = Typography(
-        titleLarge = RasulType.sheetTitle, titleMedium = RasulType.rowTitle, titleSmall = RasulType.rowTitle,
-        bodyLarge = RasulType.body, bodyMedium = RasulType.rowSub, bodySmall = RasulType.bodySmall,
-        labelLarge = RasulType.buttonSmall, labelMedium = RasulType.chip, labelSmall = RasulType.tab,
-    )
+    val type = rasulTypography(fontFamily)
     val shapes = Shapes(
         small = RasulShapes.input, medium = RasulShapes.card, large = RasulShapes.dialog,
         extraLarge = RasulShapes.dialog,
     )
-    CompositionLocalProvider(LocalRasulColors provides c) {
+    CompositionLocalProvider(LocalRasulColors provides c, LocalRasulFontFamily provides fontFamily, LocalContentColor provides c.ink) {
         MaterialTheme(colorScheme = scheme, typography = type, shapes = shapes, content = content)
     }
 }

@@ -1,12 +1,18 @@
 package app.rasul
 
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.sp
+import app.rasul.R
 import app.rasul.chat.codeTextStyle
-import app.rasul.ui.theme.RasulType
+import app.rasul.ui.theme.RasulMonoFontFamily
+import app.rasul.ui.theme.rasulFontFamily
+import app.rasul.ui.theme.rasulTypography
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 @org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
@@ -14,11 +20,34 @@ import org.junit.Test
 class CodeTextStyleTest {
     @Test
     fun codeTextIsForcedLeftToRightAndKeepsItsStyle() {
-        val mono = RasulType.body.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+        val mono = TextStyle(fontFamily = RasulMonoFontFamily, fontSize = 13.sp)
         val styled = codeTextStyle(mono)
         assertEquals(TextDirection.Ltr, styled.textDirection)
-        assertEquals(FontFamily.Monospace, styled.fontFamily)
+        assertEquals(RasulMonoFontFamily, styled.fontFamily)
         assertEquals(mono.fontSize, styled.fontSize)
+    }
+
+    @Test
+    fun monoFamilyIncludesNormalAndMediumWeights() {
+        assertEquals(
+            FontFamily(
+                Font(R.font.ibm_plex_mono_regular, FontWeight.Normal),
+                Font(R.font.ibm_plex_mono_medium, FontWeight.Medium),
+            ),
+            RasulMonoFontFamily,
+        )
+    }
+
+    @Test
+    fun appFontFamilyFollowsResolvedLanguageAndMaterialDefaults() {
+        val arabic = rasulFontFamily("ar")
+        val english = rasulFontFamily("en")
+        val other = rasulFontFamily("fr")
+
+        assertEquals(english, other)
+        assertEquals(english, rasulTypography(english).bodyLarge.fontFamily)
+        assertEquals(arabic, rasulTypography(arabic).bodyLarge.fontFamily)
+        assertNotEquals(english, arabic)
     }
 
     @Test

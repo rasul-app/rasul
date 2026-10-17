@@ -5,9 +5,9 @@ The phone authenticates using its own certificate. An opaque WebSocket carries
 TLS 1.3 all the way from the phone to this bridge, including through a tunnel.
 See the [protocol](../docs/bridge-protocol.md) for the client contract.
 
-This package supplies the computer side. A phone client must implement the v1
-bridge scanner, SPKI pinning, inner TLS transport, and device-key authentication.
-The existing direct-connection screen does not implement that transport.
+This package supplies the computer side of the bridge. Pair the phone by scanning
+the QR code from `rasul-bridge pair`; the companion app handles connection
+security and device authentication.
 
 ## Setup
 
@@ -84,13 +84,19 @@ The existing direct-connection screen does not implement that transport.
    `rasul-bridge revoke <id>`; the serving process closes its open connections
    and refuses subsequent requests. Re-pair with a new device key after revocation.
 
+## Pairing problems
+
+- QR expired: run `rasul-bridge pair` again and scan the new code.
+- Codes do not match: answer `n` on the computer, then run `rasul-bridge pair` again.
+- Phone says it cannot connect: check `rasul-bridge status`, confirm the tunnel or host is reachable, and keep the computer awake.
+
 ## Choose a transport
 
 - **Cloudflare Tunnel:** route an outbound tunnel for `example.com` to the local
   bridge listener, and put `wss://example.com/v1/link` in `public_urls`. Enable
   WebSocket forwarding. Expose the bridge only; leave the upstream API on loopback.
 - **Tailscale:** bind the bridge to the computer's overlay address and use, for
-  example, `ws://100.64.0.7:8787/v1/link`. Restrict access with overlay policy and
+  example, `ws://192.0.2.7:8787/v1/link`. Restrict access with overlay policy and
   the host firewall. Inner TLS authenticates and encrypts even with outer `ws`.
 - **LAN:** bind the bridge to a selected local interface, allow its port only on
   the trusted network, and add that interface's reachable WebSocket URL. A phone
@@ -126,8 +132,9 @@ admission slots. Pending sockets have a ten-second deadline from TCP accept;
 anonymous sockets have an absolute 15-second lifetime and allow one pairing
 request only. Pairing attempts are limited to five per minute globally and
 request bodies to 1 MiB. Requests have strict HTTP framing. The proxy
-allowlist covers health, capabilities, models, runs/events/actions, session
-listing/messages, and job listing/actions. It drops phone Authorization and
+allowlist covers health, capabilities, skills, toolsets, models, model options,
+runs and their events/actions, session listing/reading/title updates/deletion/messages,
+and job listing/creation/reading/updates/deletion/actions. It drops phone Authorization and
 hop-by-hop headers, injects the local profile key, and never follows redirects.
 SSE chunks are forwarded as they arrive. Device administration is CLI-only.
 

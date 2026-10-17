@@ -23,7 +23,9 @@ class HermesClientTest {
          "auth":{"type":"bearer","required":true},
          "features":{"chat_completions":true,"responses_api":true,"run_submission":true,"run_status":true,
                      "run_events_sse":true,"run_stop":true,"reasoning_streaming":true},
-         "session_key_header":"X-Hermes-Session-Key"}
+          "session_key_header":"X-Hermes-Session-Key",
+          "endpoints":{"skills":{"method":"GET","path":"/v1/skills"},
+                       "toolsets":{"method":"GET","path":"/v1/toolsets"}}}
     """.trimIndent()
 
     @Before fun setUp() { server = MockWebServer().apply { start() } }
@@ -37,9 +39,54 @@ class HermesClientTest {
         val r = client.capabilities(target()) as HermesResult.Ok
         assertEquals("hermes-agent", r.value.platform)
         assertTrue("run_stop" in r.value.enabledFeatures())
+        assertTrue(r.value.advertisesEndpoint("skills"))
+        assertTrue(r.value.advertisesEndpoint("toolsets"))
         val req = server.takeRequest()
         assertEquals("/v1/capabilities", req.path)
         assertEquals("Bearer secret-key", req.getHeader("Authorization"))
+
+        server.enqueue(MockResponse().setBody(
+            """{"object":"list","data":[{"name":"sample-skill","description":"Example skill","category":"example"}]}""",
+        ))
+        val skills = (client.skills(target()) as HermesResult.Ok).value
+        assertEquals("sample-skill", skills.single().name)
+        assertEquals("Example skill", skills.single().description)
+        val skillsRequest = server.takeRequest()
+        assertEquals("GET", skillsRequest.method)
+        assertEquals("/v1/skills", skillsRequest.path)
+
+        server.enqueue(MockResponse().setBody(
+            """{"object":"list","platform":"api_server","data":[{"name":"sample-tools","label":"Example tools","description":"Example toolset","enabled":true,"configured":true,"tools":["example_action_one","example_action_two"]}]}""",
+        ))
+        val toolsets = (client.toolsets(target()) as HermesResult.Ok).value
+        assertEquals(listOf("example_action_one", "example_action_two"), toolsets.single().tools)
+        val toolsetsRequest = server.takeRequest()
+        assertEquals("GET", toolsetsRequest.method)
+        assertEquals("/v1/toolsets", toolsetsRequest.path)
+
+        server.enqueue(MockResponse().setBody("""{"providers":[],"model":"example-model","provider":null}"""))
+        assertTrue(client.modelOptions(target()) is HermesResult.Ok)
+        val optionsRequest = server.takeRequest()
+        assertEquals("GET", optionsRequest.method)
+        assertEquals("/api/model/options", optionsRequest.path)
+        server.enqueue(MockResponse().setBody("""{"providers":[],"model":"example-model","provider":null}"""))
+        assertTrue(client.modelOptions(target(), refresh = true) is HermesResult.Ok)
+        val refreshRequest = server.takeRequest()
+        assertEquals("GET", refreshRequest.method)
+        assertEquals("/api/model/options?refresh=1", refreshRequest.path)
+    }
+
+    @Test fun modelOptionsReturnsProviderRows() = runBlocking {
+        server.enqueue(MockResponse().setBody(
+            """{"providers":[{"slug":"example-provider","name":"Example provider","models":["example-model"]}],"model":"example-model","provider":"example-provider"}""",
+        ))
+        val options = (client.modelOptions(target()) as HermesResult.Ok).value
+        assertEquals("example-model", options.model)
+        assertEquals("example-provider", options.provider)
+        assertEquals("example-provider", options.providers.single().slug)
+        assertEquals("Example provider", options.providers.single().name)
+        assertEquals(listOf("example-model"), options.providers.single().models)
+        assertEquals("/api/model/options", server.takeRequest().path)
     }
 
     @Test fun profileAddsPrefix() = runBlocking {

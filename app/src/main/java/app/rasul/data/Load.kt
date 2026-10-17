@@ -4,6 +4,8 @@ package app.rasul.data
 sealed interface Load<out T> {
     data object Loading : Load<Nothing>
     data object NoConnection : Load<Nothing>
+    data class BridgeUnreachable(val pcName: String) : Load<Nothing>
+    data class BridgeNoReadyBots(val pcName: String) : Load<Nothing>
     data class NoKey(val connection: String) : Load<Nothing>
     data class Failed(val error: HermesError) : Load<Nothing>
 

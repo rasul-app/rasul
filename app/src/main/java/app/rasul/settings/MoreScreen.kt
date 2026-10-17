@@ -10,24 +10,35 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import app.rasul.R
+import app.rasul.data.ActiveTarget
+import app.rasul.data.CapabilitiesDto
 import app.rasul.data.Connection
+import app.rasul.data.HermesClient
 import app.rasul.data.HermesError
+import app.rasul.data.HermesResult
 import app.rasul.data.Load
+import app.rasul.bridge.BridgeBotsState
 import app.rasul.ui.LoadView
 import app.rasul.ui.PcPicker
 import app.rasul.ui.components.InsetGroup
@@ -63,6 +74,15 @@ fun moreMode(p: PcPicker): MoreMode = when {
     else -> MoreMode.Content
 }
 
+data class PairedBridgeRow(val id: String, val name: String, val botCount: Int?)
+
+internal fun pairedBridgeRows(state: BridgeBotsState): List<PairedBridgeRow> = state.groups.map { group ->
+    PairedBridgeRow(group.id, group.name, group.profiles.size.takeIf { !group.loading && group.error == null })
+}
+
+fun skillsToolsEntryVisible(capabilities: CapabilitiesDto?): Boolean =
+    capabilities?.advertisesEndpoint("skills") == true && capabilities.advertisesEndpoint("toolsets")
+
 /** More screen and language picker. The PCs group lists saved connections and an add action. */
 @Composable
 fun MoreScreen(
@@ -73,9 +93,31 @@ fun MoreScreen(
     appLockEnabled: Boolean,
     appLockAvailable: Boolean,
     onAppLockChanged: (Boolean) -> Unit,
+    bridgeState: BridgeBotsState = BridgeBotsState(),
+    onBridgeOpen: (String) -> Unit = {},
+    appearance: AppearanceOption = AppearanceOption.System,
+    hapticsEnabled: Boolean = true,
+    versionName: String = "",
+    onAppearanceChanged: (AppearanceOption) -> Unit = {},
+    onHapticsChanged: (Boolean) -> Unit = {},
+    onHelp: () -> Unit = {},
+    onPrivacy: () -> Unit = {},
+    onFeedback: () -> Unit = {},
+    client: HermesClient? = null,
+    onSkillsTools: () -> Unit = {},
 ) {
     var current by remember { mutableStateOf(LanguageOption.fromTags(AppCompatDelegate.getApplicationLocales().toLanguageTags())) }
-    var sheet by remember { mutableStateOf(false) }
+    var sheet by rememberSaveable { mutableStateOf(false) }
+    var appearanceSheet by rememberSaveable { mutableStateOf(false) }
+    var showSkillsTools by remember(pcState.target) { mutableStateOf(false) }
+    val targetForCapabilities = (pcState.target as? ActiveTarget.Ready)?.target
+    LaunchedEffect(client, targetForCapabilities) {
+        showSkillsTools = false
+        val api = client ?: return@LaunchedEffect
+        val requestTarget = targetForCapabilities ?: return@LaunchedEffect
+        val result = api.capabilities(requestTarget)
+        showSkillsTools = (result as? HermesResult.Ok)?.value?.let(::skillsToolsEntryVisible) == true
+    }
     // Nothing until the first read ends, so a failure or a slow read never looks like "no PCs".
     when (val mode = moreMode(pcState)) {
         MoreMode.Blank -> Box(Modifier.fillMaxSize().background(Rasul.colors.bg))
@@ -86,6 +128,18 @@ fun MoreScreen(
         MoreMode.Content -> MoreContent(
             pcState.pcs, pcState.activeId, current, onAdd, onEdit,
             onLanguageRow = { sheet = true },
+            appearance = appearance,
+            hapticsEnabled = hapticsEnabled,
+            versionName = versionName,
+            onAppearanceRow = { appearanceSheet = true },
+            onHapticsChanged = onHapticsChanged,
+            onHelp = onHelp,
+            onPrivacy = onPrivacy,
+            onFeedback = onFeedback,
+            bridges = pairedBridgeRows(bridgeState),
+            onBridgeOpen = onBridgeOpen,
+            skillsToolsTargetName = (pcState.target as? ActiveTarget.Ready)?.name.takeIf { showSkillsTools },
+            onSkillsTools = onSkillsTools,
             showAppLockSetting = true,
             appLockEnabled = appLockEnabled,
             appLockAvailable = appLockAvailable,
@@ -99,6 +153,12 @@ fun MoreScreen(
             AppCompatDelegate.setApplicationLocales(o.toLocales())
         }
     }
+    if (appearanceSheet) {
+        AppearanceSheet(appearance, onDismiss = { appearanceSheet = false }) { option ->
+            appearanceSheet = false
+            onAppearanceChanged(option)
+        }
+    }
 }
 
 @Composable
@@ -109,20 +169,44 @@ fun MoreContent(
     onAdd: () -> Unit,
     onEdit: (String) -> Unit,
     onLanguageRow: () -> Unit,
+    bridges: List<PairedBridgeRow> = emptyList(),
+    onBridgeOpen: (String) -> Unit = {},
     showAppLockSetting: Boolean = false,
     appLockEnabled: Boolean = false,
     appLockAvailable: Boolean = true,
     onAppLockChanged: (Boolean) -> Unit = {},
+    appearance: AppearanceOption = AppearanceOption.System,
+    hapticsEnabled: Boolean = true,
+    versionName: String = "",
+    onAppearanceRow: () -> Unit = {},
+    onHapticsChanged: (Boolean) -> Unit = {},
+    onHelp: () -> Unit = {},
+    onPrivacy: () -> Unit = {},
+    onFeedback: () -> Unit = {},
+    skillsToolsTargetName: String? = null,
+    onSkillsTools: () -> Unit = {},
 ) {
     val c = Rasul.colors
-    val rowPad = PaddingValues(start = 16.dp, end = 14.dp, top = 12.dp, bottom = 12.dp)
+    val rowPad = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 14.dp)
     Column(Modifier.fillMaxSize().background(c.bg).verticalScroll(rememberScrollState())) {
-        ScreenHeader(stringResource(R.string.tab_more))
+        ScreenHeader(stringResource(R.string.tab_more), modifier = Modifier.padding(top = 6.dp, bottom = 9.dp))
         SectionLabel(stringResource(R.string.more_pcs))
-        InsetGroup {
+        InsetGroup(contentPadding = PaddingValues(vertical = 16.dp)) {
+            bridges.forEach { bridge ->
+                RasulRow(
+                    onClick = { onBridgeOpen(bridge.id) }, hairlineStart = 16.dp, hairlineEnd = 54.dp, gap = 12.dp, textSpacing = 4.dp,
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
+                    leading = { Icon(RasulIcons.Pc, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+                    trailing = { Text(stringResource(R.string.bridge_status_paired), style = RasulType.sectionLabel, color = c.accent) },
+                ) {
+                    RowTitle(bridge.name)
+                    bridge.botCount?.let { RowSub(pluralStringResource(R.plurals.bridge_bot_count, it, it), maxLines = 1) }
+                }
+            }
             pcs.forEach { pc ->
                 RasulRow(
-                    onClick = { onEdit(pc.id) }, hairlineStart = 54.dp, contentPadding = rowPad,
+                    onClick = { onEdit(pc.id) }, hairlineStart = 16.dp, hairlineEnd = 54.dp, gap = 12.dp, textSpacing = 4.dp,
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
                     leading = { Icon(RasulIcons.Pc, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
                     trailing = {
                         if (pc.id == activeId) Text(stringResource(R.string.pc_active), style = RasulType.sectionLabel, color = c.accent)
@@ -133,27 +217,108 @@ fun MoreContent(
                 }
             }
             RasulRow(
-                onClick = onAdd, last = true, contentPadding = rowPad,
-                leading = { Icon(RasulIcons.Plus, null, tint = c.accent, modifier = Modifier.size(24.dp)) },
+                onClick = onAdd, last = true, minHeight = 32.dp, gap = 6.dp,
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                leading = { Icon(RasulIcons.Plus, null, tint = c.accent, modifier = Modifier.size(20.dp)) },
             ) { RowTitle(stringResource(R.string.add_pc), c.accent) }
         }
+        if (skillsToolsTargetName != null) {
+            SectionLabel(stringResource(R.string.ux3b_skills_tools_section))
+            InsetGroup(contentPadding = PaddingValues(vertical = 16.dp)) {
+                RasulRow(
+                    onClick = onSkillsTools, last = true, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                    leading = { Icon(RasulIcons.Chat, null, tint = c.accent, modifier = Modifier.size(24.dp)) },
+                    trailing = { Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp)) },
+                ) {
+                    RowTitle(stringResource(R.string.ux3b_skills_tools_title))
+                    RowSub(stringResource(R.string.ux3b_skills_tools_target, skillsToolsTargetName), maxLines = 1)
+                }
+            }
+        }
         SectionLabel(stringResource(R.string.more_settings))
-        InsetGroup {
+        InsetGroup(contentPadding = PaddingValues(vertical = 16.dp)) {
             if (showAppLockSetting) {
                 AppLockSettingRow(appLockEnabled, appLockAvailable, onAppLockChanged, last = false)
             }
             RasulRow(
-                onClick = onLanguageRow, last = true, contentPadding = rowPad,
+                onClick = onAppearanceRow, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                leading = { Icon(RasulIcons.Info, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+                trailing = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(appearance.label(), style = RasulType.bodySmall, color = c.muted)
+                        Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp))
+                    }
+                },
+            ) { RowTitle(stringResource(R.string.settings_appearance)) }
+            RasulRow(
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 6.dp),
+                gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                leading = { Icon(RasulIcons.Info, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+                trailing = {
+                    Box(Modifier.width(104.dp), contentAlignment = AbsoluteAlignment.CenterLeft) {
+                    app.rasul.ui.components.RasulToggle(
+                        hapticsEnabled,
+                        label = stringResource(R.string.settings_haptics),
+                        onCheckedChange = onHapticsChanged,
+                    )
+                    }
+                },
+            ) { RowTitle(stringResource(R.string.settings_haptics)) }
+            RasulRow(
+                onClick = onHelp, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                leading = { Icon(RasulIcons.Info, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+            ) { RowTitle(stringResource(R.string.settings_help)) }
+            RasulRow(
+                onClick = onPrivacy, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                leading = { Icon(RasulIcons.Lock, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+            ) { RowTitle(stringResource(R.string.settings_privacy)) }
+            RasulRow(
+                onClick = onFeedback, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                leading = { Icon(RasulIcons.Chat, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+            ) { RowTitle(stringResource(R.string.settings_feedback)) }
+            RasulRow(
+                contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                leading = { Icon(RasulIcons.Info, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+                trailing = { Text(versionName, style = RasulType.bodySmall, color = c.muted) },
+            ) { RowTitle(stringResource(R.string.settings_version)) }
+            RasulRow(
+                onClick = onLanguageRow, last = true, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
                 leading = { Icon(RasulIcons.Globe, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
                 trailing = {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(language.label(), style = RasulType.body, color = c.muted)
+                        Text(language.label(), style = RasulType.bodySmall, color = c.muted)
                         Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp))
                     }
                 },
             ) { RowTitle(stringResource(R.string.more_language)) }
         }
-        Text(stringResource(R.string.unofficial_notice), style = RasulType.bodySmall, color = c.muted, modifier = Modifier.padding(24.dp))
+        Text(stringResource(R.string.unofficial_notice), style = RasulType.bodySmall, color = c.muted, modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp))
+    }
+}
+
+internal fun AppearanceOption.labelResource(): Int = when (this) {
+    AppearanceOption.System -> R.string.appearance_system
+    AppearanceOption.Light -> R.string.appearance_light
+    AppearanceOption.Dark -> R.string.appearance_dark
+}
+
+@Composable
+internal fun AppearanceOption.label(): String = stringResource(labelResource())
+
+@Composable
+fun AppearanceSheet(current: AppearanceOption, onDismiss: () -> Unit, onPick: (AppearanceOption) -> Unit) {
+    val c = Rasul.colors
+    RasulSheet(stringResource(R.string.settings_appearance), onDismiss) {
+        AppearanceOption.entries.forEachIndexed { index, option ->
+            RasulRow(
+                onClick = { onPick(option) }, hairlineStart = 0.dp,
+                last = index == AppearanceOption.entries.lastIndex,
+                contentPadding = PaddingValues(vertical = 14.dp),
+                selected = option == current,
+            ) {
+                Text(option.label(), style = RasulType.optionTitle, color = c.ink)
+            }
+        }
     }
 }
 
@@ -163,10 +328,14 @@ private fun AppLockSettingRow(
     available: Boolean,
     onChanged: (Boolean) -> Unit,
     last: Boolean,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+    textSpacing: Dp = 4.dp,
+    leading: (@Composable () -> Unit)? = { Icon(RasulIcons.Lock, null, tint = Rasul.colors.ink, modifier = Modifier.size(24.dp)) },
 ) {
     RasulRow(
-        last = last,
-        leading = { Icon(RasulIcons.Lock, null, tint = Rasul.colors.ink, modifier = Modifier.size(24.dp)) },
+        last = last, gap = 10.dp, textSpacing = textSpacing, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+        contentPadding = contentPadding,
+        leading = leading,
         trailing = {
             app.rasul.ui.components.RasulToggle(
                 enabled,
@@ -184,9 +353,12 @@ private fun AppLockSettingRow(
 @Composable
 private fun LockSettingPreview() {
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
-        ScreenHeader(stringResource(R.string.tab_more))
-        SectionLabel(stringResource(R.string.more_settings))
-        InsetGroup { AppLockSettingRow(enabled = false, available = true, onChanged = {}, last = true) }
+        ScreenHeader(stringResource(R.string.tab_more), modifier = Modifier.padding(top = 6.dp, bottom = 9.dp))
+        SectionLabel(stringResource(R.string.more_settings), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 8.dp))
+        InsetGroup(contentPadding = PaddingValues(vertical = 16.dp)) {
+            AppLockSettingRow(enabled = false, available = true, onChanged = {}, last = true,
+                contentPadding = PaddingValues(start = 16.dp, end = 31.dp), textSpacing = 3.dp, leading = null)
+        }
     }
 }
 
@@ -197,8 +369,8 @@ fun LanguageSheet(current: LanguageOption, onDismiss: () -> Unit, onPick: (Langu
     RasulSheet(stringResource(R.string.more_language), onDismiss) {
         LanguageOption.entries.forEachIndexed { i, o ->
             RasulRow(
-                onClick = { onPick(o) }, hairlineStart = 0.dp, last = i == LanguageOption.entries.lastIndex,
-                contentPadding = PaddingValues(vertical = 14.dp),
+                onClick = { onPick(o) }, hairlineStart = 0.dp, minHeight = 50.dp, last = i == LanguageOption.entries.lastIndex,
+                contentPadding = PaddingValues(vertical = 14.dp), textSpacing = 2.dp, hairlineEnd = 0.dp,
                 selected = o == current,
                 trailing = {
                     if (o == current) Icon(RasulIcons.Check, null, tint = c.accent, modifier = Modifier.size(22.dp))
@@ -215,17 +387,46 @@ fun LanguageSheet(current: LanguageOption, onDismiss: () -> Unit, onPick: (Langu
 }
 
 private val samplePcs = listOf(
-    Connection("a", "Home PC", "http://100.64.0.7:8642", "default"),
-    Connection("b", "Laptop", "http://100.64.0.9:8642", "default"),
+    Connection("a", "My PC", "http://192.0.2.7:8642", "default"),
+    Connection("b", "Laptop", "http://192.0.2.9:8642", "default"),
 )
+private val sampleBridgeRows = listOf(PairedBridgeRow("bridge-sample", "Studio PC", 3))
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 700)
 @Composable
 private fun MoreEn() = RasulTheme(false) { MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}) }
 
-@Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
+@Preview(showBackground = true, widthDp = 390, heightDp = 800, locale = "ar")
 @Composable
 private fun MoreAr() = RasulTheme(false) { MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}) }
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900)
+@Composable
+private fun SettingsEn() = RasulTheme(false) {
+    MoreContent(
+        samplePcs, "a", LanguageOption.System, {}, {}, {},
+        showAppLockSetting = true, appearance = AppearanceOption.System,
+        hapticsEnabled = true, versionName = app.rasul.BuildConfig.VERSION_NAME,
+    )
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900, locale = "ar")
+@Composable
+private fun SettingsAr() = RasulTheme(false) {
+    MoreContent(
+        samplePcs, "a", LanguageOption.System, {}, {}, {},
+        showAppLockSetting = true, appearance = AppearanceOption.System,
+        hapticsEnabled = true, versionName = app.rasul.BuildConfig.VERSION_NAME,
+    )
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900)
+@Composable
+private fun MoreBridgeEn() = RasulTheme(false) { MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}, bridges = sampleBridgeRows) }
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900, locale = "ar")
+@Composable
+private fun MoreBridgeAr() = RasulTheme(false) { MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}, bridges = sampleBridgeRows) }
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 700)
 @Composable
@@ -242,3 +443,11 @@ private fun LanguageSheetEn() = RasulTheme(false) { LanguageSheet(LanguageOption
 @Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
 @Composable
 private fun LanguageSheetAr() = RasulTheme(false) { LanguageSheet(LanguageOption.System, {}, {}) }
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700)
+@Composable
+private fun AppearanceSheetEn() = RasulTheme(false) { AppearanceSheet(AppearanceOption.System, {}, {}) }
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
+@Composable
+private fun AppearanceSheetAr() = RasulTheme(false) { AppearanceSheet(AppearanceOption.System, {}, {}) }

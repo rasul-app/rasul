@@ -77,36 +77,39 @@ fun ScanContent(
         }
     },
 ) {
-    Column(Modifier.fillMaxSize().background(Rasul.colors.bg).padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-        Text(stringResource(R.string.pair_scan_title), style = RasulType.title, color = Rasul.colors.ink)
-        when (state) {
-            PairingState.Scanning -> if (!permission) {
-                Text(stringResource(if (denied) R.string.pair_permission_denied else R.string.pair_permission_needed), color = Rasul.colors.ink)
-                PrimaryButton(stringResource(R.string.pair_allow_camera), onPermission)
-                if (denied) SecondaryButton(stringResource(R.string.pair_open_settings), onSettings, modifier = Modifier.fillMaxWidth())
-            } else {
-                Text(stringResource(R.string.pair_scan_hint), color = Rasul.colors.ink)
-                camera()
+    Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
+        Text(stringResource(R.string.pair_scan_title), style = RasulType.title, color = Rasul.colors.ink,
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 33.dp))
+        Column(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            when (state) {
+                PairingState.Scanning -> if (!permission) {
+                    Text(stringResource(if (denied) R.string.pair_permission_denied else R.string.pair_permission_needed), style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.padding(bottom = 2.dp))
+                    PrimaryButton(stringResource(R.string.pair_allow_camera), onPermission)
+                    if (denied) SecondaryButton(stringResource(R.string.pair_open_settings), onSettings, modifier = Modifier.fillMaxWidth())
+                } else {
+                    Text(stringResource(R.string.pair_scan_hint), style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.padding(bottom = 2.dp))
+                    camera()
+                }
+                is PairingState.Sending -> {
+                    Text(state.name, style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.padding(bottom = 2.dp))
+                    Text(stringResource(R.string.pair_compare), style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.padding(bottom = 2.dp))
+                    val spokenCode = state.code?.toCharArray()?.joinToString(" ")
+                    Text(state.code ?: stringResource(R.string.pair_connecting),
+                        style = RasulType.title.copy(textDirection = androidx.compose.ui.text.style.TextDirection.Ltr),
+                        color = Rasul.colors.accent,
+                        modifier = Modifier.semantics { if (spokenCode != null) contentDescription = spokenCode })
+                    Text(stringResource(R.string.pair_wait_owner), style = RasulType.body, color = Rasul.colors.muted, modifier = Modifier.padding(bottom = 2.dp))
+                }
+                is PairingState.Failed -> {
+                    Text(stringResource(state.message), color = Rasul.colors.danger)
+                    PrimaryButton(stringResource(R.string.pair_scan_again), onRetry)
+                }
+                is PairingState.Paired -> {
+                    Text(stringResource(R.string.pair_success, state.name), color = Rasul.colors.ink)
+                }
             }
-            is PairingState.Sending -> {
-                Text(state.name, color = Rasul.colors.ink)
-                Text(stringResource(R.string.pair_compare), style = RasulType.body, color = Rasul.colors.ink)
-                val spokenCode = state.code?.toCharArray()?.joinToString(" ")
-                Text(state.code ?: stringResource(R.string.pair_connecting),
-                    style = RasulType.title.copy(textDirection = androidx.compose.ui.text.style.TextDirection.Ltr),
-                    color = Rasul.colors.accent,
-                    modifier = Modifier.semantics { if (spokenCode != null) contentDescription = spokenCode })
-                Text(stringResource(R.string.pair_wait_owner), color = Rasul.colors.muted)
-            }
-            is PairingState.Failed -> {
-                Text(stringResource(state.message), color = Rasul.colors.danger)
-                PrimaryButton(stringResource(R.string.pair_scan_again), onRetry)
-            }
-            is PairingState.Paired -> {
-                Text(stringResource(R.string.pair_success, state.name), color = Rasul.colors.ink)
-            }
+            SecondaryButton(stringResource(R.string.back), onClose, modifier = Modifier.fillMaxWidth())
         }
-        SecondaryButton(stringResource(R.string.back), onClose, modifier = Modifier.fillMaxWidth())
     }
 }
 

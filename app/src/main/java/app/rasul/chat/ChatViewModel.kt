@@ -15,6 +15,7 @@ import app.rasul.sessions.SessionsApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,6 +55,7 @@ sealed interface ChatFailure {
     /** The saved connection was deleted, or its key can no longer be read. */
     data object ConnectionMissing : ChatFailure
     data object KeyMissing : ChatFailure
+    data object PreviousRunActive : ChatFailure
     data object SessionUnavailable : ChatFailure
     data object AnswerUnsaved : ChatFailure
 }
@@ -106,6 +108,7 @@ sealed interface ChatLoad {
 
 data class ChatState(
     val load: ChatLoad = ChatLoad.Loading,
+    val sessionId: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val run: ActiveRun? = null,
     /** Pending approvals, oldest first, identified by request id. */
@@ -114,7 +117,15 @@ data class ChatState(
     val answering: Set<String> = emptySet(),
     val draft: String = "",
     val historyFailure: ChatFailure? = null,
+    val terminal: RunEvent? = null,
+    val terminalFailure: ChatFailure? = null,
+    val finishedRunId: String? = null,
+    val queuedReplies: Int = 0,
+    val preparingSend: Boolean = false,
 ) {
+    val canChooseModel: Boolean get() = load == ChatLoad.Ready && sessionId != null &&
+        run == null && !preparingSend && queuedReplies == 0
+
     /** The one the sheet shows: the oldest still pending. */
     val approval: ApprovalUi? get() = approvals.firstOrNull()
 }
@@ -127,10 +138,40 @@ fun interface TargetLoader {
 /** What survives leaving the chat: one session id per connection+profile, plus the active run and its last event id. */
 interface RunMemory {
     suspend fun sessionId(): String
+    suspend fun currentSessionId(): String? = null
+    suspend fun newSessionFailure(): ChatFailure? = null
     suspend fun activeRun(): String?
     suspend fun lastEventId(): Long?
     suspend fun anchor(): Anchor = Anchor.Unknown
     suspend fun setActiveRun(runId: String?, lastEventId: Long? = null, anchor: Anchor = Anchor.Unknown)
+    suspend fun setSessionId(sessionId: String) = Unit
+    suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor) {
+        setSessionId(sessionId)
+        setActiveRun(runId, lastEventId, anchor)
+    }
+}
+
+fun newChatRunMemory(persistent: RunMemory, newSession: String): RunMemory = object : RunMemory {
+    private suspend fun persisted() = persistent.currentSessionId() == newSession
+    override suspend fun sessionId() = newSession
+    override suspend fun currentSessionId() = newSession
+    override suspend fun newSessionFailure(): ChatFailure? = try {
+        if (!persisted() && persistent.activeRun() != null) ChatFailure.PreviousRunActive else null
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        ChatFailure.SessionUnavailable
+    }
+    override suspend fun activeRun(): String? = if (persisted()) persistent.activeRun() else null
+    override suspend fun lastEventId(): Long? = if (persisted()) persistent.lastEventId() else null
+    override suspend fun anchor() = if (persisted()) persistent.anchor() else Anchor.Unknown
+    override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) {
+        if (persisted()) {
+            persistent.setActiveRun(runId, lastEventId, anchor)
+        } else if (runId != null) {
+            persistent.setCurrentSessionRun(newSession, runId, lastEventId, anchor)
+        }
+    }
 }
 
 /** Known(null) anchors a turn to an empty transcript; Unknown supports older breadcrumbs. */
@@ -162,12 +203,24 @@ class ChatViewModel(
         followRun(open = { last -> runs.events(t, id, last) }, startAfter = after)
     },
     private val newKey: () -> String = { UUID.randomUUID().toString() },
+    scope: kotlinx.coroutines.CoroutineScope? = null,
 ) : ViewModel() {
+    private val chatScope = kotlinx.coroutines.CoroutineScope((scope ?: viewModelScope).coroutineContext + kotlinx.coroutines.SupervisorJob((scope ?: viewModelScope).coroutineContext[Job]))
+    internal var onFinished: ((String, ChatState) -> Unit)? = null
+
+    fun close() {
+        onFinished = null
+        notificationReplies.close()
+        chatScope.coroutineContext[Job]?.cancel()
+    }
+    private val notificationReplies = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private val _state = MutableStateFlow(ChatState())
     val state: StateFlow<ChatState> = _state
 
     private var target: HermesTarget? = null
     private var sessionId: String? = null
+    internal val resolvedTarget: HermesTarget? get() = target
+    internal val resolvedSessionId: String? get() = sessionId
     private var nextId = 1L
     private var followJob: Job? = null
     private var statusJob: Job? = null
@@ -180,14 +233,47 @@ class ChatViewModel(
     private var notices = emptyList<Notice>()
     private var historySequence = 0L
     private var newestAppliedHistory = 0L
-    private var preparingSend = false
+    private var preparingSend: Boolean
+        get() = _state.value.preparingSend
+        set(value) { _state.update { if (value) it.copy(preparingSend = true, terminal = null, terminalFailure = null, finishedRunId = null) else it.copy(preparingSend = false) } }
 
     /** The key of the message whose start has not been acknowledged yet; reused when the same text is sent again. */
     private var pendingKey: Pair<String, String>? = null
     private val steerLock = Mutex()
 
     init {
-        viewModelScope.launch {
+        chatScope.launch {
+            for (text in notificationReplies) {
+                try {
+                    state.first { it.load != ChatLoad.Loading }
+                    val t = target
+                    if (t == null) {
+                        restoreDraft(text, sameRun = false)
+                        continue
+                    }
+                    val active = state.value.run?.runId
+                    if (active != null) {
+                        val result = steerLock.withLock {
+                            if (isCurrent(active)) runs.steer(t, active, text) else null
+                        }
+                        if (result is HermesResult.Ok) {
+                            updateRun(active) { it.msg(MessageKind.UserSteer, text) }
+                            continue
+                        }
+                        if (result is HermesResult.Err && result.error != HermesError.Server(409)) {
+                            _state.update { it.fail(ChatFailure.Api(result.error)) }
+                        }
+                        if (result is HermesResult.Err && result.error == HermesError.Server(409) && isCurrent(active)) steerRefused(t, active)
+                    }
+                    state.first { it.run == null && !it.preparingSend }
+                    sendText(text, fromNotification = true)?.join()
+                    if (state.value.run == null && state.value.historyFailure != null) restoreDraft(text, sameRun = false)
+                } finally {
+                    _state.update { it.copy(queuedReplies = it.queuedReplies - 1) }
+                }
+            }
+        }
+        chatScope.launch {
             when (val r = loader.load()) {
                 is HermesResult.Ok -> {
                     target = r.value
@@ -328,9 +414,39 @@ class ChatViewModel(
     }
 
     private suspend fun readSessionId(): String? {
-        sessionId?.let { return it }
         return try {
-            memory.sessionId().also { sessionId = it }
+            val previous = sessionId
+            val current = memory.sessionId()
+            if (previous != null && previous != current) {
+                followJob?.cancel()
+                statusJob?.cancel()
+                historySequence++
+                newestAppliedHistory = historySequence
+                historyLoaded = false
+                serverHistory = emptyList()
+                historyIds.clear()
+                nextHistoryId = -1L
+                pendingTurn = null
+                notices = emptyList()
+                pendingKey = null
+                missingRunWaitingForHistory = null
+                persist(null)
+                _state.update {
+                    it.copy(
+                        messages = emptyList(),
+                        run = null,
+                        approvals = emptyList(),
+                        answering = emptySet(),
+                        historyFailure = null,
+                        terminal = null,
+                        terminalFailure = null,
+                        finishedRunId = null,
+                    )
+                }
+            }
+            sessionId = current
+            _state.update { it.copy(sessionId = current) }
+            current
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -353,7 +469,7 @@ class ChatViewModel(
     /** Each response owns its request sequence; older responses cannot overwrite newer history. */
     fun retryHistory() {
         val t = target ?: return
-        viewModelScope.launch { readSessionId()?.let { loadHistory(t, it) } }
+        chatScope.launch { readSessionId()?.let { loadHistory(t, it) } }
     }
 
     private suspend fun loadHistory(t: HermesTarget, id: String): Boolean {
@@ -394,7 +510,13 @@ class ChatViewModel(
         val id = missingRunWaitingForHistory ?: return
         if (!historyLoaded || !isCurrent(id)) return
         missingRunWaitingForHistory = null
-        if (pendingTurn?.let { after(it.anchor) }?.any { it.role == "assistant" } == true) finish(id, outcome = Outcome.Answered) else finish(id) { it.fail(ChatFailure.Api(HermesError.NotFound)) }
+        finishMissingRun(id)
+    }
+
+    private fun finishMissingRun(id: String) {
+        val answer = pendingTurn?.let { after(it.anchor) }?.lastOrNull { it.role == "assistant" }?.message?.text
+        if (answer != null) finish(id, outcome = Outcome.Answered) { it.copy(terminal = RunEvent.Completed(answer), terminalFailure = null) }
+        else finish(id) { it.copy(terminalFailure = ChatFailure.Api(HermesError.NotFound)).fail(ChatFailure.Api(HermesError.NotFound)) }
     }
 
     /** The ONLY place a run is cleared. Cancels its follower and status check, returns an undelivered steer to the composer. */
@@ -414,17 +536,19 @@ class ChatViewModel(
         followJob?.cancel()
         statusJob?.cancel()
         if (missingRunWaitingForHistory == id) missingRunWaitingForHistory = null
-        var finished = changed.copy(run = null, approvals = emptyList(), answering = emptySet())
+        var finished = changed.copy(run = null, finishedRunId = id, approvals = emptyList(), answering = emptySet())
         if (!pendingSteer.isNullOrBlank()) {
             finished = finished.copy(draft = joinDraft(pendingSteer, finished.draft)).msg(MessageKind.Info, INFO_STEER_RETURNED)
         }
-        _state.value = finished.display()
+        val terminalState = finished.display()
+        onFinished?.invoke(id, terminalState)
+        _state.value = terminalState
         persist(null)
         if (reloadHistory) {
             val t = target
             val session = sessionId
             if (t != null && session != null) {
-                viewModelScope.launch { loadHistory(t, session) }
+                chatScope.launch { loadHistory(t, session) }
             }
         }
     }
@@ -435,18 +559,31 @@ class ChatViewModel(
         if (!preparingSend) _state.update { it.copy(draft = text) }
     }
 
-    /** The user pressed send: steer when a run is active, start a new run when idle. */
-    fun send() {
+    /** Captures notification input before any asynchronous work. */
+    fun replyFromNotification(text: String) {
+        text.trim().takeIf { it.isNotEmpty() }?.let { captured ->
+            _state.update { it.copy(queuedReplies = it.queuedReplies + 1) }
+            notificationReplies.trySend(captured)
+        }
+    }
+
+    /** The user pressed send: steer when active, start when idle. */
+    fun send() { sendText(_state.value.draft.trim()) }
+
+    private fun sendText(text: String, fromNotification: Boolean = false): Job? {
         val s = _state.value
-        val text = s.draft.trim()
         val t = target
-        if (text.isEmpty() || t == null || s.load != ChatLoad.Ready || preparingSend) return
+        if (text.isEmpty() || t == null || s.load != ChatLoad.Ready || preparingSend) return null
         val run = s.run
-        when {
+        return when {
             run == null -> {
                 preparingSend = true
-                viewModelScope.launch {
+                chatScope.launch {
                     try {
+                        memory.newSessionFailure()?.let { failure ->
+                            _state.update { it.fail(failure) }
+                            return@launch
+                        }
                         val session = readSessionId() ?: return@launch
                         val attempts = if (pendingTurn?.outcome == Outcome.Answered) 3 else 1
                         repeat(attempts) { attempt ->
@@ -454,7 +591,7 @@ class ChatViewModel(
                             if (loadHistory(t, session)) {
                                 if (pendingTurn?.outcome == Outcome.NoAnswer) retirePending(keepMessages = true)
                                 if (pendingTurn == null) {
-                                    startRun(t, text)
+                                    startRun(t, text, clearDraft = !fromNotification)
                                     return@launch
                                 }
                             }
@@ -466,22 +603,22 @@ class ChatViewModel(
                     }
                 }
             }
-            run.runId == null -> Unit // still starting; the composer is disabled in this window
-            else -> steer(t, run.runId, text)
+            run.runId == null -> null // still starting; the composer is disabled in this window
+            else -> { steer(t, run.runId, text); null }
         }
     }
 
-    private fun startRun(t: HermesTarget, text: String) {
+    private fun startRun(t: HermesTarget, text: String, clearDraft: Boolean = true) {
         val key = pendingKey?.takeIf { it.first == text }?.second ?: newKey()
         pendingKey = text to key
         check(historyLoaded && pendingTurn == null)
         val message = ChatMessage(nextId++, MessageKind.User, text)
         pendingTurn = PendingTurn(Anchor.Known(serverHistory.lastOrNull()?.key), messages = listOf(message))
         _state.update {
-            it.copy(draft = "", run = ActiveRun(null, now(), StatusLabel.Starting)).display()
+            it.copy(draft = if (clearDraft) "" else it.draft, terminal = null, terminalFailure = null, finishedRunId = null, run = ActiveRun(null, now(), StatusLabel.Starting)).display()
         }
         val session = sessionId
-        viewModelScope.launch {
+        chatScope.launch {
             when (val r = runs.startRun(t, text, session, key)) {
                 is HermesResult.Ok -> {
                     val id = r.value.runId
@@ -493,14 +630,14 @@ class ChatViewModel(
                     if (!applied) return@launch
                     pendingKey = null
                     persist(id)
-                    followJob = viewModelScope.launch { collectRun(t, id, null) }
+                    followJob = chatScope.launch { collectRun(t, id, null) }
                 }
                 is HermesResult.Err -> _state.update {
                     // Only the run still waiting for its id can fail to start.
                     if (it.run == null || it.run.runId != null) it
                     else {
                         pendingTurn = null
-                        it.copy(run = null, draft = joinDraft(text, it.draft)).fail(ChatFailure.Api(r.error))
+                        it.copy(run = null, terminalFailure = ChatFailure.Api(r.error), draft = joinDraft(text, it.draft)).fail(ChatFailure.Api(r.error))
                     }
                 }
             }
@@ -509,7 +646,7 @@ class ChatViewModel(
 
     private fun steer(t: HermesTarget, id: String, text: String) {
         _state.update { it.copy(draft = "") }
-        viewModelScope.launch {
+        chatScope.launch {
             // One steer at a time, in the order typed; a run that ended while this one waited gets nothing sent.
             val r = steerLock.withLock { if (isCurrent(id)) runs.steer(t, id, text) else null }
             when {
@@ -536,7 +673,7 @@ class ChatViewModel(
             updateRun(id) { it.fail(ChatFailure.SteerRejected) }
             return
         }
-        statusJob = viewModelScope.launch {
+        statusJob = chatScope.launch {
             val st = (runs.status(t, id) as? HermesResult.Ok)?.value
             if (!isCurrent(id)) return@launch
             val ev = st?.terminalEvent()
@@ -555,7 +692,7 @@ class ChatViewModel(
         val id = run.runId ?: return
         if (run.stopRequested) return
         updateRun(id) { it.withRun { r -> r.copy(stopRequested = true) } }
-        viewModelScope.launch {
+        chatScope.launch {
             when (val r = runs.stop(t, id)) {
                 // The stream was lost: nothing will report the end, so look again.
                 is HermesResult.Ok -> {
@@ -584,7 +721,7 @@ class ChatViewModel(
         updateRun(id) { s ->
             s.withRun { it.copy(status = if (s.approvals.isEmpty()) StatusLabel.Thinking else StatusLabel.WaitingApproval) }
         }
-        followJob = viewModelScope.launch { collectRun(t, id, run.lastSeq) }
+        followJob = chatScope.launch { collectRun(t, id, run.lastSeq) }
     }
 
     /** Refresh after [StatusLabel.LiveUpdatesUnavailable]: asks the server for the run's status again (one at a time). */
@@ -599,7 +736,7 @@ class ChatViewModel(
     private fun startStatusCheck(t: HermesTarget, id: String, attach: Boolean) {
         val prev = statusJob?.takeIf { it.isActive }
         // An overlapping request is kept: it runs after the one in flight (checkStatus re-checks isCurrent).
-        statusJob = viewModelScope.launch {
+        statusJob = chatScope.launch {
             prev?.join()
             if (isCurrent(id)) checkStatus(t, id, attach)
         }
@@ -624,7 +761,7 @@ class ChatViewModel(
                 r.value.approval?.let { mergeApproval(id, it) }
                 if (attach) {
                     // A new view has no streamed prefix: replay the buffered events from the beginning.
-                    followJob = viewModelScope.launch { collectRun(t, id, null) }
+                    followJob = chatScope.launch { collectRun(t, id, null) }
                 }
                 else updateRun(id) { it.withRun { run -> run.copy(status = StatusLabel.LiveUpdatesUnavailable) } }
             }
@@ -632,10 +769,8 @@ class ChatViewModel(
                 if (r.error == HermesError.NotFound) {
                     if (!historyLoaded) {
                         missingRunWaitingForHistory = id
-                    } else if (pendingTurn?.let { after(it.anchor) }?.any { it.role == "assistant" } == true) {
-                        finish(id, outcome = Outcome.Answered)
                     } else {
-                        finish(id) { it.fail(ChatFailure.Api(r.error)) }
+                        finishMissingRun(id)
                     }
                 } else {
                     updateRun(id) { it.withRun { run -> run.copy(status = StatusLabel.Lost) }.fail(ChatFailure.Api(r.error)) }
@@ -653,7 +788,7 @@ class ChatViewModel(
         val s = _state.value
         if (s.approvals.none { it.requestId == requestId } || key in s.answering) return
         _state.update { it.copy(answering = it.answering + key) }
-        viewModelScope.launch {
+        chatScope.launch {
             when (val r = runs.approve(t, id, choice, requestId)) {
                 is HermesResult.Ok -> updateRun(id) { removeApproval(it.copy(answering = it.answering - key), requestId) }
                 is HermesResult.Err -> updateRun(id) {
@@ -755,11 +890,11 @@ class ChatViewModel(
             is RunEvent.ReplayTruncated -> updateRun(id) { it.msg(MessageKind.Info, INFO_REPLAY_TRUNCATED) }
             RunEvent.Steered, RunEvent.Stopping -> Unit
             is RunEvent.Completed -> finish(id, e.pendingSteer, outcome = if (e.output.isNotEmpty()) Outcome.Answered else Outcome.NoAnswer) { s ->
-                if (e.output.isNotEmpty()) setFinalText(s, e.output) else s
+                (if (e.output.isNotEmpty()) setFinalText(s, e.output) else s).copy(terminal = e)
             }
-            is RunEvent.Failed -> finish(id, e.pendingSteer) { it.fail(ChatFailure.RunFailed(e.error)) }
-            is RunEvent.Interrupted -> finish(id, e.pendingSteer) { it.fail(ChatFailure.RunInterrupted(e.error)) }
-            is RunEvent.Cancelled -> finish(id, e.pendingSteer) { it.msg(MessageKind.Info, INFO_STOPPED) }
+            is RunEvent.Failed -> finish(id, e.pendingSteer) { it.copy(terminal = e).fail(ChatFailure.RunFailed(e.error)) }
+            is RunEvent.Interrupted -> finish(id, e.pendingSteer) { it.copy(terminal = e).fail(ChatFailure.RunInterrupted(e.error)) }
+            is RunEvent.Cancelled -> finish(id, e.pendingSteer) { it.copy(terminal = e).msg(MessageKind.Info, INFO_STOPPED) }
             is RunEvent.Unknown -> Unit
         }
     }
