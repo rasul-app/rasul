@@ -22,14 +22,18 @@ English | [العربية](#العربية)
 - **Jobs.** See scheduled jobs, pause, resume or run one now.
 - **Several PCs and profiles.** Save each computer once and switch between them. Hermes profiles (`/p/<profile>/`) are supported.
 - **English and Arabic.** Pick the language in the app. Arabic is fully right-to-left.
+- **Files from the agent.** When the agent sends you a file from the computer, it appears as a card in the chat. Tap it to download, then open, save or share it. Web-type files and app installers are never opened inside the app.
+- **Connection check.** See what works on the computer side and what to fix.
+- **MCP servers.** Switch servers on or off, test them and add new ones from the catalog.
+- **App updates.** The app checks this repository’s GitHub Releases for new versions and can update itself, verified against the release checksum and signing key. Switch it off in More.
 - **Light and dark theme.**
 - **App lock.** Protect the app with your phone’s screen lock or a strong biometric.
 
-There is no Rasul server. The app talks only to your own computer. No accounts, no tracking, no analytics, no ads.
+There is no Rasul server. The app talks to your own computer, plus (optional, can be turned off in More) GitHub Releases of this repo to check for app updates. No accounts, no tracking, no analytics, no ads.
 
 ## Status
 
-Early development (version 0.2.1). Pre-release APKs are on the Releases page. Planned next: a file view for what the agent produces, once the Hermes API offers one.
+Early development (version 0.2.6). Pre-release APKs are on the Releases page.
 
 ## Requirements
 
@@ -43,11 +47,13 @@ Use [Rasul Bridge](bridge/README.md) for the recommended pinned TLS companion pr
 
 ## Approvals from computer sessions
 
-The optional [phone approval integration](docs/bridge-approvals.md) adds computer-side routes for listing and answering pending approvals while keeping the local approval card active. Setup requires a profile plugin and a separate private bridge listener. The phone feed UI is a later slice.
+The optional [phone approval integration](docs/bridge-approvals.md) adds computer-side routes for listing and answering pending approvals while keeping the local approval card active. Setup requires a profile plugin and a separate private bridge listener. The phone shows pending requests as cards under each bridge bot (see the doc for details).
+
+Pairing works over the same Wi-Fi or over Tailscale (bridge `init --lan` / `--tailscale`, in 0.2.6). Hermes can also be updated from the phone (0.2.6).
 
 ## Direct Hermes connection (advanced)
 
-1. Turn on the Hermes API server. Add these lines to `~/.hermes/.env` on your computer:
+1. Turn on the Hermes API server. Add these lines to the Hermes `.env` file on your computer (Windows: the `hermes` folder in your local application data folder, otherwise `~/.hermes`, or the folder named by `HERMES_HOME`):
 
    ```
    API_SERVER_ENABLED=true
@@ -142,20 +148,26 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 - **أكثر من حاسوب وملف تعريف:** احفظ كل حاسوب مرة واحدة وبدّل بينها، مع دعم ملفات تعريف Hermes.
 - **العربية والإنجليزية:** اختر اللغة من داخل التطبيق، والواجهة العربية من اليمين إلى اليسار بالكامل.
 - **سمة فاتحة وداكنة.**
+- **ملفات من الوكيل:** عندما يرسل لك الوكيل ملفًا من الحاسوب يظهر كبطاقة في المحادثة. اضغط عليها لتنزيله ثم افتحه أو احفظه أو شاركه. الملفات من نوع الويب ومثبّتات التطبيقات لا تُفتح داخل التطبيق أبدًا.
+- **فحص الاتصال:** اعرف ما يعمل في جهة الحاسوب وما يجب إصلاحه.
+- **خوادم MCP:** شغّل الخوادم أو أوقفها، واختبرها، وأضف خوادم جديدة من الكتالوج.
+- **تحديث التطبيق:** يتحقق التطبيق من إصدارات GitHub لهذا المستودع بحثًا عن نسخ جديدة ويستطيع تحديث نفسه، مع التحقق من مجموع التحقق الخاص بالإصدار ومن مفتاح التوقيع. يمكن إيقاف ذلك من «المزيد».
 
-لا يوجد خادم لرسول. التطبيق يتصل بحاسوبك فقط، بلا حسابات ولا تتبّع ولا تحليلات ولا إعلانات.
+لا يوجد خادم لرسول. التطبيق يتصل بحاسوبك، إضافةً إلى (اختياري ويمكن إيقافه من «المزيد») إصدارات GitHub لهذا المستودع للتحقق من تحديثات التطبيق، بلا حسابات ولا تتبّع ولا تحليلات ولا إعلانات.
 
 ### الحالة
 
-قيد التطوير المبكر (الإصدار 0.2.1). ملفات APK التجريبية متاحة في صفحة الإصدارات.
+قيد التطوير المبكر (الإصدار 0.2.6). ملفات APK التجريبية متاحة في صفحة الإصدارات.
 
 ### جسر رسول (موصى به)
 
 يوفّر [جسر رسول](bridge/README.md) بروتوكول اتصال مشفّرًا مع تثبيت هوية الحاسوب، وإقران الأجهزة وإلغاء وصولها محليًا، مع بقاء مفاتيح ملفات التعريف على الحاسوب. هذه الحزمة توفّر جانب الحاسوب، ويقترن بها التطبيق بمسح رمز QR الذي تعرضه. يصبح الاتصال المباشر بـ Hermes الخيار المتقدّم الموضّح أدناه.
 
+يعمل الإقران عبر شبكة Wi-Fi نفسها أو عبر Tailscale (أمر الجسر `init --lan` أو `--tailscale`، ضمن الإصدار 0.2.6). ويمكن أيضًا تحديث Hermes من الهاتف (الإصدار 0.2.6).
+
 ### الاتصال المباشر بـ Hermes (خيار متقدّم)
 
-1. فعّل خادم Hermes API بإضافة هذين السطرين إلى الملف `~/.hermes/.env`:
+1. فعّل خادم Hermes API بإضافة هذين السطرين إلى ملف `.env` الخاص بـ Hermes (في Windows: المجلد `hermes` داخل مجلد بيانات التطبيقات المحلية، وإلا `~/.hermes`، أو المجلد المحدد في `HERMES_HOME`):
 
    ```
    API_SERVER_ENABLED=true

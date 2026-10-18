@@ -3,6 +3,7 @@ package app.rasul.notifications
 import android.content.Context
 import app.rasul.R
 import app.rasul.chat.ChatFailure
+import app.rasul.files.FileLinks
 import app.rasul.chat.ChatState
 import app.rasul.chat.MessageKind
 import app.rasul.chat.StatusLabel
@@ -39,7 +40,7 @@ fun runNotice(context: Context, state: ChatState): RunNotice {
         val activity = when (val status = run.label) {
             is StatusLabel.Tool -> text(R.string.status_tool, status.name)
             StatusLabel.Writing -> state.messages.lastOrNull { it.kind == MessageKind.Assistant }?.text
-                ?.lineSequence()?.filter { it.isNotBlank() }?.lastOrNull()?.take(600) ?: text(R.string.status_writing)
+                ?.let { FileLinks.plainText(it) }?.lineSequence()?.filter { it.isNotBlank() }?.lastOrNull()?.take(600) ?: text(R.string.status_writing)
             StatusLabel.Stopping -> text(R.string.status_stopping)
             is StatusLabel.Reconnecting -> text(R.string.status_reconnecting, status.attempt, status.max)
             StatusLabel.Lost -> state.messages.lastOrNull { it.error != null }?.error?.let { failureText(context, it) }
@@ -50,7 +51,7 @@ fun runNotice(context: Context, state: ChatState): RunNotice {
         return RunNotice(true, activity)
     }
     val body = when (val event = state.terminal) {
-        is RunEvent.Completed -> event.output.take(600).ifBlank { text(R.string.run_reply_complete) }
+        is RunEvent.Completed -> FileLinks.plainText(event.output).take(600).ifBlank { text(R.string.run_reply_complete) }
         is RunEvent.Failed -> text(R.string.chat_err_run_failed, event.error.orEmpty())
         is RunEvent.Interrupted -> text(R.string.chat_err_run_interrupted, event.error.orEmpty())
         is RunEvent.Cancelled -> text(R.string.run_reply_stopped)

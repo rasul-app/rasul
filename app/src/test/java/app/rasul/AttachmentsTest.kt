@@ -207,6 +207,14 @@ class AttachmentsTest {
         assertNotNull(BitmapFactory.decodeByteArray(r.jpeg, 0, r.jpeg.size))
     }
 
+    @Test fun reencodeNeverThrowsOnABrokenImage() {
+        // A PNG header with valid bounds but a corrupt body: the decoder raises instead of returning null.
+        val header = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13) +
+            "IHDR".toByteArray() + java.nio.ByteBuffer.allocate(8).putInt(4000).putInt(3000).array() +
+            byteArrayOf(8, 6, 0, 0, 0, 0x11, 0x11, 0x11, 0x11) + ByteArray(64) { 0x55 }
+        assertTrue(reencodePhoto(header) is PhotoResult.Unreadable)
+    }
+
     @Test fun reencodeDownscalesToTheLongEdgeCap() {
         val src = jpeg(Bitmap.createBitmap(3200, 2000, Bitmap.Config.ARGB_8888))
         val r = reencodePhoto(src) as PhotoResult.Ok

@@ -50,6 +50,12 @@ import app.rasul.data.HermesError
 import app.rasul.data.HermesResult
 import app.rasul.data.Load
 import app.rasul.bridge.BridgeBotsState
+import app.rasul.update.UpdateSettingsSheet
+import app.rasul.update.UpdateState
+import app.rasul.update.updateStatusText
+import app.rasul.desktop.PcInfoState
+import app.rasul.ui.components.StatusChip
+import app.rasul.ui.components.ChipKind
 import app.rasul.ui.LoadView
 import app.rasul.ui.PcPicker
 import app.rasul.ui.components.InsetGroup
@@ -122,9 +128,19 @@ fun MoreScreen(
     client: HermesClient? = null,
     onSkillsTools: () -> Unit = {},
     onUsage: () -> Unit = {},
+    showAppUpdates: Boolean = false,
+    updateCheckEnabled: Boolean = true,
+    updateState: UpdateState = UpdateState.Idle,
+    onUpdateCheckEnabledChanged: (Boolean) -> Unit = {},
+    onUpdateCheckNow: () -> Unit = {},
+    onUpdateView: () -> Unit = {},
+    pcInfo: PcInfoState? = null,
+    onHermesUpdate: () -> Unit = {},
+    onCheckConnection: () -> Unit = {},
 ) {
     var current by remember { mutableStateOf(LanguageOption.fromTags(AppCompatDelegate.getApplicationLocales().toLanguageTags())) }
     var sheet by rememberSaveable { mutableStateOf(false) }
+    var updatesSheet by rememberSaveable { mutableStateOf(false) }
     var appearanceSheet by rememberSaveable { mutableStateOf(false) }
     var showSkillsTools by remember(pcState.target) { mutableStateOf(false) }
     val targetForCapabilities = (pcState.target as? ActiveTarget.Ready)?.target
@@ -163,10 +179,26 @@ fun MoreScreen(
             usageTargetName = (pcState.target as? ActiveTarget.Ready)?.name,
             usageNeedsBridge = (pcState.target as? ActiveTarget.Ready)?.target?.bridge == null,
             onUsage = onUsage,
+            pcInfo = pcInfo,
+            onHermesUpdate = onHermesUpdate,
+            onCheckConnection = onCheckConnection,
             showAppLockSetting = true,
             appLockEnabled = appLockEnabled,
             appLockAvailable = appLockAvailable,
             onAppLockChanged = onAppLockChanged,
+            showAppUpdates = showAppUpdates,
+            updateSummary = updateStatusText(updateState, updateCheckEnabled),
+            onAppUpdates = { updatesSheet = true },
+        )
+    }
+    if (updatesSheet && showAppUpdates) {
+        UpdateSettingsSheet(
+            enabled = updateCheckEnabled,
+            state = updateState,
+            onEnabledChanged = onUpdateCheckEnabledChanged,
+            onCheckNow = onUpdateCheckNow,
+            onView = { updatesSheet = false; onUpdateView() },
+            onDismiss = { updatesSheet = false },
         )
     }
     if (sheet) {
@@ -214,6 +246,13 @@ fun MoreContent(
     usageTargetName: String? = null,
     usageNeedsBridge: Boolean = false,
     onUsage: () -> Unit = {},
+    showAppUpdates: Boolean = false,
+    updateSummary: String = "",
+    onAppUpdates: () -> Unit = {},
+    /** Non-null on a paired PC: adds the Hermes (version, update badge) and Check connection rows. */
+    pcInfo: PcInfoState? = null,
+    onHermesUpdate: () -> Unit = {},
+    onCheckConnection: () -> Unit = {},
 ) {
     val c = Rasul.colors
     val rowPad = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 14.dp)
@@ -273,6 +312,33 @@ fun MoreContent(
                         modifier = Modifier.fillMaxWidth().padding(16.dp),
                     )
                 } else {
+                    if (pcInfo != null) {
+                        val versions = listOfNotNull(
+                            pcInfo.hermesVersion?.let { stringResource(R.string.hupd_row_hermes, it) },
+                            pcInfo.bridgeVersion?.let { stringResource(R.string.hupd_row_bridge, it) },
+                        ).joinToString(" · ").ifEmpty { stringResource(R.string.hupd_row_sub_default, usageTargetName) }
+                        RasulRow(
+                            onClick = onHermesUpdate, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                            leading = { Icon(RasulIcons.Bot, null, tint = c.accent, modifier = Modifier.size(24.dp)) },
+                            trailing = {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    if (pcInfo.updateAvailable) StatusChip(stringResource(R.string.hupd_chip_available), ChipKind.Running)
+                                    Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp))
+                                }
+                            },
+                        ) {
+                            RowTitle(stringResource(R.string.hupd_row_title))
+                            RowSub(versions, maxLines = 1)
+                        }
+                        RasulRow(
+                            onClick = onCheckConnection, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                            leading = { Icon(RasulIcons.Check, null, tint = c.accent, modifier = Modifier.size(24.dp)) },
+                            trailing = { Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp)) },
+                        ) {
+                            RowTitle(stringResource(R.string.check_row_title))
+                            RowSub(stringResource(R.string.check_row_sub, usageTargetName), maxLines = 1)
+                        }
+                    }
                     RasulRow(
                         onClick = onUsage, last = true, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
                         leading = { Icon(RasulIcons.Clock, null, tint = c.accent, modifier = Modifier.size(24.dp)) },
@@ -328,6 +394,16 @@ fun MoreContent(
                 onClick = onFeedback, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
                 leading = { Icon(RasulIcons.Chat, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
             ) { RowTitle(stringResource(R.string.settings_feedback)) }
+            if (showAppUpdates) {
+                RasulRow(
+                    onClick = onAppUpdates, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                    leading = { Icon(RasulIcons.Globe, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
+                    trailing = { Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp)) },
+                ) {
+                    RowTitle(stringResource(R.string.update_title))
+                    RowSub(updateSummary, maxLines = 2)
+                }
+            }
             RasulRow(
                 contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
                 leading = { Icon(RasulIcons.Info, null, tint = c.ink, modifier = Modifier.size(24.dp)) },
@@ -554,6 +630,26 @@ private fun MoreAlertsAr() = RasulTheme(false) {
         bridges = sampleBridgeRows, showApprovalAlerts = true, approvalAlerts = true,
         showAppLockSetting = true, appearance = AppearanceOption.System,
         hapticsEnabled = true, versionName = PREVIEW_VERSION,
+    )
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900)
+@Composable
+private fun MoreUpdatesEn() = RasulTheme(false) {
+    MoreContent(
+        samplePcs, "a", LanguageOption.System, {}, {}, {},
+        showAppLockSetting = true, appearance = AppearanceOption.System, hapticsEnabled = true, versionName = PREVIEW_VERSION,
+        showAppUpdates = true, updateSummary = stringResource(R.string.update_status_up_to_date),
+    )
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900, locale = "ar")
+@Composable
+private fun MoreUpdatesAr() = RasulTheme(false) {
+    MoreContent(
+        samplePcs, "a", LanguageOption.System, {}, {}, {},
+        showAppLockSetting = true, appearance = AppearanceOption.System, hapticsEnabled = true, versionName = PREVIEW_VERSION,
+        showAppUpdates = true, updateSummary = stringResource(R.string.update_status_up_to_date),
     )
 }
 

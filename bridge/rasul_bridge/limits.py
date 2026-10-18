@@ -4,8 +4,10 @@ from collections import deque
 import time
 
 MAX_BODY = 1024 * 1024
-MAX_CONNECTIONS = 32
-MAX_DEVICE_CONNECTIONS = 16
+# One long-lived approvals stream per profile, plus profile/run streams and
+# short requests, must fit per device.
+MAX_CONNECTIONS = 128
+MAX_DEVICE_CONNECTIONS = 64
 
 
 class Limits:
@@ -72,7 +74,7 @@ class Limits:
                 oldest = min(self.session_requests, key=lambda saved: self.session_requests[saved][-1])
                 del self.session_requests[oldest]
             times = self.session_requests[key] = deque()
-        limit = 6 if action == "fork" else 20
+        limit = {"fork": 6, "model": 20, "status": 30}[action]
         if len(times) >= limit:
             return False
         times.append(now)
@@ -83,3 +85,6 @@ class Limits:
 
     def model(self, device, profile):
         return self._session_action(device, profile, "model")
+
+    def status(self, device):
+        return self._session_action(device, None, "status")

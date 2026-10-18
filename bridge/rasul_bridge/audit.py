@@ -20,6 +20,7 @@ class Audit:
         self.dropped = 0
         self.warned = False
         self.last_summary = clock()
+        self.link_rejections = {}
         # Bound logs left behind by earlier versions, retaining complete tail
         # records only. This also bounds backups before any new traffic arrives.
         try:
@@ -51,6 +52,20 @@ class Audit:
                            "rejected": self.rejected}):
                 self.rejected = 0
                 self.last_summary = now
+
+    def rejected_link(self, kind, device_id):
+        # One line per device and kind per minute.
+        key, now = (kind, device_id), self.clock()
+        last = self.link_rejections.get(key)
+        if last is not None and now - last < 60:
+            return
+        if len(self.link_rejections) > 256:
+            self.link_rejections.clear()
+        self.link_rejections[key] = now
+        value = {"time": datetime.now(timezone.utc).isoformat(), "rejected_link": kind}
+        if device_id is not None:
+            value["device_id"] = device_id
+        self.write(value)
 
     def record(self, device_id, method, route, profile_id, status):
         value = {"time": datetime.now(timezone.utc).isoformat(), "device_id": device_id,

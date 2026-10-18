@@ -39,6 +39,11 @@ class AppContainer(
     val appLock = AppLockController(appLockSettings, appScope)
     val bridgeBots = app.rasul.bridge.BridgeBotsRepository(bridges, bridgeClients)
     val approvals = app.rasul.bridge.ApprovalsRepository(bridges, bridgeClients, bridgeBots.state)
+    /** Files the agent sends (rasul-file:// links): downloads into cacheDir/received, one source per saved bridge. */
+    val fileDownloads = app.rasul.files.FileDownloads(
+        java.io.File(context.cacheDir, "received"), appScope,
+        { bridgeId -> bridges.get(bridgeId)?.let { app.rasul.files.BridgeFileSource(bridgeClients.client(it).client) } },
+    )
     val activePc = ActivePcHolder(connections, appScope, bridgeBots)
     val transcriptSources = app.rasul.sessions.TranscriptSources()
     val pendingChat = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
@@ -49,6 +54,17 @@ class AppContainer(
     /** Bot key (`bridge:<bridgeId>:<profileId>`) of the open approvals screen, if any. */
     val approvalsVisible = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     val approvalAlerts = app.rasul.notifications.ApprovalAlerts(this, context.applicationContext)
+    val updatePrefs = app.rasul.update.UpdatePrefs(context.dataStore)
+    val updateInstaller = app.rasul.update.SessionApkInstaller(context.applicationContext)
+    val updates = app.rasul.update.UpdateController(
+        source = app.rasul.update.HttpUpdateSource(versionName = BuildConfig.VERSION_NAME),
+        prefs = updatePrefs,
+        signers = app.rasul.update.AndroidApkSigners(context.applicationContext),
+        installer = updateInstaller,
+        installedVersion = BuildConfig.VERSION_NAME,
+        cacheDir = java.io.File(context.cacheDir, "updates"),
+        scope = appScope,
+    )
 
     /** The single ordered queue for those writes, shared by every chat screen. */
     val runWriter = OrderedWriter(appScope)

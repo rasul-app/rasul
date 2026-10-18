@@ -27,7 +27,7 @@ from rasul_bridge.cli import initialize, install_task, png, show_qr
 from rasul_bridge.audit import Audit, LOG_FILES, MAX_LOG_BYTES
 from rasul_bridge.config import Config
 from rasul_bridge.http import HTTPError, Reader, headers
-from rasul_bridge.limits import Limits, MAX_BODY
+from rasul_bridge.limits import Limits, MAX_BODY, MAX_CONNECTIONS, MAX_DEVICE_CONNECTIONS
 from rasul_bridge.pairing import Pairing
 from rasul_bridge.profiles import Profiles
 from rasul_bridge.proxy import HOP_HEADERS, allowed, end_to_end, response_body
@@ -54,6 +54,7 @@ class FakeUpstream:
         self.stream_closed = asyncio.Event()
         self.tasks = set()
         self.active_agents = 0
+        self.health_extra = {}
         self.broken_stream = False
         self.expected_key = None
         self.response_headers = b""
@@ -97,7 +98,7 @@ class FakeUpstream:
                     closed.cancel()
                     await asyncio.gather(complete, closed, return_exceptions=True)
             else:
-                value = {"active_agents": self.active_agents} if target == "/health/detailed" else {"status": "ok"}
+                value = {"active_agents": self.active_agents, **self.health_extra} if target == "/health/detailed" else {"status": "ok"}
                 data = json.dumps(value).encode()
                 writer.write(f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\n".encode()
                              + self.response_headers + b"\r\n" + data)
@@ -160,7 +161,8 @@ class RecordedSocket:
 
 
 @asynccontextmanager
-async def client(bridge, tmp_path, identity=None, trust=None, version=ssl.TLSVersion.TLSv1_3):
+async def client(bridge, tmp_path, identity=None, trust=None, version=ssl.TLSVersion.TLSv1_3,
+                 host="127.0.0.1"):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.minimum_version = context.maximum_version = version
@@ -173,7 +175,7 @@ async def client(bridge, tmp_path, identity=None, trust=None, version=ssl.TLSVer
         context.load_cert_chain(cert_file, key_file)
         key_file.unlink()
         cert_file.unlink()
-    async with connect(f"ws://127.0.0.1:{bridge.port}/v1/link", compression=None, proxy=None) as socket:
+    async with connect(f"ws://{host}:{bridge.port}/v1/link", compression=None, proxy=None) as socket:
         recorded = RecordedSocket(socket)
         link = TLSLink(recorded, context, server_side=False)
         await link.handshake()
@@ -630,9 +632,9 @@ async def test_profile_creation_argument_list_and_idempotency(tmp_path, clone):
 def test_connection_device_and_pair_limits():
     now = [0]
     limits = Limits(clock=lambda: now[0])
-    assert all(limits.connect() for _ in range(32))
+    assert all(limits.connect() for _ in range(MAX_CONNECTIONS))
     assert not limits.connect()
-    assert all(limits.authenticate("my-pc") for _ in range(16))
+    assert all(limits.authenticate("my-pc") for _ in range(MAX_DEVICE_CONNECTIONS))
     assert not limits.authenticate("my-pc")
     limits.disconnect("my-pc")
     assert limits.connect() and limits.authenticate("my-pc")
@@ -824,19 +826,19 @@ async def test_operation_uuid_survives_new_service_object(tmp_path):
 @asynchronous
 async def test_global_and_per_device_limit_at_transport(tmp_path):
     async with running(tmp_path) as (bridge, _):
-        bridge.limits.connections = 32
+        bridge.limits.connections = MAX_CONNECTIONS
         identity, device = registered(bridge)
         with pytest.raises(ConnectionClosed):
             async with client(bridge, tmp_path, identity) as (link, reader, _):
                 await send(link, "GET", "/v1/profiles")
                 await read_response(reader)
         bridge.limits.connections = 0
-        bridge.limits.devices[device] = 16
+        bridge.limits.devices[device] = MAX_DEVICE_CONNECTIONS
         with pytest.raises(ConnectionClosed):
             async with client(bridge, tmp_path, identity) as (link, reader, _):
                 await send(link, "GET", "/v1/profiles")
                 await read_response(reader)
-        assert bridge.limits.devices[device] == 16
+        assert bridge.limits.devices[device] == MAX_DEVICE_CONNECTIONS
 
 
 @asynchronous
@@ -1008,9 +1010,11 @@ async def test_anonymous_cap_is_separate_and_lifetime_is_absolute(tmp_path):
     async with running(tmp_path) as (bridge, _):
         identity, _ = registered(bridge)
         async with AsyncExitStack() as stack:
-            started = asyncio.get_running_loop().time()
             anonymous = [await stack.enter_async_context(client(bridge, tmp_path))
                          for _ in range(MAX_ANONYMOUS_CONNECTIONS)]
+            # Each server deadline starts at that connection's own TLS completion, so measure from the
+            # last one; the 32 sequential handshakes before it are not part of the limit.
+            started = asyncio.get_running_loop().time()
             # A completed client handshake can precede server classification.
             for link, _, _ in anonymous:
                 await link.write(b"G")
@@ -2460,3 +2464,39 @@ def test_session_action_global_cap_evicts_oldest_key():
     assert len(limits.session_requests) == 256
     assert ("0", "default", "fork") not in limits.session_requests
     assert ("1", "default", "fork") in limits.session_requests
+
+
+def test_device_keeps_room_for_request_links_beside_long_lived_streams():
+    limits = Limits()
+    assert all(limits.connect() and limits.authenticate("my-pc") for _ in range(20))
+    assert limits.connect() and limits.authenticate("my-pc")
+
+
+def test_device_and_global_link_caps_are_64_and_128():
+    assert (MAX_DEVICE_CONNECTIONS, MAX_CONNECTIONS) == (64, 128)
+    limits = Limits()
+    assert all(limits.connect() and limits.authenticate("my-pc") for _ in range(64))
+    assert limits.connect() and not limits.authenticate("my-pc")
+    limits = Limits()
+    assert all(limits.connect() for _ in range(128))
+    assert not limits.connect()
+
+
+def test_rejected_link_is_audited_once_a_minute_per_device_and_kind(tmp_path):
+    now = [0]
+    audit = Audit(Store(tmp_path / "data"), clock=lambda: now[0])
+
+    def rows():
+        return [json.loads(line) for line in audit.path.read_text().splitlines()] if audit.path.exists() else []
+
+    for _ in range(5):
+        audit.rejected_link("device_limit", "my-pc")
+    assert [(r["rejected_link"], r["device_id"]) for r in rows()] == [("device_limit", "my-pc")]
+    assert set(rows()[0]) == {"time", "rejected_link", "device_id"}
+    audit.rejected_link("device_limit", "other-pc")
+    audit.rejected_link("global_limit", None)
+    audit.rejected_link("global_limit", None)
+    assert len(rows()) == 3
+    now[0] = 60
+    audit.rejected_link("device_limit", "my-pc")
+    assert len(rows()) == 4

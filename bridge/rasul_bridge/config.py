@@ -1,13 +1,27 @@
 """Owner-controlled TOML settings."""
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import re
+import sys
 import tomllib
 from urllib.parse import urlsplit
 
 NAME = re.compile(r"[a-z0-9-]{2,32}\Z")
 PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+
+
+def default_hermes_home():
+    """Mirror Hermes' own rule: HERMES_HOME, else the platform default."""
+    explicit = os.environ.get("HERMES_HOME", "").strip()
+    if explicit:
+        return Path(os.path.expanduser(os.path.expandvars(explicit)))
+    suffix = os.environ.get("HERMES_DATA_DIR_SUFFIX", "")
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        return (Path(local) if local else Path.home() / "AppData" / "Local") / ("hermes" + suffix)
+    return Path.home() / (".hermes" + suffix)
 
 
 @dataclass
@@ -19,8 +33,10 @@ class Config:
     public_urls: list = field(default_factory=lambda: ["ws://127.0.0.1:8787/v1/link"])
     templates: list = field(default_factory=lambda: [{"id": "blank", "label": "Blank"}])
     restart_command: list = field(default_factory=list)
-    hermes_home: Path = field(default_factory=lambda: Path.home() / ".hermes")
+    hermes_home: Path = field(default_factory=default_hermes_home)
     name: str = "my-pc"
+    lan: bool = False
+    tailscale: bool = False
 
     @classmethod
     def load(cls, path):
@@ -36,6 +52,8 @@ class Config:
         if config.approvals_port is not None and (type(config.approvals_port) is not int
                 or not 1 <= config.approvals_port <= 65535 or config.approvals_port == config.port):
             raise ValueError("Invalid approvals listening port")
+        if type(config.lan) is not bool or type(config.tailscale) is not bool:
+            raise ValueError("lan and tailscale must be true or false")
         if not config.public_urls:
             raise ValueError("Set at least one public URL")
         for url in config.public_urls:
@@ -64,6 +82,8 @@ listen = "127.0.0.1"
 port = 8787
 public_urls = ["ws://127.0.0.1:8787/v1/link"]
 name = "my-pc"
+lan = false
+tailscale = false
 restart_command = []
 
 [[templates]]

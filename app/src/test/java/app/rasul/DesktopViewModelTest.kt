@@ -6,7 +6,11 @@ import app.rasul.bridge.DesktopError
 import app.rasul.bridge.DesktopException
 import app.rasul.bridge.DesktopSkillDto
 import app.rasul.bridge.JobRunDto
+import app.rasul.bridge.HermesUpdateDto
+import app.rasul.bridge.McpCatalogEntryDto
 import app.rasul.bridge.McpServerDto
+import app.rasul.bridge.McpTestDto
+import app.rasul.bridge.McpToggleResult
 import app.rasul.bridge.SkillToggleResult
 import app.rasul.bridge.UsageDayDto
 import app.rasul.bridge.UsageReportDto
@@ -57,6 +61,23 @@ internal open class FakeDesktop : DesktopApi {
     var installError: DesktopError? = null
     var servers = listOf<McpServerDto>()
     var mcpError: DesktopError? = null
+    var update = HermesUpdateDto()
+    var updateError: DesktopError? = null
+    var updateReads = 0
+    val updateStarts = mutableListOf<String>()
+    var startError: DesktopError? = null
+    var startResult: HermesUpdateDto? = null
+    var cancels = 0
+    var cancelError: DesktopError? = null
+    val mcpToggles = mutableListOf<Pair<String, Boolean>>()
+    var mcpToggleError: DesktopError? = null
+    val mcpTests = mutableListOf<String>()
+    var mcpTestResult: McpTestDto? = null
+    var mcpTestError: DesktopError? = null
+    var mcpEntries = listOf<McpCatalogEntryDto>()
+    var mcpCatalogError: DesktopError? = null
+    val mcpInstalls = mutableListOf<String>()
+    var mcpInstallError: DesktopError? = null
 
     override suspend fun jobRuns(jobId: String, limit: Int): List<JobRunDto> {
         jobIds += jobId to limit
@@ -84,6 +105,41 @@ internal open class FakeDesktop : DesktopApi {
     override suspend fun mcpServers(): List<McpServerDto> {
         mcpError?.let { throw DesktopException(it) }
         return servers
+    }
+    override suspend fun hermesUpdate(): HermesUpdateDto {
+        updateReads++
+        updateError?.let { throw DesktopException(it) }
+        return update
+    }
+    override suspend fun startHermesUpdate(mode: String): HermesUpdateDto {
+        updateStarts += mode
+        startError?.let { throw DesktopException(it) }
+        return (startResult ?: update.copy(state = if (mode == HermesUpdateDto.MODE_NOW) "running" else "queued")).also { update = it }
+    }
+    override suspend fun cancelHermesUpdate(): HermesUpdateDto {
+        cancels++
+        cancelError?.let { throw DesktopException(it) }
+        return update.copy(state = "idle").also { update = it }
+    }
+    override suspend fun setMcpEnabled(name: String, enabled: Boolean): McpToggleResult {
+        mcpToggles += name to enabled
+        mcpToggleError?.let { throw DesktopException(it) }
+        servers = servers.map { if (it.name == name) it.copy(enabled = enabled) else it }
+        return McpToggleResult(name, enabled)
+    }
+    override suspend fun testMcp(name: String): McpTestDto {
+        mcpTests += name
+        mcpTestError?.let { throw DesktopException(it) }
+        return mcpTestResult ?: McpTestDto(name, true)
+    }
+    override suspend fun mcpCatalog(): List<McpCatalogEntryDto> {
+        mcpCatalogError?.let { throw DesktopException(it) }
+        return mcpEntries
+    }
+    override suspend fun installMcp(id: String) {
+        mcpInstalls += id
+        mcpInstallError?.let { throw DesktopException(it) }
+        mcpEntries = mcpEntries.map { if (it.id == id) it.copy(installed = true, installable = false) else it }
     }
     override suspend fun usage(days: Int): UsageReportDto {
         daysCalls += days

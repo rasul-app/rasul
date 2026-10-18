@@ -6,7 +6,9 @@ import app.rasul.bridge.CatalogSkillDto
 import app.rasul.bridge.DesktopApi
 import app.rasul.bridge.DesktopError
 import app.rasul.bridge.DesktopSkillDto
+import app.rasul.bridge.McpCatalogEntryDto
 import app.rasul.bridge.McpServerDto
+import app.rasul.bridge.McpTestDto
 import app.rasul.bridge.desktopFailure
 import app.rasul.data.ActiveTarget
 import app.rasul.data.CapabilitiesDto
@@ -53,6 +55,10 @@ sealed interface ListState<out T> {
     data class Error(val error: SectionError) : ListState<Nothing>
 }
 
+/** The row of [name] with its new switch state; every other row is kept. */
+private fun ListState<McpServerDto>?.withEnabled(name: String, enabled: Boolean): ListState<McpServerDto>? =
+    (this as? ListState.Ready)?.let { ready -> ListState.Ready(ready.values.map { if (it.name == name) it.copy(enabled = enabled) else it }) } ?: this
+
 private fun <T> List<T>.toListState(): ListState<T> =
     takeIf { it.isNotEmpty() }?.let { ListState.Ready(it) } ?: ListState.Empty
 
@@ -78,6 +84,19 @@ sealed interface CatalogState {
     data class Open(val skills: List<CatalogSkillDto>, val readAt: Long) : CatalogState
 }
 
+sealed interface McpTestState {
+    data object None : McpTestState
+    data class Testing(val name: String) : McpTestState
+    data class Result(val name: String, val result: McpTestDto) : McpTestState
+}
+
+sealed interface McpCatalogState {
+    data object Closed : McpCatalogState
+    data object Loading : McpCatalogState
+    data class Error(val error: DesktopError) : McpCatalogState
+    data class Open(val entries: List<McpCatalogEntryDto>) : McpCatalogState
+}
+
 sealed interface SkillsToolsState {
     data object Loading : SkillsToolsState
     data class Error(val error: HermesError) : SkillsToolsState
@@ -95,7 +114,19 @@ sealed interface SkillsToolsState {
         /** Identifier whose 2-minute poll elapsed without the skill appearing. */
         val checkAgain: String? = null,
         val catalog: CatalogState = CatalogState.Closed,
-    ) : SkillsToolsState
+        /** Server whose switch request is in flight. */
+        val busyMcp: String? = null,
+        val mcpTest: McpTestState = McpTestState.None,
+        val mcpCatalog: McpCatalogState = McpCatalogState.Closed,
+        /** Catalog id whose install request is in flight. */
+        val installingMcp: String? = null,
+        /** A change went through but re-reading the lists failed; they may be out of date. */
+        val mcpStale: Boolean = false,
+    ) : SkillsToolsState {
+        /** Any request that changes or re-reads desktop state is running. */
+        val mcpBusy: Boolean
+            get() = busyMcp != null || installingMcp != null || mcpTest is McpTestState.Testing
+    }
 }
 
 /**
@@ -123,7 +154,7 @@ class SkillsToolsViewModel(
 
     fun load() {
         val current = _state.value
-        if (current is SkillsToolsState.Content && (current.busySkill != null || current.installing != null)) return
+        if (current is SkillsToolsState.Content && (current.busySkill != null || current.installing != null || current.mcpBusy)) return
         val gen = ++generation
         _state.value = SkillsToolsState.Loading
         loadJob?.cancel()
@@ -315,6 +346,98 @@ class SkillsToolsViewModel(
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { return }
         contentUpdate(gen) { it.copy(catalog = CatalogState.Open(skills, now())) }
+    }
+
+    /** The server name and wanted state are captured before the suspending PUT; the list is re-read after. */
+    fun toggleMcp(name: String, enabled: Boolean) {
+        val api = service ?: return
+        val content = _state.value as? SkillsToolsState.Content ?: return
+        if (content.mcpBusy || content.busySkill != null || content.installing != null) return
+        val capturedName = name
+        val capturedEnabled = enabled
+        _state.value = content.copy(busyMcp = capturedName, actionError = null)
+        val gen = generation
+        viewModelScope.launch {
+            try {
+                val result = api().setMcpEnabled(capturedName, capturedEnabled)
+                contentUpdate(gen) { it.copy(busyMcp = null, mcpStale = false, mcp = it.mcp.withEnabled(result.name, result.enabled)) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                contentUpdate(gen) { it.copy(busyMcp = null, actionError = desktopFailure(e)) }
+            }
+        }
+    }
+
+    fun testMcp(name: String) {
+        val api = service ?: return
+        val content = _state.value as? SkillsToolsState.Content ?: return
+        if (content.mcpBusy || content.busySkill != null || content.installing != null) return
+        val capturedName = name
+        _state.value = content.copy(mcpTest = McpTestState.Testing(capturedName), actionError = null)
+        val gen = generation
+        viewModelScope.launch {
+            try {
+                val result = api().testMcp(capturedName)
+                contentUpdate(gen) { it.copy(mcpStale = false, mcpTest = McpTestState.Result(capturedName, result)) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                contentUpdate(gen) { it.copy(mcpTest = McpTestState.None, actionError = desktopFailure(e)) }
+            }
+        }
+    }
+
+    fun dismissMcpTest() = contentUpdate(generation) {
+        if (it.mcpTest is McpTestState.Testing) it else it.copy(mcpTest = McpTestState.None)
+    }
+
+    fun openMcpCatalog() {
+        val api = service ?: return
+        val content = _state.value as? SkillsToolsState.Content ?: return
+        _state.value = content.copy(mcpCatalog = McpCatalogState.Loading)
+        val gen = generation
+        viewModelScope.launch {
+            try {
+                val entries = api().mcpCatalog()
+                contentUpdate(gen) { it.copy(mcpCatalog = McpCatalogState.Open(entries)) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                contentUpdate(gen) { it.copy(mcpCatalog = McpCatalogState.Error(desktopFailure(e))) }
+            }
+        }
+    }
+
+    fun closeMcpCatalog() = contentUpdate(generation) { it.copy(mcpCatalog = McpCatalogState.Closed) }
+
+    /** Only an entry of the shown catalog that is installable and not installed is ever sent. */
+    fun installMcp(entry: McpCatalogEntryDto) {
+        val api = service ?: return
+        val content = _state.value as? SkillsToolsState.Content ?: return
+        val open = content.mcpCatalog as? McpCatalogState.Open ?: return
+        val captured = open.entries.firstOrNull { it.id == entry.id } ?: return
+        if (!captured.installable || captured.installed) return
+        if (content.mcpBusy || content.busySkill != null || content.installing != null) return
+        val capturedId = captured.id
+        _state.value = content.copy(installingMcp = capturedId, actionError = null)
+        val gen = generation
+        viewModelScope.launch {
+            try {
+                val desktop = api()
+                desktop.installMcp(capturedId)
+                // The install is done; a failing re-read below only means the lists may be out of date.
+                val servers = try { desktop.mcpServers() } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                val entries = try { desktop.mcpCatalog() } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                contentUpdate(gen) {
+                    val shown = entries ?: open.entries.map { e -> if (e.id == capturedId) e.copy(installed = true, installable = false) else e }
+                    it.copy(
+                        installingMcp = null, mcp = servers?.toListState() ?: it.mcp,
+                        mcpCatalog = McpCatalogState.Open(shown), mcpStale = servers == null || entries == null,
+                    )
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                contentUpdate(gen) { it.copy(installingMcp = null, actionError = desktopFailure(e)) }
+            }
+        }
     }
 
     fun dismissActionError() = contentUpdate(generation) { it.copy(actionError = null) }

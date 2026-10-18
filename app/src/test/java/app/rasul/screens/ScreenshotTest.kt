@@ -114,6 +114,22 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
                 screen == "SkillToggleConfirm" -> 53
                 screen == "SkillInstallConfirm" -> 54
                 screen == "MoreAlerts" -> 55
+                screen == "UpdateAvailable" -> 58
+                screen == "UpdateDownloading" -> 59
+                screen == "UpdateFailed" -> 60
+                screen == "UpdateSettings" -> 61
+                screen == "MoreUpdates" -> 62
+                screen == "HermesUpdateAvailable" -> 70
+                screen == "HermesUpdateQueued" -> 71
+                screen == "HermesUpdateRunning" -> 72
+                screen == "HermesUpdateDone" -> 73
+                screen == "HermesUpdateFailed" -> 74
+                screen == "HermesUpdateNowConfirm" -> 75
+                screen == "PcCheckOk" -> 76
+                screen == "PcCheckProblems" -> 77
+                screen == "McpCatalog" -> 78
+                screen == "HermesUpdateUnknown" -> 79
+                screen == "ChatApprovalLong" -> 80
                 else -> order.indexOf(screen).let { if (it < 0) order.size else it } + 1
             }
             val suffix = if (dark) "-dark" else ""

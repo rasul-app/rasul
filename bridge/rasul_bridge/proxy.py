@@ -110,17 +110,33 @@ class Upstream:
             writer.close()
             await writer.wait_closed()
 
-    async def forward(self, link, method, target, key, head, body):
+    async def forward(self, link, method, target, key, head, body, rewrite=None):
         status, upstream_head, reader, writer = await self.open(method, target, key, head, body)
         started = False
         try:
             lines = [f"HTTP/1.1 {status} Response", "Transfer-Encoding: chunked"]
             for name, value in end_to_end(upstream_head, RESPONSE_HEADERS).items():
                 lines.append(f"{name}: {value}")
-            await link.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+            head_bytes = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+            if rewrite is not None and rewrite.buffered:
+                # The whole body is rewritten first, so an oversize or broken body is still a clean error.
+                async for data in response_body(reader, upstream_head):
+                    rewrite.feed(data)
+                await link.write(head_bytes)
+                started = True
+                for data in rewrite.finish():
+                    await chunk(link, data)
+                await link.write(b"0\r\n\r\n")
+                return status
+            await link.write(head_bytes)
             started = True
             async for data in response_body(reader, upstream_head):
-                await chunk(link, data)
+                for part in (data,) if rewrite is None else rewrite.feed(data):
+                    if part:
+                        await chunk(link, part)
+            if rewrite is not None:
+                for part in rewrite.finish():
+                    await chunk(link, part)
             await link.write(b"0\r\n\r\n")
             return status
         except (HTTPError, OSError, TimeoutError, EOFError):

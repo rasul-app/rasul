@@ -81,6 +81,7 @@ class MainActivity : AppCompatActivity() {
         })
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         container = (application as RasulApp).container
+        if (savedInstanceState == null) container.appScope.launch { container.fileDownloads.cleanup() }
         openNotificationChat(intent)
         openNotificationApprovals(intent)
         authenticator = AppLockAuthenticator(this) { credentialIntent, onSuccess, onCancel ->
@@ -110,7 +111,8 @@ class MainActivity : AppCompatActivity() {
                         ) {
                             authenticator.authenticate { container.appLock.unlock() }
                         }
-                        else -> RasulNav(
+                        else -> Box(Modifier.fillMaxSize()) {
+                        RasulNav(
                             container = container,
                             appLockEnabled = lockState.enabled,
                             appLockAvailable = authenticator.availability().available,
@@ -125,6 +127,8 @@ class MainActivity : AppCompatActivity() {
                                 }
                             },
                         )
+                        app.rasul.update.UpdateSheetHost(container.updates) { container.updateInstaller.openPermissionSettings() }
+                        }
                     }
             }
         }
@@ -160,6 +164,7 @@ class MainActivity : AppCompatActivity() {
             container.appLock.onForeground(SystemClock.elapsedRealtime())
             container.runWatcher.onForeground()
             container.appScope.launch { container.approvalAlerts.sync() }
+            container.appScope.launch { container.updates.checkIfDue() }
         }
     }
 

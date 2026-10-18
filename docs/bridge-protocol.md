@@ -34,7 +34,7 @@ Implementation hints: bridge = WebSocket endpoint that pipes each connection's b
 - `GET /v1/devices` / `DELETE /v1/devices/{id}` are LOCAL only (CLI `rasul-bridge devices` / `rasul-bridge revoke <id>`), not reachable from phones.
 
 ## Limits and logs
-- Max 32 concurrent paired-device WebSocket connections total, 16 per device; request body 1 MiB. Registered-certificate connections leave pre-auth admission immediately after TLS validation.
+- Max 128 concurrent paired-device WebSocket connections total, 64 per device (refused links leave one audit line per device per minute); request body 1 MiB. Registered-certificate connections leave pre-auth admission immediately after TLS validation.
 - Stage A (pre-auth): 256 connections, upgrade request within 3 s of accept and TLS completed within 10 s of accept; when full, evict uniformly at random including the newcomer. WebSocket receive queue: 2 frames.
 - Stage B (anonymous awaiting proof): 32 connections, complete proof within 5 s of TLS completion, body at most 16 KiB (413 before reading an oversized body); random eviction among unprotected connections including the newcomer.
 - Stage C (verified invitation and secret): one pairing, protected from eviction during the owner's 120 s decision. Only attempts matching the current unused invitation count toward the 5 per minute pairing limit.

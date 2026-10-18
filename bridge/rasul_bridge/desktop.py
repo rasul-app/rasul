@@ -20,11 +20,15 @@ from urllib.parse import urlencode, urlsplit
 
 from .http import HTTPError, Reader, headers
 from .proxy import Upstream, response_body
+from .updater import Updater, clean
 
 CAP = 1024 * 1024
 TIMEOUT = 10
 TABLE_CAP = 16 * 1024 * 1024
 OWNERSHIP_WAIT = 2
+SERVER = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+BODIES = {"toggle": {"name", "enabled"}, "install": {"identifier"}, "update_post": {"mode"},
+          "mcp_enabled": {"enabled"}, "mcp_install": {"id"}}
 RULES = [
     ("GET", r"/jobs/([A-Za-z0-9_-]{1,200})/runs", "runs", 10),
     ("GET", r"/skills", "skills", 30),
@@ -32,6 +36,13 @@ RULES = [
     ("GET", r"/skills/catalog", "catalog", 6),
     ("POST", r"/skills/install", "install", 1),
     ("GET", r"/mcp", "mcp", 12),
+    ("GET", r"/mcp/catalog", "mcp_catalog", 6),
+    ("POST", r"/mcp/catalog/install", "mcp_install", 1),
+    ("PUT", rf"/mcp/({SERVER})/enabled", "mcp_enabled", 6),
+    ("POST", rf"/mcp/({SERVER})/test", "mcp_test", 3),
+    ("GET", r"/hermes/update", "update_get", 12),
+    ("POST", r"/hermes/update", "update_post", 6),
+    ("DELETE", r"/hermes/update", "update_delete", 6),
     ("GET", r"/usage", "usage", 6),
 ]
 USAGE = {"input_tokens": "total_input", "output_tokens": "total_output",
@@ -359,6 +370,7 @@ class Desktop:
         self.profiles, self.clock = profiles, clock
         self.requests = {}
         self.catalogs = {}
+        self.updater = Updater(self)
 
     @staticmethod
     def directory():
@@ -440,18 +452,23 @@ class Desktop:
             query[query_key] = number
         value = None
         try:
-            if name in ("toggle", "install"):
+            if name in BODIES:
                 if len(body) > 1024:
                     raise ValueError
                 value = decode(body)
-                keys = {"name", "enabled"} if name == "toggle" else {"identifier"}
-                if not isinstance(value, dict) or set(value) != keys:
+                if not isinstance(value, dict) or set(value) != BODIES[name]:
                     raise ValueError
-                key = "name" if name == "toggle" else "identifier"
-                if type(value[key]) is not str or not value[key] or len(value[key]) > 200:
-                    raise ValueError
-                if name == "toggle" and type(value["enabled"]) is not bool:
-                    raise ValueError
+                for key, item in value.items():
+                    if key == "enabled":
+                        valid = type(item) is bool
+                    elif key == "mode":
+                        valid = type(item) is str and item in ("when_idle", "now")
+                    elif key == "id":
+                        valid = type(item) is str and re.fullmatch(SERVER, item) is not None
+                    else:
+                        valid = type(item) is str and 0 < len(item) <= 200
+                    if not valid:
+                        raise ValueError
             elif body:
                 raise ValueError
         except (UnicodeError, ValueError, TypeError):
@@ -459,6 +476,11 @@ class Desktop:
         if profile == "current" or profile not in self.profiles.directories():
             raise HTTPError(404, "Profile not found")
         self.charge(device, profile, name, cap)
+        if name.startswith("update_"):
+            try:
+                return await self.updater.handle(profile, name, value)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError):
+                raise HTTPError(502, "desktop_error") from None
         discovered = False
         try:
             async with asyncio.timeout(TIMEOUT):
@@ -481,6 +503,52 @@ class Desktop:
                             "desktop_error" if discovered else "desktop_unavailable") from None
         except (OSError, EOFError, ValueError, TypeError, KeyError, UnicodeError, AttributeError, IndexError):
             raise HTTPError(502, "desktop_error") from None
+
+    async def mcp(self, profile, name, match, value, request):
+        if name in ("mcp_catalog", "mcp_install"):
+            raw = rows((await request("GET", "/api/mcp/catalog"))["entries"])
+            entries = []
+            for row in raw:
+                auth = row.get("auth_type") in (None, "none") and not row.get("required_env")
+                entry = project(row, {"name": TEXT, "installed": BOOL, "enabled": BOOL})
+                if not re.fullmatch(SERVER, entry["name"]):
+                    continue
+                entries.append({"id": entry["name"], "name": entry["name"],
+                                "description": clean(row.get("description"), 300),
+                                "installed": entry["installed"], "enabled": entry["enabled"],
+                                "installable": bool(auth and not row.get("needs_install")
+                                                    and not entry["installed"])})
+            if name == "mcp_catalog":
+                return {"entries": entries}
+            chosen = next((e for e in entries if e["id"] == value["id"]), None)
+            if chosen is None or not chosen["installable"]:
+                raise HTTPError(400, "desktop_invalid")
+            receipt = await request("POST", "/api/mcp/catalog/install",
+                                    {"name": chosen["id"], "env": {}, "enable": True, "profile": profile})
+            if receipt.get("ok") is not True or receipt.get("background") is not False:
+                raise ValueError
+            return {"id": chosen["id"], "state": "installed"}
+        servers = rows((await request("GET", "/api/mcp/servers"))["servers"])
+        server = next((s for s in servers if s.get("name") == match[1]), None)
+        if server is None or server.get("plugin") is not None:
+            raise HTTPError(400, "desktop_invalid")
+        if name == "mcp_enabled":
+            await request("PUT", "/api/mcp/servers/" + match[1] + "/enabled", {**value, "profile": profile})
+            servers = rows((await request("GET", "/api/mcp/servers"))["servers"])
+            found = next((s for s in servers if s.get("name") == match[1]), None)
+            if found is None:
+                raise HTTPError(404, "desktop_invalid")
+            return project(found, {"name": TEXT, "enabled": BOOL})
+        raw = await request("POST", "/api/mcp/servers/" + match[1] + "/test")
+        result = {"name": match[1], "ok": project(raw, {"ok": BOOL})["ok"],
+                  "tools": [{"name": clean(t.get("name"), 100), "description": clean(t.get("description"), 200)}
+                            for t in rows(raw.get("tools") or [])[:100]]}
+        if not result["ok"]:
+            result["error"] = clean(raw.get("error"), 200)
+        for key in ("prompts", "resources"):
+            if type(raw.get(key)) is int and raw[key] >= 0:
+                result[key] = raw[key]
+        return result
 
     async def execute(self, device, profile, name, match, query, value, request, token):
         if name in ("skills", "toggle"):
@@ -516,6 +584,8 @@ class Desktop:
             servers = rows((await request("GET", "/api/mcp/servers"))["servers"])
             return {"servers": [project(s, {"name": TEXT, "transport": TEXT, "enabled": BOOL,
                                             "source": TEXT, "plugin": (str, type(None))}) for s in servers]}
+        if name.startswith("mcp_"):
+            return await self.mcp(profile, name, match, value, request)
         if name == "usage":
             days = query.get("days", 30)
             data = await request("GET", "/api/analytics/usage", days=days)

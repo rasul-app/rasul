@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -33,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import app.rasul.R
 import app.rasul.bridge.CatalogSkillDto
 import app.rasul.bridge.DesktopError
+import app.rasul.bridge.McpCatalogEntryDto
 import app.rasul.bridge.McpServerDto
 import app.rasul.data.ToolsetDto
 import app.rasul.ui.FeatureErrorSurface
@@ -63,6 +65,7 @@ fun SkillsToolsScreen(vm: SkillsToolsViewModel, onBack: () -> Unit) {
     // Dialogs keep the user's pick locally; nothing is sent before the confirm tap.
     var toggleAsk by remember { mutableStateOf<PendingToggle?>(null) }
     var installAsk by remember { mutableStateOf<CatalogSkillDto?>(null) }
+    var mcpInstallAsk by remember { mutableStateOf<McpCatalogEntryDto?>(null) }
 
     SkillsToolsContent(
         state, vm.targetName, onBack,
@@ -73,9 +76,25 @@ fun SkillsToolsScreen(vm: SkillsToolsViewModel, onBack: () -> Unit) {
         onInstallAsk = { installAsk = it },
         onCheckAgain = vm::checkAgain,
         onRetrySection = vm::load,
+        onToggleMcp = vm::toggleMcp,
+        onTestMcp = vm::testMcp,
+        onOpenMcpCatalog = vm::openMcpCatalog,
+        onCloseMcpCatalog = vm::closeMcpCatalog,
+        onInstallMcpAsk = { mcpInstallAsk = it },
+        onDismissMcpTest = vm::dismissMcpTest,
     )
 
     val content = state as? SkillsToolsState.Content
+    mcpInstallAsk?.let { entry ->
+        ConfirmDialog(
+            title = stringResource(R.string.mcp_install_title, entry.name),
+            body = stringResource(R.string.mcp_install_body),
+            cancelText = stringResource(R.string.cancel),
+            confirmText = stringResource(R.string.skill_install),
+            onCancel = { mcpInstallAsk = null },
+            onConfirm = { vm.installMcp(entry); mcpInstallAsk = null },
+        )
+    }
     toggleAsk?.let { ask ->
         ConfirmDialog(
             title = stringResource(if (ask.enabled) R.string.skill_turn_on_title else R.string.skill_turn_off_title, ask.name),
@@ -113,10 +132,16 @@ internal fun SkillsToolsContent(
     onInstallAsk: (CatalogSkillDto) -> Unit,
     onCheckAgain: (String) -> Unit,
     onRetrySection: () -> Unit,
+    onToggleMcp: (String, Boolean) -> Unit = { _, _ -> },
+    onTestMcp: (String) -> Unit = {},
+    onOpenMcpCatalog: () -> Unit = {},
+    onCloseMcpCatalog: () -> Unit = {},
+    onInstallMcpAsk: (McpCatalogEntryDto) -> Unit = {},
+    onDismissMcpTest: () -> Unit = {},
 ) {
     val c = Rasul.colors
     val actionRunning = (state as? SkillsToolsState.Content)
-        ?.let { it.busySkill != null || it.installing != null } == true
+        ?.let { it.busySkill != null || it.installing != null || it.mcpBusy } == true
     Column(Modifier.fillMaxSize().background(c.bg)) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp).heightIn(min = 52.dp),
@@ -155,7 +180,15 @@ internal fun SkillsToolsContent(
                 }
                 shown.mcp?.let { mcp ->
                     SectionLabel(stringResource(R.string.mcp_servers), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 4.dp))
-                    InsetGroup { McpSection(mcp, onRetrySection, retryEnabled = !actionRunning) }
+                    InsetGroup {
+                        McpSection(mcp, shown, onRetrySection, !actionRunning, onToggleMcp, onTestMcp, onOpenMcpCatalog)
+                    }
+                    if (shown.mcpStale) {
+                        Text(
+                            stringResource(R.string.mcp_list_stale), style = RasulType.bodySmall, color = c.muted,
+                            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp),
+                        )
+                    }
                 }
                 SectionLabel(stringResource(R.string.ux3b_skills_tools_toolsets), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 3.dp))
                 InsetGroup {
@@ -174,6 +207,76 @@ internal fun SkillsToolsContent(
         val catalog = content.catalog
         if (catalog != CatalogState.Closed) {
             CatalogSheet(content, catalog, onCloseCatalog, onInstallAsk, onCheckAgain, onOpenCatalog)
+        }
+        if (content.mcpCatalog != McpCatalogState.Closed) {
+            RasulSheet(stringResource(R.string.mcp_catalog_title), onCloseMcpCatalog) {
+                McpCatalogBody(content.mcpCatalog, content.installingMcp, onInstallMcpAsk, onOpenMcpCatalog)
+            }
+        }
+        (content.mcpTest as? McpTestState.Result)?.let { test ->
+            NoticeDialog(mcpTestText(test), stringResource(R.string.ok), onDismissMcpTest)
+        }
+    }
+}
+
+@Composable
+private fun mcpTestText(test: McpTestState.Result): String {
+    val result = test.result
+    return if (result.ok) {
+        pluralStringResource(R.plurals.mcp_test_ok, result.tools.size, test.name, result.tools.size)
+    } else {
+        stringResource(R.string.mcp_test_failed, test.name, result.error?.takeIf { it.isNotBlank() } ?: stringResource(R.string.mcp_test_no_reason))
+    }
+}
+
+@Composable
+internal fun McpCatalogBody(
+    catalog: McpCatalogState,
+    installing: String?,
+    onInstallAsk: (McpCatalogEntryDto) -> Unit,
+    onRetry: () -> Unit,
+) {
+    val c = Rasul.colors
+    Column(Modifier.fillMaxWidth().heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
+        when (catalog) {
+            McpCatalogState.Closed -> {}
+            is McpCatalogState.Error -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(catalog.error.message), style = RasulType.body, color = c.dangerText)
+                TextButton(onClick = onRetry, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.retry)) }
+            }
+            McpCatalogState.Loading -> Row(
+                Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(Modifier.size(24.dp), color = c.accent)
+                Text(stringResource(R.string.mcp_catalog_loading), style = RasulType.body, color = c.muted, modifier = Modifier.padding(start = 12.dp))
+            }
+            is McpCatalogState.Open -> {
+                if (catalog.entries.isEmpty()) {
+                    Text(stringResource(R.string.mcp_catalog_empty), style = RasulType.body, color = c.muted, modifier = Modifier.padding(vertical = 12.dp))
+                }
+                catalog.entries.forEachIndexed { index, entry ->
+                    RasulRow(
+                        last = index == catalog.entries.lastIndex, hairlineStart = 0.dp, hairlineEnd = 0.dp, textSpacing = 3.dp,
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        trailing = {
+                            when {
+                                entry.installed -> StatusChip(stringResource(R.string.skill_installed), ChipKind.Done)
+                                installing == entry.id -> Text(stringResource(R.string.skill_installing), style = RasulType.bodySmall, color = c.accent)
+                                entry.installable -> SmallOutlineButton(
+                                    stringResource(R.string.skill_install), { onInstallAsk(entry) }, enabled = installing == null,
+                                )
+                            }
+                        },
+                    ) {
+                        RowTitle(entry.name)
+                        entry.description?.takeIf { it.isNotBlank() }?.let { RowSub(it) }
+                        if (!entry.installed && !entry.installable) {
+                            Text(stringResource(R.string.mcp_needs_setup), style = RasulType.meta, color = c.muted)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -246,15 +349,42 @@ private fun SkillRowItem(skill: SkillRow, switchesEnabled: Boolean, onToggleAsk:
 }
 
 @Composable
-private fun McpSection(mcp: ListState<McpServerDto>, onRetry: () -> Unit, retryEnabled: Boolean) {
+private fun McpSection(
+    mcp: ListState<McpServerDto>,
+    shown: SkillsToolsState.Content,
+    onRetry: () -> Unit,
+    actionsEnabled: Boolean,
+    onToggle: (String, Boolean) -> Unit,
+    onTest: (String) -> Unit,
+    onOpenCatalog: () -> Unit,
+) {
     val c = Rasul.colors
     when (mcp) {
         ListState.Empty -> Text(stringResource(R.string.mcp_servers_empty), style = RasulType.body, color = c.muted, modifier = Modifier.padding(16.dp))
-        is ListState.Error -> FeatureError(mcp.error, FeatureErrorSurface.Skills, onRetry, retryEnabled)
+        is ListState.Error -> FeatureError(mcp.error, FeatureErrorSurface.Skills, onRetry, actionsEnabled)
         is ListState.Ready -> mcp.values.forEachIndexed { index, server ->
+            // Plugin-provided servers are managed by their plugin: the bridge refuses a switch or test for them.
+            val manageable = server.plugin.isNullOrBlank() && server.enabled != null
             RasulRow(
-                last = index == mcp.values.lastIndex, hairlineStart = 16.dp, hairlineEnd = 16.dp, textSpacing = 4.dp,
+                last = false, hairlineStart = 16.dp, hairlineEnd = 16.dp, textSpacing = 4.dp,
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+                trailing = if (manageable) {
+                    {
+                        RasulToggle(
+                            server.enabled == true, label = server.name, enabled = actionsEnabled,
+                        ) { wanted -> onToggle(server.name, wanted) }
+                    }
+                } else null,
+                bottom = if (manageable) {
+                    {
+                        val testing = (shown.mcpTest as? McpTestState.Testing)?.name == server.name
+                        if (testing) {
+                            Text(stringResource(R.string.mcp_testing), style = RasulType.bodySmall, color = c.accent)
+                        } else {
+                            SmallOutlineButton(stringResource(R.string.mcp_test), { onTest(server.name) }, enabled = actionsEnabled)
+                        }
+                    }
+                } else null,
             ) {
                 RowTitle(server.name)
                 listOfNotNull(server.transport?.takeIf { it.isNotBlank() }, server.source?.takeIf { it.isNotBlank() })
@@ -270,6 +400,13 @@ private fun McpSection(mcp: ListState<McpServerDto>, onRetry: () -> Unit, retryE
                 }
             }
         }
+    }
+    if (mcp !is ListState.Error) {
+        RasulRow(
+            onClick = onOpenCatalog, last = true, minHeight = 48.dp, gap = 6.dp, hairlineStart = 0.dp,
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+            leading = { Icon(RasulIcons.Plus, null, tint = c.accent, modifier = Modifier.size(20.dp)) },
+        ) { RowTitle(stringResource(R.string.mcp_add), c.accent) }
     }
 }
 
@@ -512,3 +649,25 @@ private fun SkillInstallConfirmAr() = RasulTheme(false) {
         onCancel = {}, onConfirm = {},
     )
 }
+
+private val previewMcpCatalog = McpCatalogState.Open(
+    listOf(
+        McpCatalogEntryDto("notes", "Notes", "Reads and searches local note folders.", installed = false, installable = true),
+        McpCatalogEntryDto("mail", "Mail", "Reads and drafts email.", installed = false, installable = false),
+        McpCatalogEntryDto("files", "Files", "Browses a chosen folder.", installed = true, installable = false),
+    ),
+)
+
+@Composable
+private fun McpCatalogPreviewBody() = Column(Modifier.fillMaxSize().background(Rasul.colors.bg).padding(20.dp)) {
+    Text(stringResource(R.string.mcp_catalog_title), style = RasulType.sheetTitle, color = Rasul.colors.ink, modifier = Modifier.padding(bottom = 6.dp))
+    McpCatalogBody(previewMcpCatalog, installing = null, onInstallAsk = {}, onRetry = {})
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 480, name = "McpCatalog")
+@Composable
+private fun McpCatalogEn() = RasulTheme(false) { McpCatalogPreviewBody() }
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 480, locale = "ar", name = "McpCatalog")
+@Composable
+private fun McpCatalogAr() = RasulTheme(false) { McpCatalogPreviewBody() }

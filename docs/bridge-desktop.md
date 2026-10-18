@@ -97,4 +97,61 @@ that cannot authenticate the owner with the local token are unavailable. Credent
 remain in process memory and are excluded from responses and audit records.
 Requests have a 10-second total deadline and a 1 MiB upstream response cap;
 redirects are refused. Desktop audit records contain only a static route name and status.
-Memory review, quick commands, MCP mutation and general command dispatch are absent.
+Memory review, quick commands, adding MCP servers and general command dispatch are absent.
+
+## Hermes update (0.2.6)
+
+Routes use the same prefix and rules as above. The update is a property of the installation, not
+of a profile; any served profile may be named. State is held in memory: a bridge restart drops a
+queued update (state returns to `idle`).
+
+| Method and suffix | Request | Response | Per minute |
+| --- | --- | --- | --- |
+| GET `/hermes/update` | none | status object | 12 |
+| POST `/hermes/update` | `{mode:"when_idle"\|"now"}` | HTTP 202 status object | 6 |
+| DELETE `/hermes/update` | none | HTTP 200 status object | 6 |
+
+Status object: `{current, latest, behind, can_apply, reason, changes:[{title}], state, active_agents,
+queued_at, result}`. `latest` is the newest upstream commit id or null; `changes` has at most 20 text
+titles of at most 200 characters; `state` is `idle|queued|running|done|failed`; `active_agents` is the
+gateway's current count or null; `queued_at` is an ISO time while queued; `result` is
+`{ok, from, to, message}` or null. `reason` (when `can_apply` is false) is one of `up_to_date`,
+`not_applicable`, `check_failed`, `dashboard_not_running`, `bridge_elevated`, `dashboard_elevated`,
+`cannot_verify_dashboard_rights`, `update_in_progress`. `behind` is a number, or null when Hermes
+knows an update exists but cannot count the commits (`can_apply` stays true then).
+Raw update log lines, paths, environment and commit ids of the previous version never appear.
+
+`when_idle` queues: the bridge polls the gateway every 15 seconds and starts the update after two
+consecutive polls with nothing busy; the queue expires after 24 hours. Busy means active agents, API
+runs, background delegations or a busy gateway as reported by the gateway health call (the key of the
+default profile, else of any profile that has one). If that call fails, is unreadable or no profile has a
+key, the state is unknown and counts as busy. `now` starts at once
+(Hermes drains and restarts itself). Only one update runs at a time; at most 2 applies per hour.
+While it runs the dashboard restarts; the bridge keeps waiting (up to 30 minutes) and reports
+`done` or `failed` from the update receipt. The previous commit id stays in the bridge audit log
+only. To undo, follow the undo procedure that Hermes documents on the PC.
+
+A background failure ends the state in `failed` ("The update stopped unexpectedly."), never in a stuck
+`queued` or `running`.
+
+Errors: 403 `bridge_elevated` (the bridge runs as administrator or root; run it as the normal
+user), 403 `dashboard_elevated` (the dashboard that would run the update has administrator or root
+rights), 403 `cannot_verify_dashboard_rights` (those rights could not be read), 403 `dashboard_not_running`, 403 `not_applicable` or `check_failed`, 409 `up_to_date`,
+409 `update_in_progress`, 409 `update_running` and `nothing_queued` (DELETE), 429
+`update_rate_limited`, 502 `update_not_started`, 400 `desktop_invalid` (bad body).
+
+## MCP manage (0.2.6)
+
+| Method and suffix | Request | Response | Per minute |
+| --- | --- | --- | --- |
+| PUT `/mcp/{name}/enabled` | `{enabled}` | `{name, enabled}` after rereading | 6 |
+| POST `/mcp/{name}/test` | none | `{name, ok, tools:[{name,description}], prompts?, resources?, error?}` | 3 |
+| GET `/mcp/catalog` | none | `{entries:[{id,name,description,installed,enabled,installable}]}` | 6 |
+| POST `/mcp/catalog/install` | `{id}` | `{id, state:"installed"}` | 1 |
+
+`{name}` must be an existing server of the selected profile that is not provided by a plugin
+(otherwise 400 `desktop_invalid`). Install accepts only an `id` present in a fresh catalog read
+made by the bridge itself that is `installable`: no credentials or OAuth required, no repository
+build step, not already installed. Free-form commands or URLs are never accepted. Command,
+arguments, environment, headers, URLs and credentials never appear in any response. A test is
+bounded by the 10-second upstream deadline.

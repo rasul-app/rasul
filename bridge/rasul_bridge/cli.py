@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import select
 import struct
 import subprocess
@@ -18,17 +19,30 @@ import zlib
 from xml.sax.saxutils import escape
 
 from .config import Config, DEFAULT_CONFIG
+from .network import pairing_urls
+from .status import bridge_version
 from .registry import Registry
 from .server import Bridge
 from .storage import Store, atomic_write, current_sid, data_dir, private_dir
 from .tls import ensure_identity, fingerprint
 
 
-def initialize(store):
+def set_flag(text, key):
+    line = f"{key} = true"
+    if re.search(rf"(?m)^{key}\s*=", text):
+        return re.sub(rf"(?m)^{key}\s*=.*$", line, text)
+    return line + "\n" + text
+
+
+def initialize(store, lan=False, tailscale=False):
     ensure_identity(store)
     with store.lock():
-        if not (store.root / "config.toml").exists():
-            atomic_write(store.root / "config.toml", DEFAULT_CONFIG.encode())
+        path = store.root / "config.toml"
+        if not path.exists():
+            atomic_write(path, DEFAULT_CONFIG.encode())
+        for key, wanted in (("lan", lan), ("tailscale", tailscale)):
+            if wanted:
+                atomic_write(path, set_flag(path.read_text(encoding="utf-8"), key).encode())
         if not store.read("bridge.json"):
             store.write("bridge.json", {"id": uuid.uuid4().hex})
 
@@ -88,7 +102,10 @@ def pair(store, config):
     from .pairing import Pairing
     import qrcode
     ceremony = Pairing(store, Registry(store), ensure_identity(store))
-    payload, text = ceremony.issue(config.public_urls, store.read("bridge.json")["id"], config.name)
+    urls, dropped = pairing_urls(config)
+    if dropped:
+        print(f"{dropped} addresses did not fit in the pairing code and were left out.")
+    payload, text = ceremony.issue(urls, store.read("bridge.json")["id"], config.name)
     try:
         with tempfile.TemporaryDirectory(dir=store.root) as directory:
             private_dir(directory)
@@ -198,15 +215,19 @@ class serving_lock:
 def main():
     parser = argparse.ArgumentParser(prog="rasul-bridge")
     parser.add_argument("--data-dir", type=Path, default=data_dir())
+    parser.add_argument("--version", action="version", version="rasul-bridge " + bridge_version())
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("init", "serve", "pair", "devices", "init-profiles", "status", "install-task", "uninstall-task"):
+    for command in ("serve", "pair", "devices", "init-profiles", "status", "install-task", "uninstall-task"):
         commands.add_parser(command)
+    init = commands.add_parser("init")
+    init.add_argument("--lan", action="store_true", help="also listen on this PC's private network addresses")
+    init.add_argument("--tailscale", action="store_true", help="also listen on this PC's Tailscale address")
     commands.add_parser("revoke").add_argument("id")
     args = parser.parse_args()
     try:
         store = Store(args.data_dir)
         if args.command == "init":
-            initialize(store)
+            initialize(store, args.lan, args.tailscale)
             print("Initialized. Edit config.toml before serving or pairing.")
             return
         if not (store.root / "config.toml").exists():

@@ -170,17 +170,18 @@ class FakeDesktop:
 
 
 @asynccontextmanager
-async def desktop(tmp_path, monkeypatch):
+async def desktop(tmp_path, monkeypatch, factory=FakeDesktop):
     directory = tmp_path / "rendezvous"
     directory.mkdir(mode=0o700)
     monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(directory))
-    fake = FakeDesktop(directory)
+    fake = factory(directory)
     server = await asyncio.start_server(fake.handle, "127.0.0.1", 0)
     fake.server = server
     fake.port = server.sockets[0].getsockname()[1]
     fake.publish()
     try:
-        async with running(tmp_path) as (bridge, _):
+        async with running(tmp_path) as (bridge, gateway):
+            fake.gateway = gateway
             fake.home = bridge.config.hermes_home
             identity, device = registered(bridge)
             async with client(bridge, tmp_path, identity) as (link, reader, _):

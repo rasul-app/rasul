@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.Arrangement
@@ -642,7 +643,7 @@ internal fun ChatTopBar(
                 if (forkTitle != null && !active) {
                     Text(
                         if (forkTitle.isBlank()) stringResource(R.string.chat_fork_badge) else stringResource(R.string.chat_fork_title, forkTitle),
-                        modifier = Modifier.padding(start = 8.dp).weight(1f, fill = false).testTag("chat_fork_title"),
+                        modifier = Modifier.widthIn(max = 100.dp).padding(start = 8.dp).testTag("chat_fork_title"),
                         style = RasulType.meta,
                         color = colors.muted,
                         maxLines = 1,
@@ -819,11 +820,15 @@ private fun MessageBubble(message: ChatMessage, maxWidth: androidx.compose.ui.un
                         }
                     }
                     if (message.text.isNotEmpty()) {
-                        Text(
-                            message.text,
-                            style = RasulType.chatBody.copy(lineHeight = lineHeight),
-                            color = colors.ink,
-                        )
+                        if (message.kind == MessageKind.Assistant) {
+                            app.rasul.files.AssistantText(message.text, RasulType.chatBody.copy(lineHeight = lineHeight), colors.ink)
+                        } else {
+                            Text(
+                                message.text,
+                                style = RasulType.chatBody.copy(lineHeight = lineHeight),
+                                color = colors.ink,
+                            )
+                        }
                     }
                 }
             }
@@ -1491,7 +1496,7 @@ private fun SentAttachmentView(attachment: SentAttachment, mine: Boolean) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ApprovalSheet(
+internal fun ApprovalSheet(
     approval: ApprovalUi,
     busy: Boolean,
     onOnce: () -> Unit,
@@ -1520,7 +1525,7 @@ private fun ApprovalSheet(
     ) {
         app.rasul.WindowHapticFeedbackProvider {
             Column(
-                Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Row(
@@ -1546,7 +1551,8 @@ private fun ApprovalSheet(
                         color = colors.muted,
                     )
                     Column(
-                        Modifier.fillMaxWidth().background(colors.ink, ChatCodeShape)
+                        Modifier.fillMaxWidth().heightIn(max = 240.dp).background(colors.ink, ChatCodeShape)
+                            .verticalScroll(rememberScrollState())
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                     ) {
                         CodeText(
@@ -1680,11 +1686,15 @@ internal fun sessionActionMessage(context: android.content.Context, error: Herme
 /** Fixed stamp (Thu 2026-10-15 20:46 UTC) so goldens show the day separator deterministically. */
 private const val CHAT_PREVIEW_AT = 1_792_097_160_000L
 
+/** About 4000 characters: the approval sheet must keep both answer buttons reachable. */
+private val CHAT_PREVIEW_LONG_COMMAND = (1..80).joinToString("\n") { "step $it: sudo find /var/log/old-builds -name '*.log' -mtime +30 -delete" }
+
 private enum class ChatPreviewKind {
     Idle,
     Thinking,
     Tool,
     Approval,
+    ApprovalLong,
     Lost,
     HistoryError,
     Fork,
@@ -1705,17 +1715,18 @@ private fun ChatPreviewBody(
         ChatPreviewKind.Idle -> null
         ChatPreviewKind.Thinking -> ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.Thinking)
         ChatPreviewKind.Tool -> ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.Tool("terminal"))
-        ChatPreviewKind.Approval -> ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.WaitingApproval)
+        ChatPreviewKind.Approval, ChatPreviewKind.ApprovalLong ->
+            ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.WaitingApproval)
         ChatPreviewKind.Lost -> ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.Lost)
         ChatPreviewKind.HistoryError -> null
         ChatPreviewKind.Fork -> null
     }
     val example = RunModelSelection("example", "Example model")
-    val approvals = if (kind == ChatPreviewKind.Approval) {
+    val approvals = if (kind == ChatPreviewKind.Approval || kind == ChatPreviewKind.ApprovalLong) {
         listOf(
             ApprovalUi(
                 requestId = "preview",
-                command = stringResource(R.string.chat_preview_command),
+                command = if (kind == ChatPreviewKind.ApprovalLong) CHAT_PREVIEW_LONG_COMMAND else stringResource(R.string.chat_preview_command),
                 description = stringResource(R.string.chat_preview_approval_description),
             ),
         )
@@ -1800,6 +1811,14 @@ private fun ChatApprovalEn() = ChatPreviewBody(ChatPreviewKind.Approval)
 @Preview(showBackground = true, widthDp = 390, heightDp = 844, locale = "ar", name = "Chat approval AR")
 @Composable
 private fun ChatApprovalAr() = ChatPreviewBody(ChatPreviewKind.Approval)
+
+@Preview(showBackground = true, widthDp = 360, heightDp = 640, name = "Chat approval long EN")
+@Composable
+private fun ChatApprovalLongEn() = ChatPreviewBody(ChatPreviewKind.ApprovalLong)
+
+@Preview(showBackground = true, widthDp = 360, heightDp = 640, locale = "ar", name = "Chat approval long AR")
+@Composable
+private fun ChatApprovalLongAr() = ChatPreviewBody(ChatPreviewKind.ApprovalLong)
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 844, name = "Chat lost EN")
 @Composable

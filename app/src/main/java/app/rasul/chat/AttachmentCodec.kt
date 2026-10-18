@@ -71,13 +71,22 @@ private val PHOTO_ATTEMPTS = listOf(
     RunInputLimits.PHOTO_FALLBACK_LONG_EDGE to 60,
 )
 
+/** Never throws: a bad or huge image becomes a specific result so every caller shows its attachment error instead of crashing. */
+internal fun reencodePhoto(source: ByteArray, maxBytes: Int = RunInputLimits.MAX_PHOTO_BYTES): PhotoResult = try {
+    encodePhoto(source, maxBytes)
+} catch (_: OutOfMemoryError) {
+    PhotoResult.TooLarge
+} catch (_: Exception) {
+    PhotoResult.Unreadable
+}
+
 /**
  * Downscale + re-encode one image until its JPEG is within [maxBytes]: long edge
  * [RunInputLimits.PHOTO_LONG_EDGE] at quality 80, then 70 and 60, and last
  * [RunInputLimits.PHOTO_FALLBACK_LONG_EDGE] at 60. A fresh JPEG carries no EXIF — GPS/location
  * metadata is gone by construction; the orientation flag is applied to pixels first so it is not lost.
  */
-internal fun reencodePhoto(source: ByteArray, maxBytes: Int = RunInputLimits.MAX_PHOTO_BYTES): PhotoResult {
+private fun encodePhoto(source: ByteArray, maxBytes: Int): PhotoResult {
     val decoded = decodeSampled(source, RunInputLimits.PHOTO_LONG_EDGE) ?: return PhotoResult.Unreadable
     val oriented = applyOrientation(decoded, readOrientation(source))
     var jpeg = ByteArray(0)

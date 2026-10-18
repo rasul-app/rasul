@@ -86,6 +86,12 @@ import androidx.lifecycle.repeatOnLifecycle
 import app.rasul.bridge.bridgeTargetLoader
 import app.rasul.bridge.bridgeRunMemory
 import app.rasul.bridge.desktopApi
+import app.rasul.desktop.HermesUpdateScreen
+import app.rasul.desktop.HermesUpdateViewModel
+import app.rasul.desktop.PcCheckScreen
+import app.rasul.desktop.PcCheckViewModel
+import app.rasul.desktop.PcInfoViewModel
+import app.rasul.bridge.statusApi
 import app.rasul.desktop.RunHistoryScreen
 import app.rasul.desktop.RunHistoryViewModel
 import app.rasul.desktop.UsageScreen
@@ -121,6 +127,8 @@ private const val HELP_URL = "https://github.com/rasul-app/rasul#readme"
 private const val FEEDBACK_URL = "https://github.com/rasul-app/rasul/issues/new"
 private const val SKILLS_TOOLS = "skills-tools"
 private const val USAGE = "usage"
+private const val HERMES_UPDATE = "hermes-update"
+private const val PC_CHECK = "pc-check"
 private const val RUN_HISTORY = "job-runs/{id}?src={src}&name={name}&bridge={bridge}&profile={profile}"
 private const val EDIT = "edit?id={id}"
 private const val TRANSCRIPT = "transcript/{id}?src={src}&sessionSource={sessionSource}"
@@ -342,6 +350,24 @@ fun RasulNav(
             composable(MORE) {
                 val pcState by container.activePc.state.collectAsState()
                 val bridgeState by container.bridgeBots.state.collectAsState()
+                val updateState by container.updates.state.collectAsState()
+                val updateEnabled by container.updatePrefs.enabledFlow.collectAsState(initial = true)
+                val moreTarget = pcState.target as? ActiveTarget.Ready
+                val pcInfo = moreTarget?.takeIf { it.target.bridge != null }?.let { ready ->
+                    val infoVm: PcInfoViewModel = viewModel(
+                        key = "pc-info-" + ready.target.hashCode(),
+                        factory = viewModelFactory {
+                            initializer {
+                                PcInfoViewModel(
+                                    ready.target.statusApi()?.let { api -> { api } },
+                                    ready.target.desktopApi()?.let { api -> { api } },
+                                )
+                            }
+                        },
+                    )
+                    LaunchedEffect(infoVm) { infoVm.onOpened() }
+                    infoVm.state.collectAsState().value
+                }
                 MoreScreen(
                     pcState.copy(pcs = pcState.pcs.filter { it.baseUrl.isNotEmpty() }),
                     bridgeState = bridgeState,
@@ -374,7 +400,24 @@ fun RasulNav(
                     client = container.client,
                     onSkillsTools = { nav.navigate(SKILLS_TOOLS) },
                     onUsage = { nav.navigate(USAGE) },
+                    showAppUpdates = true,
+                    updateCheckEnabled = updateEnabled,
+                    updateState = updateState,
+                    onUpdateCheckEnabledChanged = { value -> container.appScope.launch { container.updatePrefs.setEnabled(value) } },
+                    onUpdateCheckNow = { container.appScope.launch { container.updates.checkNow() } },
+                    onUpdateView = container.updates::showOffer,
+                    pcInfo = pcInfo,
+                    onHermesUpdate = { nav.navigate(HERMES_UPDATE) },
+                    onCheckConnection = { nav.navigate(PC_CHECK) },
                 )
+            }
+            composable(HERMES_UPDATE) {
+                val picker by container.activePc.state.collectAsState()
+                HermesUpdateDestination(picker, container, onBack = { nav.popBackStack() })
+            }
+            composable(PC_CHECK) {
+                val picker by container.activePc.state.collectAsState()
+                PcCheckDestination(picker, container, onBack = { nav.popBackStack() })
             }
             composable(SKILLS_TOOLS) {
                 val picker by container.activePc.state.collectAsState()
@@ -503,12 +546,17 @@ fun RasulNav(
                                 ?: app.rasul.data.HermesResult.Err(app.rasul.data.HermesError.NotFound)
                         })
                     }
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        app.rasul.files.LocalFileBridge provides bridge,
+                        app.rasul.files.LocalFileDownloads provides container.fileDownloads,
+                    ) {
                     ChatScreen(vm = model, title = name, onBack = { nav.popBackStack() },
                         runs = container.runs, modelOptionsLoader = optionsLoader,
                         onInstructions = { nav.navigate("instructions?bridge=" + Uri.encode(bridge) + "&profile=" +
                             Uri.encode(profile) + "&name=" + Uri.encode(name)) },
                         onOpenFork = { forked, rev -> nav.navigate(forkChatRoute(bridge = bridge, profile = profile, session = forked, revision = rev)) },
                         onApprovals = { nav.navigate("approvals/" + Uri.encode(bridge) + "/" + Uri.encode(profile)) })
+                    }
                 }
             }
             composable(CHAT, arguments = listOf(
@@ -646,6 +694,38 @@ private fun UsageDestination(picker: PcPicker, container: AppContainer, onBack: 
         UsageScreen(vm, target.name, onBack)
     } else {
         TargetLoadFallback(picker, container, R.string.usage_title, onBack)
+    }
+}
+
+@Composable
+private fun HermesUpdateDestination(picker: PcPicker, container: AppContainer, onBack: () -> Unit) {
+    val target = picker.target as? ActiveTarget.Ready
+    if (target != null) {
+        val vm: HermesUpdateViewModel = viewModel(
+            key = "hermes-update-" + target.target.hashCode(),
+            factory = viewModelFactory {
+                initializer { HermesUpdateViewModel(target.target.desktopApi()?.let { api -> { api } }) }
+            },
+        )
+        HermesUpdateScreen(vm, target.name, onBack)
+    } else {
+        TargetLoadFallback(picker, container, R.string.hupd_title, onBack)
+    }
+}
+
+@Composable
+private fun PcCheckDestination(picker: PcPicker, container: AppContainer, onBack: () -> Unit) {
+    val target = picker.target as? ActiveTarget.Ready
+    if (target != null) {
+        val vm: PcCheckViewModel = viewModel(
+            key = "pc-check-" + target.target.hashCode(),
+            factory = viewModelFactory {
+                initializer { PcCheckViewModel(target.target.statusApi()?.let { api -> { api } }) }
+            },
+        )
+        PcCheckScreen(vm, target.name, onBack)
+    } else {
+        TargetLoadFallback(picker, container, R.string.check_title, onBack)
     }
 }
 

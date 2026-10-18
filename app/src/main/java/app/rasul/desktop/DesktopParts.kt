@@ -27,7 +27,7 @@ import app.rasul.ui.theme.RasulType
 
 /** Back + title + target name header, matching the Skills & tools screen. */
 @Composable
-internal fun DesktopHeader(title: Int, subtitle: String, onBack: () -> Unit, onRefresh: (() -> Unit)? = null) {
+internal fun DesktopHeader(title: Int, subtitle: String, onBack: () -> Unit, onRefresh: (() -> Unit)? = null, refreshLabel: Int = R.string.refresh) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp).heightIn(min = 52.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -39,7 +39,7 @@ internal fun DesktopHeader(title: Int, subtitle: String, onBack: () -> Unit, onR
             Text(stringResource(title), style = RasulType.rowTitle, color = Rasul.colors.ink)
             Text(subtitle, style = RasulType.meta, color = Rasul.colors.muted, maxLines = 1)
         }
-        if (onRefresh != null) TextButton(onClick = onRefresh) { Text(stringResource(R.string.refresh)) }
+        if (onRefresh != null) TextButton(onClick = onRefresh) { Text(stringResource(refreshLabel)) }
     }
 }
 

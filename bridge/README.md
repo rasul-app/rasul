@@ -43,8 +43,11 @@ security and device authentication.
    label = "Blank"
    ```
 
-   The upstream profile root defaults to `~/.hermes`; `hermes_home` can select
-   another owner-controlled root. Default plus named directories are discovered.
+   The upstream profile root is found the way the upstream application finds it:
+   the `HERMES_HOME` environment variable if set, otherwise its per-user local
+   application directory on Windows (`%LOCALAPPDATA%\hermes`) or `~/.hermes`
+   elsewhere. `hermes_home` in `config.toml` overrides both. Default plus named
+   directories are discovered.
    For named profiles, enable upstream profile multiplexing in its configuration.
    `templates` may contain `clone_config = "default"` or an existing profile name
    that the owner approves. Configuration cloning also copies installed skills;
@@ -79,7 +82,8 @@ security and device authentication.
    the owner decision, and closes after one request. Reconnect with the enrolled
    certificate after successful pairing.
 
-7. Use `rasul-bridge status` for local identity/profile information.
+7. Use `rasul-bridge status` for local identity/profile information and
+   `rasul-bridge --version` for the bridge version.
    `rasul-bridge devices` lists enrolled devices. Revoke a lost phone with
    `rasul-bridge revoke <id>`; the serving process closes its open connections
    and refuses subsequent requests. Re-pair with a new device key after revocation.
@@ -95,12 +99,50 @@ security and device authentication.
 - **Cloudflare Tunnel:** route an outbound tunnel for `example.com` to the local
   bridge listener, and put `wss://example.com/v1/link` in `public_urls`. Enable
   WebSocket forwarding. Expose the bridge only; leave the upstream API on loopback.
-- **Tailscale:** bind the bridge to the computer's overlay address and use, for
-  example, `ws://192.0.2.7:8787/v1/link`. Restrict access with overlay policy and
-  the host firewall. Inner TLS authenticates and encrypts even with outer `ws`.
-- **LAN:** bind the bridge to a selected local interface, allow its port only on
-  the trusted network, and add that interface's reachable WebSocket URL. A phone
-  on another network needs a tunnel or overlay. The upstream remains on loopback.
+- **Tailscale:** set `tailscale = true` (or run `rasul-bridge init --tailscale`
+  on a new setup). See "Same Wi-Fi and Tailscale" below. Restrict access with
+  overlay policy and the host firewall. Inner TLS authenticates and encrypts even
+  with outer `ws`.
+- **LAN:** set `lan = true` (or `rasul-bridge init --lan`). See below. Allow the
+  port only on the trusted network. A phone on another network needs a tunnel or
+  overlay. The upstream remains on loopback.
+
+### Same Wi-Fi and Tailscale
+
+Both keys default to `false`, which leaves listening and pairing exactly as
+before. With `lan = true` the bridge also listens on this computer's private
+IPv4 addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16). With
+`tailscale = true` it also listens on addresses in 100.64.0.0/10. Loopback and
+link-local addresses are skipped; virtual adapters cannot be told apart using
+the standard library, so a virtual adapter's private address may also be listed.
+The addresses are detected again on every `rasul-bridge serve` and every
+`rasul-bridge pair`, always as `ws://` on `port` (the bridge listener is plain
+`ws`; the inner pinned TLS protects the traffic), even when a tunnel URL in
+`public_urls` is `wss`. The pairing code lists `public_urls` first, then LAN, then
+Tailscale addresses, at most eight in all (the app's limit); the command prints how
+many were left out. The phone tries them in turn and remembers the one that
+worked. When the computer's address changes (for example a new DHCP lease),
+nothing needs to be done if another listed address still works; otherwise run
+`rasul-bridge pair` again. The pairing rate limit is shared by every listener. An address that fails to bind is
+skipped (the bridge prints how many of the extra addresses failed) while the
+configured `listen` address must still bind.
+
+The range 100.64.0.0/10 is also carrier-grade NAT space. With `tailscale = true` on a
+mobile-carrier connection the bridge may listen on a carrier-assigned address, so
+leave it off unless the overlay network is what you use.
+With `listen = "0.0.0.0"` the bridge already listens on every address and
+nothing is added; the pairing code still lists the detected addresses.
+
+### Self-check
+
+An enrolled phone can read `GET /v1/status`. It returns the bridge version,
+whether the upstream directory exists, per profile whether a key is configured and
+the gateway answers `/health`, the upstream version and `active_agents`, whether
+the desktop dashboard was found, whether the approvals listener is running, and
+how many `lan` and `tailscale` addresses actually bound and how many `public` URLs are configured. `dashboard_found` is always a boolean; `dashboard_check` is `"timeout"` when the probe timed out (so `false` is not conclusive) and `"ok"` otherwise. It returns counts and
+flags only: no addresses, keys or paths. Each probe has a short timeout, so the
+route answers within three seconds even when the upstream is down. It is limited
+to 30 requests per minute per device.
 
 Tunnel setup, routing, computer sleep, and network policy affect availability.
 No tunnel account or credential belongs in this repository.
@@ -125,7 +167,8 @@ the invitation and uses a non-exportable P-256 key for subsequent mutual TLS.
 No client certificate permits only pairing; every other route needs a registered,
 unrevoked device. TLS is restricted to 1.3 with no tickets, resumption, or early data.
 
-The bridge admits at most 32 authenticated links and 16 per device. Separate pools
+The bridge admits at most 128 authenticated links and 64 per device. A refused link
+leaves one audit line per device per minute. Separate pools
 allow four anonymous links and eight pending upgrades or TLS handshakes. A full
 pending pool drops its oldest socket so incomplete upgrades cannot hold all
 admission slots. Pending sockets have a ten-second deadline from TCP accept;

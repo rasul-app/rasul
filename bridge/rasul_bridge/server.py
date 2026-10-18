@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import suppress
+from datetime import datetime, timezone
 from email.message import Message
 from http import HTTPStatus
 import json
@@ -9,6 +10,7 @@ import logging
 import random
 import re
 import ssl
+import sys
 import time
 from urllib.parse import urlsplit
 
@@ -22,8 +24,11 @@ from .desktop import Desktop, RULES as DESKTOP_RULES
 from .http import HTTPError, Reader, chunk, request, response, stream_start
 from .limits import Limits
 from .instructions import Instructions
+from .network import extra_plan, lan_addresses, tailscale_addresses
+from .status import Status
 from .pairing import Pairing
 from .profiles import Profiles
+from .files import Files, TOKEN
 from .proxy import StreamAborted, Upstream, allowed
 from .registry import Registry
 from .tls import TLSLink, ensure_identity, server_context
@@ -75,6 +80,8 @@ class Bridge:
         self.profiles = Profiles(store, config, self.upstream, run=run)
         self.instructions = Instructions(self.profiles)
         self.desktop = Desktop(self.profiles)
+        self.status = Status(self)
+        self.files = Files(config.hermes_home, store.root, self.file_audit)
         self.connections = {}
         self.pending = {}
         self.anonymous = {}
@@ -87,6 +94,8 @@ class Bridge:
         self.http_tasks = set()
         self.link_tasks = {}
         self.server = None
+        self.extra_servers = []
+        self.bound = {"lan": 0, "tailscale": 0}
         self.heartbeat_interval = 15
         self.approvals = (Approvals(store, self.profiles, self.audit_call)
                           if config.approvals_port is not None else None)
@@ -124,6 +133,10 @@ class Bridge:
             # Audit failures must not change admission, requests, or revocation.
             self.audit.drop()
 
+    def file_audit(self, event, device, profile, name, size):
+        self.audit_call("write", {"time": datetime.now(timezone.utc).isoformat(), "device_id": device,
+                                  "profile_id": profile, "event": event, "filename": name, "size": size})
+
     def certificate_received(self, connection, link):
         # Classify before the final TLS send can suspend.
         raw_cert = link.ssl.getpeercert(binary_form=True)
@@ -137,9 +150,11 @@ class Bridge:
             deadline.cancel()
         if device is not None:
             if not self.limits.connect():
+                self.audit_call("rejected_link", "global_limit", device)
                 raise ValueError("Connection limit")
             if not self.limits.authenticate(device):
                 self.limits.disconnect()
+                self.audit_call("rejected_link", "device_limit", device)
                 raise ValueError("Device connection limit")
             self.connections[connection] = device
         else:
@@ -170,21 +185,42 @@ class Bridge:
         logger.addHandler(logging.NullHandler())
         logger.propagate = False
         logger.disabled = True
-        self.server = await serve(self.handle, self.config.listen, self.config.port,
-                                  create_connection=lambda *a, **kw: AcceptedConnection(*a, bridge=self, **kw),
-                                  process_request=self.admission, compression=None,
-                                  server_header=None, max_size=65536, max_queue=2,
-                                  open_timeout=UPGRADE_TIMEOUT, close_timeout=1, logger=logger)
+        options = dict(create_connection=lambda *a, **kw: AcceptedConnection(*a, bridge=self, **kw),
+                       process_request=self.admission, compression=None,
+                       server_header=None, max_size=65536, max_queue=2,
+                       open_timeout=UPGRADE_TIMEOUT, close_timeout=1, logger=logger)
+        # The configured address stays fatal on failure; detected addresses are best-effort.
+        self.server = await serve(self.handle, self.config.listen, self.config.port, **options)
         self.port = self.server.sockets[0].getsockname()[1]
+        plan = extra_plan(self.config)
+        for kind, address in plan:
+            try:
+                self.extra_servers.append(await serve(self.handle, address, self.port, **options))
+                self.bound[kind] += 1
+            except OSError:
+                pass
+        if len(self.extra_servers) < len(plan):
+            print(f"{len(plan) - len(self.extra_servers)} of {len(plan)} extra addresses failed to bind.",
+                  file=sys.stderr, flush=True)
+        if self.config.listen in ("0.0.0.0", "::"):
+            # Listening on every address already covers the detected ones.
+            self.bound = {"lan": len(lan_addresses()) if self.config.lan else 0,
+                          "tailscale": len(tailscale_addresses()) if self.config.tailscale else 0}
         if self.approvals is not None:
             try:
                 await self.approvals.start(self.config.approvals_port)
             except Exception:
-                self.server.close()
-                await self.server.wait_closed()
+                await self.close_servers()
                 raise
         self.monitor_task = asyncio.create_task(self.monitor())
         return self
+
+    async def close_servers(self):
+        servers = [self.server, *self.extra_servers]
+        for server in servers:
+            server.close()
+        for server in servers:
+            await server.wait_closed()
 
     async def refresh_context(self):
         async with self.context_lock:
@@ -311,6 +347,15 @@ class Bridge:
                 route, profile = "/v1/profiles/{id}/approvals", match[1]
                 await self.approvals.phone(link, device, method, match, body)
                 status = 200
+            elif method == "GET" and target == "/v1/status":
+                route, status = "/v1/status", 200
+                if not self.limits.status(device):
+                    raise HTTPError(429, "status_rate_limited")
+                await response(link, status, await self.status.snapshot())
+            elif method == "GET" and re.fullmatch(r"/v1/files/" + TOKEN.pattern, target):
+                route = "/v1/files/{token}"
+                await self.files.download(link, device, target.rsplit("/", 1)[1])
+                status = 200
             elif method == "GET" and target == "/v1/profiles":
                 route, status = "/v1/profiles", 200
                 await response(link, status, await self.profiles.snapshot())
@@ -417,7 +462,9 @@ class Bridge:
                 if template == "/api/sessions/{id}/model" and not self.limits.model(device, profile):
                     raise HTTPError(429, "model_rate_limited")
                 status = await self.upstream.forward(link, method, self.profiles.target(profile, suffix),
-                                                     key, forward_head, forward_body)
+                                                     key, forward_head, forward_body,
+                                                     self.files.filter(device, profile, template)
+                                                     if method == "GET" else None)
         except StreamAborted:
             status = 502
             raise EOFError from None
@@ -476,8 +523,7 @@ class Bridge:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self.server.close()
-        await self.server.wait_closed()
+        await self.close_servers()
         if self.context_task is not None:
             with suppress(Exception):
                 await self.context_task
