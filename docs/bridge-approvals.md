@@ -55,6 +55,16 @@ accepted. The existing paired-device connection and body limits also apply.
 | GET | `/v1/profiles/{id}/approvals` | 200, pending requests for this profile |
 | GET | `/v1/profiles/{id}/approvals/events` | 200, chunked SSE |
 | POST | `/v1/profiles/{id}/approvals/{request_id}/answer` | 200, records one permitted choice |
+| GET | `/v1/approvals` | 200, pending requests of every profile, ordered by `expires_at` then `request_id` |
+| GET | `/v1/approvals/events` | 200, chunked SSE for every profile |
+
+The two all-profile routes use the same item shape, framing, auth, rate limit
+and error codes as the per-profile routes. Their events carry `profile` and
+`request_id`; a profile removed from discovery is skipped. Answers stay on the
+per-profile route. Any other method or sub-path under `/v1/approvals` answers
+404 `approvals_not_found`. A bridge without these routes answers 404, so a
+client falls back to one stream per profile. Use the all-profile stream
+(one connection per device) when several bots are present.
 
 The list response is `{"approvals": [...]}`. Each item has exactly this shape:
 

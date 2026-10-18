@@ -25,15 +25,16 @@ English | [العربية](#العربية)
 - **Files from the agent.** When the agent sends you a file from the computer, it appears as a card in the chat. Tap it to download, then open, save or share it. Web-type files and app installers are never opened inside the app.
 - **Connection check.** See what works on the computer side and what to fix.
 - **MCP servers.** Switch servers on or off, test them and add new ones from the catalog.
+- **Messaging channels.** See Telegram and other channels per bot, switch them on or off, test them, and connect a new Telegram bot from the phone. The bot token stays on the computer, and Hermes restarts only when it is idle unless you choose to restart now.
 - **App updates.** The app checks this repository’s GitHub Releases for new versions and can update itself, verified against the release checksum and signing key. Switch it off in More.
 - **Light and dark theme.**
 - **App lock.** Protect the app with your phone’s screen lock or a strong biometric.
 
-There is no Rasul server. The app talks to your own computer, plus (optional, can be turned off in More) GitHub Releases of this repo to check for app updates. No accounts, no tracking, no analytics, no ads.
+There is no Rasul server. The app talks to your own computer, plus (optional, can be turned off in More) GitHub Releases of this repo to check for app updates. No accounts, no tracking, no analytics, no ads. The Telegram setup link is opened only when you tap it.
 
 ## Status
 
-Early development (version 0.2.6). Pre-release APKs are on the Releases page.
+Early development (version 0.2.7). Pre-release APKs are on the Releases page.
 
 ## Requirements
 
@@ -151,13 +152,14 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 - **ملفات من الوكيل:** عندما يرسل لك الوكيل ملفًا من الحاسوب يظهر كبطاقة في المحادثة. اضغط عليها لتنزيله ثم افتحه أو احفظه أو شاركه. الملفات من نوع الويب ومثبّتات التطبيقات لا تُفتح داخل التطبيق أبدًا.
 - **فحص الاتصال:** اعرف ما يعمل في جهة الحاسوب وما يجب إصلاحه.
 - **خوادم MCP:** شغّل الخوادم أو أوقفها، واختبرها، وأضف خوادم جديدة من الكتالوج.
+- **قنوات المراسلة:** اعرض تيليغرام وغيره من القنوات لكل بوت، وشغّلها أو أوقفها، واختبرها، واربط بوت تيليغرام جديدًا من الهاتف. يبقى رمز البوت على الحاسوب، ولا يُعاد تشغيل Hermes إلا عندما يكون خاملًا ما لم تختر إعادة التشغيل الآن.
 - **تحديث التطبيق:** يتحقق التطبيق من إصدارات GitHub لهذا المستودع بحثًا عن نسخ جديدة ويستطيع تحديث نفسه، مع التحقق من مجموع التحقق الخاص بالإصدار ومن مفتاح التوقيع. يمكن إيقاف ذلك من «المزيد».
 
-لا يوجد خادم لرسول. التطبيق يتصل بحاسوبك، إضافةً إلى (اختياري ويمكن إيقافه من «المزيد») إصدارات GitHub لهذا المستودع للتحقق من تحديثات التطبيق، بلا حسابات ولا تتبّع ولا تحليلات ولا إعلانات.
+لا يوجد خادم لرسول. التطبيق يتصل بحاسوبك، إضافةً إلى (اختياري ويمكن إيقافه من «المزيد») إصدارات GitHub لهذا المستودع للتحقق من تحديثات التطبيق، بلا حسابات ولا تتبّع ولا تحليلات ولا إعلانات. ولا يُفتح رابط إعداد تيليغرام إلا عندما تضغط عليه.
 
 ### الحالة
 
-قيد التطوير المبكر (الإصدار 0.2.6). ملفات APK التجريبية متاحة في صفحة الإصدارات.
+قيد التطوير المبكر (الإصدار 0.2.7). ملفات APK التجريبية متاحة في صفحة الإصدارات.
 
 ### جسر رسول (موصى به)
 

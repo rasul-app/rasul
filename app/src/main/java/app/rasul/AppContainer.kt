@@ -38,7 +38,9 @@ class AppContainer(
     val appLockSettings = AppLockSettings(context.dataStore)
     val appLock = AppLockController(appLockSettings, appScope)
     val bridgeBots = app.rasul.bridge.BridgeBotsRepository(bridges, bridgeClients)
-    val approvals = app.rasul.bridge.ApprovalsRepository(bridges, bridgeClients, bridgeBots.state)
+    val approvals = app.rasul.bridge.ApprovalsRepository(
+        bridges, bridgeClients, bridgeBots.state, bridgeApi = { app.rasul.bridge.BridgeWideApprovalsApi(it) },
+    )
     /** Files the agent sends (rasul-file:// links): downloads into cacheDir/received, one source per saved bridge. */
     val fileDownloads = app.rasul.files.FileDownloads(
         java.io.File(context.cacheDir, "received"), appScope,

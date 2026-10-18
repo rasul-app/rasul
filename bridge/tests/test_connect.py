@@ -126,7 +126,7 @@ def test_init_flags_write_the_config(tmp_path):
 
 def test_fallback_version_matches_the_project_file():
     project = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8"))
-    assert FALLBACK_VERSION == project["project"]["version"] == "0.2.6"
+    assert FALLBACK_VERSION == project["project"]["version"] == "0.2.7"
     assert isinstance(bridge_version(), str) and bridge_version()
 
 

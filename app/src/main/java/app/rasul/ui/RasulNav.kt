@@ -86,6 +86,9 @@ import androidx.lifecycle.repeatOnLifecycle
 import app.rasul.bridge.bridgeTargetLoader
 import app.rasul.bridge.bridgeRunMemory
 import app.rasul.bridge.desktopApi
+import app.rasul.channels.ChannelsScreen
+import app.rasul.channels.ChannelsViewModel
+import app.rasul.bridge.channelsApi
 import app.rasul.desktop.HermesUpdateScreen
 import app.rasul.desktop.HermesUpdateViewModel
 import app.rasul.desktop.PcCheckScreen
@@ -129,6 +132,7 @@ private const val SKILLS_TOOLS = "skills-tools"
 private const val USAGE = "usage"
 private const val HERMES_UPDATE = "hermes-update"
 private const val PC_CHECK = "pc-check"
+private const val CHANNELS = "channels"
 private const val RUN_HISTORY = "job-runs/{id}?src={src}&name={name}&bridge={bridge}&profile={profile}"
 private const val EDIT = "edit?id={id}"
 private const val TRANSCRIPT = "transcript/{id}?src={src}&sessionSource={sessionSource}"
@@ -409,11 +413,16 @@ fun RasulNav(
                     pcInfo = pcInfo,
                     onHermesUpdate = { nav.navigate(HERMES_UPDATE) },
                     onCheckConnection = { nav.navigate(PC_CHECK) },
+                    onChannels = { nav.navigate(CHANNELS) },
                 )
             }
             composable(HERMES_UPDATE) {
                 val picker by container.activePc.state.collectAsState()
                 HermesUpdateDestination(picker, container, onBack = { nav.popBackStack() })
+            }
+            composable(CHANNELS) {
+                val picker by container.activePc.state.collectAsState()
+                ChannelsDestination(picker, container, onBack = { nav.popBackStack() })
             }
             composable(PC_CHECK) {
                 val picker by container.activePc.state.collectAsState()
@@ -710,6 +719,23 @@ private fun HermesUpdateDestination(picker: PcPicker, container: AppContainer, o
         HermesUpdateScreen(vm, target.name, onBack)
     } else {
         TargetLoadFallback(picker, container, R.string.hupd_title, onBack)
+    }
+}
+
+@Composable
+private fun ChannelsDestination(picker: PcPicker, container: AppContainer, onBack: () -> Unit) {
+    val target = picker.target as? ActiveTarget.Ready
+    if (target != null) {
+        val vm: ChannelsViewModel = viewModel(
+            key = "channels-" + target.target.hashCode(),
+            factory = viewModelFactory {
+                initializer { ChannelsViewModel(target.target.channelsApi()?.let { api -> { api } }) }
+            },
+        )
+        val context = LocalContext.current
+        ChannelsScreen(vm, target.name, onBack, onOpenLink = { link -> launchExternal(context, link) { vm.telegramLinkUnavailable() } })
+    } else {
+        TargetLoadFallback(picker, container, R.string.chan_title, onBack)
     }
 }
 

@@ -487,10 +487,12 @@ fun ConfirmDialog(
     actionPadding: Dp = 10.dp,
     confirmTextStyle: TextStyle? = null,
     decoration: @Composable () -> Unit = {},
+    /** Back or a tap outside; the cancel button keeps its own [onCancel]. */
+    onDismiss: () -> Unit = onCancel,
     content: (@Composable () -> Unit)? = null,
 ) {
     val c = Rasul.colors
-    Dialog(onDismissRequest = onCancel) {
+    Dialog(onDismissRequest = onDismiss) {
         decoration()
         app.rasul.WindowHapticFeedbackProvider {
             Column(

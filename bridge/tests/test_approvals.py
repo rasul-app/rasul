@@ -1159,3 +1159,152 @@ async def test_approvals_nonloopback_peer_is_rejected(tmp_path):
         await bridge.approvals.handle(None, writer)
         assert writer.closed and writer.data.startswith(b"HTTP/1.1 403")
         assert not bridge.approvals.entries and not bridge.approvals.tasks
+
+
+async def phone_path(bridge, tmp_path, identity, method, path, value=None):
+    async with client(bridge, tmp_path, identity) as (link, reader, _):
+        await send(link, method, path, value)
+        return await read_response(reader)
+
+
+@asynchronous
+async def test_approvals_all_profiles_list_is_ordered_and_per_profile_routes_unchanged(tmp_path):
+    async with running_profiles(tmp_path, ("sample",)) as (bridge, _):
+        identity, _ = registered(bridge)
+        now = time.time()
+        late = payload(profile="default", expires_at=now + 300)
+        early = payload(profile="sample", expires_at=now + 100)
+        tie_a, tie_b = "a" * 32, "b" * 32
+        same_b = payload(tie_b, profile="default", expires_at=now + 200)
+        same_a = payload(tie_a, profile="sample", expires_at=now + 200)
+        for value in (late, same_b, early, same_a):
+            assert (await local(bridge, "POST", value=value, profile=value["profile"]))[0] == 200
+        assert await phone_path(bridge, tmp_path, identity, "GET", "/v1/approvals") == (
+            200, {"approvals": [early, same_a, same_b, late]})
+        assert (await phone(bridge, tmp_path, identity, "GET"))[1] == {"approvals": [late, same_b]}
+        assert (await phone(bridge, tmp_path, identity, "GET", profile="sample"))[1] == {
+            "approvals": [early, same_a]}
+        answer = "/" + early["request_id"] + "/answer"
+        assert (await phone(bridge, tmp_path, identity, "POST", answer, {"choice": "once"},
+                            profile="sample"))[0] == 200
+        assert [i["request_id"] for i in (await phone_path(
+            bridge, tmp_path, identity, "GET", "/v1/approvals"))[1]["approvals"]] == [
+            same_a["request_id"], same_b["request_id"], late["request_id"]]
+
+
+@asynchronous
+async def test_approvals_all_profiles_list_skips_removed_profile(tmp_path):
+    async with running_profiles(tmp_path, ("sample",)) as (bridge, _):
+        identity, _ = registered(bridge)
+        gone, kept = payload(profile="sample"), payload()
+        await local(bridge, "POST", value=gone, profile="sample")
+        await local(bridge, "POST", value=kept)
+        real = bridge.profiles.directories
+        bridge.profiles.directories = lambda: {k: v for k, v in real().items() if k != "sample"}
+        assert (await phone_path(bridge, tmp_path, identity, "GET", "/v1/approvals"))[1] == {"approvals": [kept]}
+
+
+@asynchronous
+async def test_approvals_all_profiles_sse_snapshot_events_and_removed_profile(tmp_path):
+    async with running_profiles(tmp_path, ("sample",)) as (bridge, _):
+        identity, _ = registered(bridge)
+        first = payload(profile="sample")
+        await local(bridge, "POST", value=first, profile="sample")
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "GET", "/v1/approvals/events")
+            assert (await reader.until(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+            snapshot = await sse(reader)
+            assert snapshot.startswith(b"event: snapshot") and first["request_id"].encode() in snapshot
+            second = payload()
+            assert (await local(bridge, "POST", value=second))[0] == 200
+            third = payload(profile="sample")
+            assert (await local(bridge, "POST", value=third, profile="sample"))[0] == 200
+            for value in (second, third):
+                async with asyncio.timeout(2):
+                    event = await sse(reader)
+                assert b"event: new" in event and value["request_id"].encode() in event
+                assert json.dumps({"profile": value["profile"]})[1:-1].encode() in event
+                assert value["command"].encode() not in event
+            assert (await local(bridge, "POST", "/" + second["request_id"] + "/resolved", {}))[0] == 200
+            async with asyncio.timeout(2):
+                event = await sse(reader)
+            assert b"event: resolved" in event and second["request_id"].encode() in event
+            real = bridge.profiles.directories
+            bridge.profiles.directories = lambda: {k: v for k, v in real().items() if k != "sample"}
+            hidden = payload(profile="sample")
+            bridge.approvals.publish("sample", hidden)
+            last = payload()
+            assert (await local(bridge, "POST", value=last))[0] == 200
+            async with asyncio.timeout(2):
+                event = await sse(reader)
+            assert last["request_id"].encode() in event and hidden["request_id"].encode() not in event
+
+
+@asynchronous
+async def test_approvals_all_profiles_sse_history_overflow_sends_new_snapshot(tmp_path):
+    async with running_profiles(tmp_path, ("sample",)) as (bridge, _):
+        bridge.approvals.history = deque(maxlen=4)
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "GET", "/v1/approvals/events")
+            await reader.until(b"\r\n\r\n")
+            assert b"event: snapshot" in await sse(reader)
+            kept = [payload(profile=name) for name in ("default", "sample") * 4]
+            for value in kept:
+                bridge.approvals.publish(value["profile"], value)
+            seen = b""
+            async with asyncio.timeout(2):
+                while not seen.startswith(b"event: snapshot"):
+                    seen = await sse(reader)
+            assert all(value["request_id"].encode() in seen for value in kept)
+
+
+@pytest.mark.parametrize("method,path", [("POST", "/v1/approvals"), ("POST", "/v1/approvals/events"),
+                                         ("GET", "/v1/approvals/x"), ("GET", "/v1/approvals/"),
+                                         ("DELETE", "/v1/approvals"), ("GET", "/v1/approvals/events/x"),
+                                         ("POST", "/v1/approvals/" + "a" * 32 + "/answer")])
+@asynchronous
+async def test_approvals_all_profiles_other_routes_are_not_found(tmp_path, method, path):
+    async with running(tmp_path, approvals=True) as (bridge, _):
+        identity, _ = registered(bridge)
+        value = {"choice": "once"} if method == "POST" else None
+        assert await phone_path(bridge, tmp_path, identity, method, path, value) == (
+            404, {"error": "approvals_not_found"})
+
+
+@asynchronous
+async def test_approvals_all_profiles_disabled_is_plain_not_found(tmp_path):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        assert await phone_path(bridge, tmp_path, identity, "GET", "/v1/approvals") == (
+            404, {"error": "Route not found"})
+
+
+@pytest.mark.parametrize("method,path", [("GET", "/v1/approvals"), ("GET", "/v1/approvals/events"),
+                                         ("POST", "/v1/approvals")])
+@asynchronous
+async def test_approvals_all_profiles_use_device_rate_limit(tmp_path, method, path):
+    async with running(tmp_path, approvals=True) as (bridge, _):
+        identity, device = registered(bridge)
+        bridge.approvals.rates[device] = deque([time.time()] * 60)
+        assert (await phone_path(bridge, tmp_path, identity, method, path))[0] == 429
+        other, _ = registered(bridge)
+        assert (await phone_path(bridge, tmp_path, other, "GET", "/v1/approvals"))[0] == 200
+
+
+@asynchronous
+async def test_approvals_all_profiles_audit_route_names(tmp_path):
+    async with running(tmp_path, approvals=True) as (bridge, _):
+        identity, device = registered(bridge)
+        await phone_path(bridge, tmp_path, identity, "GET", "/v1/approvals")
+        await phone_path(bridge, tmp_path, identity, "POST", "/v1/approvals/events")
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "GET", "/v1/approvals/events")
+            await reader.until(b"\r\n\r\n")
+            await sse(reader)
+        await asyncio.sleep(0.2)
+        records = [json.loads(line) for line in bridge.audit.path.read_text().splitlines()]
+        routes = [(r["method"], r["route"], r["status"]) for r in records
+                  if r.get("route", "").startswith("/v1/approvals")]
+        assert ("GET", "/v1/approvals", 200) in routes
+        assert ("POST", "/v1/approvals/events", 404) in routes

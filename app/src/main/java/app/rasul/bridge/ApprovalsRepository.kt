@@ -41,14 +41,18 @@ private const val RATE_LIMIT_WAIT_MS = 15_000L
 
 /**
  * App-level mirror of every ready bridge bot's pending approvals (docs/bridge-approvals.md:40-107).
- * One SSE stream per (bridge, profile) while the app is resumed; the Bots follower supplies the
- * profile list, so direct connections never get a stream. [refresh] wakes a backing-off or stopped
- * follower immediately (the approvals screen's Retry uses it).
+ * While the app is resumed each bridge holds ONE SSE stream for all its bots ([bridgeApi]); items
+ * and events are split by profile into the per-bot feeds. A bridge that answers 404 on the
+ * bridge-wide routes is older: it falls back to one stream per (bridge, profile) and stays there
+ * until its client changes or the app restarts. The Bots follower supplies the profile list, so
+ * direct connections never get a stream. [refresh] wakes a backing-off or stopped follower
+ * immediately (the approvals screen's Retry uses it). A null [bridgeApi] means per-profile only.
  */
 class ApprovalsRepository(
     private val store: BridgeStore,
     private val clients: BridgeClients,
     private val bots: StateFlow<BridgeBotsState>,
+    private val bridgeApi: ((OkHttpClient) -> ApprovalsFeedApi)? = null,
     private val api: (OkHttpClient, String) -> ApprovalsApi = ::BridgeApprovalsApi,
 ) {
     /** Per-bot feed. [unsupported] means this bridge has no approvals route; the UI hides the feature. */
@@ -68,6 +72,9 @@ class ApprovalsRepository(
 
     /** The UI follower (RESUMED) and the alerts service share one follower; the second caller waits. */
     private val followMutex = Mutex()
+
+    /** Bridges whose client answered 404 on the bridge-wide routes (an older bridge), keyed to that client. */
+    private val perProfileBridges = java.util.concurrent.ConcurrentHashMap<String, BridgeTransport>()
 
     /** Serializes background GETs per bridge so one PC cannot spend the whole request budget. */
     private val pcSlots = mutableMapOf<String, Mutex>()
@@ -101,6 +108,7 @@ class ApprovalsRepository(
     private suspend fun followOnce(): Unit = try {
         coroutineScope {
             val jobs = mutableMapOf<String, Job>()
+            val profilesByBridge = mutableMapOf<String, MutableStateFlow<Set<String>>>()
             launch {
                 bots.map { s -> s.groups.associate { it.id to it.error } }
                     .distinctUntilChanged()
@@ -118,29 +126,207 @@ class ApprovalsRepository(
                     }
             }
             bots.map { botsState ->
-                val wanted = mutableSetOf<Pair<String, String>>()
+                val wanted = mutableMapOf<String, Set<String>>()
                 botsState.groups.forEach { group ->
                     // A failed profile listing keeps the last snapshot's followers and feeds; only a
                     // successful listing or losing the saved bridge removes them.
                     if (!group.loading || group.profiles.isNotEmpty()) {
-                        group.profiles.filter { it.ready }.forEach { wanted += group.id to it.id }
+                        val ready = group.profiles.filter { it.ready }.mapTo(mutableSetOf()) { it.id }
+                        if (ready.isNotEmpty()) wanted[group.id] = ready
                     }
                 }
-                wanted
+                wanted.toMap()
             }.distinctUntilChanged().collect { wanted ->
-                val keys = wanted.mapTo(mutableSetOf()) { (bridge, profile) -> bridgeBotId(bridge, profile) }
-                (jobs.keys - keys).forEach { jobs.remove(it)?.cancel() }
-                mutable.update { m -> m.filterKeys { it in keys } }
-                wanted.forEach { (bridge, profile) ->
-                    val key = bridgeBotId(bridge, profile)
-                    if (jobs[key]?.isActive != true) jobs[key] = launch { followOne(bridge, profile) }
+                val keys = wanted.flatMapTo(mutableSetOf()) { (bridge, profiles) -> profiles.map { bridgeBotId(bridge, it) } }
+                (jobs.keys - wanted.keys).forEach { jobs.remove(it)?.cancel(); profilesByBridge.remove(it); perProfileBridges.remove(it) }
+                // One follower per bridge: a flap or discovery error on one PC never restarts another PC's stream.
+                wanted.forEach { (bridge, profiles) ->
+                    val flow = profilesByBridge.getOrPut(bridge) { MutableStateFlow(profiles) }
+                    flow.value = profiles
+                    if (jobs[bridge]?.isActive != true) jobs[bridge] = launch { followBridge(bridge, flow) }
                 }
+                // After the wanted sets are published: a bridge-wide write checks them inside its own update.
+                mutable.update { m -> m.filterKeys { it in keys } }
             }
         }
     } catch (e: CancellationException) { throw e }
 
     private fun setFeed(key: String, update: Feed.() -> Feed) {
         mutable.update { m -> m + (key to (m[key] ?: Feed()).update()) }
+    }
+
+    /** The bridge has no such route (older version): retrying the same route cannot heal it. */
+    private fun ApprovalsError.noBridgeRoute() = this == ApprovalsError.Unsupported || this == ApprovalsError.NotFound
+
+    private fun bridgeTickSum(m: Map<String, Long>, bridgeId: String) =
+        m.filterKeys { it.startsWith("bridge:$bridgeId:") }.values.sum()
+
+    /**
+     * Updates the feeds of [targets] that are still in [wanted] at write time, in one atomic step: a
+     * bot removed while a request was in flight never gets its feed back.
+     */
+    private fun setBridgeFeeds(
+        bridgeId: String, wanted: StateFlow<Set<String>>, targets: Set<String> = wanted.value, update: Feed.(String) -> Feed,
+    ) {
+        mutable.update { m ->
+            m + wanted.value.intersect(targets).associate { profile ->
+                val key = bridgeBotId(bridgeId, profile)
+                key to (m[key] ?: Feed()).update(profile)
+            }
+        }
+    }
+
+    /** Splits one bridge-wide list into the per-bot feeds named in [targets]; other profiles are ignored. */
+    private fun applyBridgeItems(bridgeId: String, items: List<ApprovalItemDto>, wanted: StateFlow<Set<String>>, targets: Set<String>) {
+        val byProfile = items.groupBy { it.profile }
+        setBridgeFeeds(bridgeId, wanted, targets) { profile ->
+            copy(items = byProfile[profile].orEmpty(), loading = false, error = null, unsupported = false, discoveryError = null)
+        }
+    }
+
+    private suspend fun followBridge(bridgeId: String, profiles: StateFlow<Set<String>>) {
+        val ticks = refreshTicks.map { bridgeTickSum(it, bridgeId) }.distinctUntilChanged()
+        var attempt = 0
+        while (currentCoroutineContext().isActive) {
+            val seen = bridgeTickSum(refreshTicks.value, bridgeId)
+            val bridge = store.get(bridgeId) ?: return
+            val transport = try {
+                clients.client(bridge)
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                setBridgeFeeds(bridgeId, profiles) { copy(loading = false, error = approvalsTransportError(e)) }
+                attempt = (attempt + 1).coerceAtMost(4)
+                withTimeoutOrNull(reconnectBackoffMs(attempt)) { ticks.first { it != seen } }
+                continue
+            }
+            val feedApi = bridgeApi?.takeIf { perProfileBridges[bridgeId] !== transport }?.invoke(transport.client)
+            if (feedApi == null) {
+                followPerProfile(bridgeId, profiles)
+                return
+            }
+            var failure: ApprovalsError = ApprovalsError.Unreachable
+            try {
+                coroutineScope {
+                    // One serial writer per bridge, same rules as a per-bot feed: SSE snapshots apply
+                    // their own items, id-only events, the screen's Retry and resume mark a conflated
+                    // refetch (limited to the profiles named, or all), and a failed GET re-queues itself
+                    // after a backoff. A running GET is never cancelled.
+                    val triggers = Channel<BridgeTrigger>(Channel.UNLIMITED)
+                    val writer = launch {
+                        var failedGets = 0
+                        while (currentCoroutineContext().isActive) {
+                            val first = triggers.receive()
+                            var snapshot = first as? BridgeTrigger.ApplySnapshot
+                            var refetchAll = first is BridgeTrigger.Refetch && first.profiles == null
+                            val refetchSome = mutableSetOf<String>()
+                            (first as? BridgeTrigger.Refetch)?.profiles?.let { refetchSome += it }
+                            delay(EVENT_REFETCH_MS)
+                            while (true) {
+                                when (val next = triggers.tryReceive().getOrNull()) {
+                                    null -> break
+                                    is BridgeTrigger.ApplySnapshot -> snapshot = next
+                                    is BridgeTrigger.Refetch ->
+                                        if (next.profiles == null) refetchAll = true else refetchSome += next.profiles
+                                }
+                            }
+                            snapshot?.let { applyBridgeItems(bridgeId, it.items, profiles, profiles.value) }
+                            // Profiles that are not bots (any more) cost no request.
+                            val only = if (refetchAll) null else refetchSome.intersect(profiles.value)
+                            if (only == null || only.isNotEmpty()) {
+                                val getError = pcSlot(bridgeId).withLock {
+                                    val result = refreshBridge(feedApi, bridgeId, profiles, only)
+                                    delay(PC_GET_GAP_MS)
+                                    result
+                                }
+                                if (getError == null) {
+                                    failedGets = 0
+                                } else {
+                                    if (getError.noBridgeRoute()) throw ApprovalsException(getError)
+                                    failedGets++
+                                    val wait = if (getError == ApprovalsError.RateLimited)
+                                        RATE_LIMIT_WAIT_MS else reconnectBackoffMs(failedGets.coerceAtMost(4))
+                                    launch { delay(wait); triggers.trySend(BridgeTrigger.Refetch(only)) }
+                                }
+                                delay(FEED_GET_GAP_MS)
+                            }
+                        }
+                    }
+                    // The screen's Retry always runs a fresh GET, even while the stream is connected.
+                    val refresher = launch { ticks.collect { if (it != seen) triggers.trySend(BridgeTrigger.Refetch(null)) } }
+                    // Bots added while the stream is up get a feed now and a GET of their own.
+                    val watcher = launch {
+                        var known: Set<String>? = null
+                        profiles.collect { now ->
+                            setBridgeFeeds(bridgeId, profiles, now) { this }
+                            val added = now - (known ?: now)
+                            if (added.isNotEmpty()) triggers.trySend(BridgeTrigger.Refetch(added))
+                            known = now
+                        }
+                    }
+                    try {
+                        feedApi.events().collect { event ->
+                            attempt = 0
+                            triggers.trySend(
+                                when (event) {
+                                    is ApprovalsEvent.Snapshot -> BridgeTrigger.ApplySnapshot(event.items)
+                                    is ApprovalsEvent.New -> BridgeTrigger.Refetch(event.profile?.let { setOf(it) })
+                                    is ApprovalsEvent.Resolved -> BridgeTrigger.Refetch(event.profile?.let { setOf(it) })
+                                }
+                            )
+                        }
+                    } finally {
+                        writer.cancel()
+                        refresher.cancel()
+                        watcher.cancel()
+                    }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: ApprovalsException) { failure = e.error }
+            catch (e: Exception) { failure = approvalsTransportError(e) }
+            if (failure.noBridgeRoute()) {
+                // An older bridge: remember it for this client so the next pass goes straight to per-profile streams.
+                perProfileBridges[bridgeId] = transport
+                continue
+            }
+            setBridgeFeeds(bridgeId, profiles) { copy(loading = false, error = failure.feedError()) }
+            attempt = (attempt + 1).coerceAtMost(4)
+            when (failure) {
+                ApprovalsError.DeviceRevoked, ApprovalsError.DeviceKeyRepair, ApprovalsError.Unauthorized ->
+                    ticks.first { it != seen }
+                else -> withTimeoutOrNull(reconnectBackoffMs(attempt)) { ticks.first { it != seen } }
+            }
+        }
+    }
+
+    /** One bridge-wide GET; only the [only] profiles (all when null) of [wanted] are updated. */
+    private suspend fun refreshBridge(
+        api: ApprovalsFeedApi, bridgeId: String, wanted: StateFlow<Set<String>>, only: Set<String>?,
+    ): ApprovalsError? {
+        val targets = only ?: wanted.value
+        try {
+            applyBridgeItems(bridgeId, api.list(), wanted, targets)
+            return null
+        } catch (e: CancellationException) { throw e }
+        catch (e: ApprovalsException) {
+            if (!e.error.noBridgeRoute()) setBridgeFeeds(bridgeId, wanted, targets) { copy(loading = false, error = e.error.feedError()) }
+            return e.error
+        }
+        catch (e: Exception) {
+            val error = approvalsTransportError(e)
+            setBridgeFeeds(bridgeId, wanted, targets) { copy(loading = false, error = error) }
+            return error
+        }
+    }
+
+    /** Older bridge: one follower per bot, diffed against the bot set as it changes. */
+    private suspend fun followPerProfile(bridgeId: String, profiles: StateFlow<Set<String>>): Unit = coroutineScope {
+        val jobs = mutableMapOf<String, Job>()
+        profiles.collect { wanted ->
+            (jobs.keys - wanted).forEach { jobs.remove(it)?.cancel() }
+            wanted.forEach { profile ->
+                if (jobs[profile]?.isActive != true) jobs[profile] = launch { followOne(bridgeId, profile) }
+            }
+        }
     }
 
     private suspend fun followOne(bridgeId: String, profileId: String) {
@@ -259,6 +445,14 @@ class ApprovalsRepository(
     /** Feed-level errors describe the bot, not one request: a list/stream 404 means it is gone. */
     private fun ApprovalsError.feedError(): ApprovalsError =
         if (this == ApprovalsError.NotFound) ApprovalsError.BotUnavailable else this
+
+    /** Triggers accepted by a bridge's serial writer. */
+    private sealed interface BridgeTrigger {
+        data class ApplySnapshot(val items: List<ApprovalItemDto>) : BridgeTrigger
+
+        /** A list GET for [profiles], or for every bot of the bridge when null. */
+        data class Refetch(val profiles: Set<String>?) : BridgeTrigger
+    }
 
     /** Triggers accepted by a feed's serial writer. */
     private sealed interface FeedTrigger {

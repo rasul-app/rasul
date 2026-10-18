@@ -19,7 +19,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from .audit import Audit
-from .approvals import Approvals, PHONE_ROUTE
+from .approvals import ALL_ROUTE, Approvals, PHONE_ROUTE
 from .desktop import Desktop, RULES as DESKTOP_RULES
 from .http import HTTPError, Reader, chunk, request, response, stream_start
 from .limits import Limits
@@ -342,6 +342,10 @@ class Bridge:
                     raise HTTPError(403, "Pairing denied") from None
                 status = 200
                 await response(link, status, value)
+            elif self.approvals is not None and ALL_ROUTE.fullmatch(target):
+                route = "/v1/approvals/events" if target == "/v1/approvals/events" else "/v1/approvals"
+                await self.approvals.phone_all(link, device, method, target)
+                status = 200
             elif self.approvals is not None and PHONE_ROUTE.fullmatch(target):
                 match = PHONE_ROUTE.fullmatch(target)
                 route, profile = "/v1/profiles/{id}/approvals", match[1]

@@ -11,6 +11,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -111,21 +112,26 @@ internal fun HermesError.approvalsError(): ApprovalsError = when (this) {
 
 internal fun approvalsTransportError(error: Exception): ApprovalsError = bridgeError(error).approvalsError()
 
-interface ApprovalsApi {
+/** The read side: a list plus an event stream, for one profile or for every profile of a bridge. */
+interface ApprovalsFeedApi {
     suspend fun list(): List<ApprovalItemDto>
 
     /** SSE frames: one `snapshot` on connect, then `new`/`resolved` ids. Ends when the link drops. */
     fun events(): Flow<ApprovalsEvent>
+}
+
+interface ApprovalsApi : ApprovalsFeedApi {
     suspend fun answer(requestId: String, choice: String): ApprovalAnsweredDto
 }
 
 sealed interface ApprovalsEvent {
     /** The complete pending list; replaces local state. */
     data class Snapshot(val items: List<ApprovalItemDto>) : ApprovalsEvent
-    data class New(val requestId: String) : ApprovalsEvent
+    /** [profile] is set only on the bridge-wide stream, where one stream carries every profile. */
+    data class New(val requestId: String, val profile: String? = null) : ApprovalsEvent
 
     /** Covers answers on the PC, withdrawal and expiry (docs/bridge-approvals.md:102). */
-    data class Resolved(val requestId: String) : ApprovalsEvent
+    data class Resolved(val requestId: String, val profile: String? = null) : ApprovalsEvent
 }
 
 internal val approvalsJson = Json { ignoreUnknownKeys = true }
@@ -139,10 +145,15 @@ internal fun decodeApprovalList(text: String): List<ApprovalItemDto> = try {
     }
 } catch (_: Exception) { throw ApprovalsException(ApprovalsError.InvalidResponse) }
 
-class BridgeApprovalsApi(private val client: OkHttpClient, private val profileId: String) : ApprovalsApi {
-    init { require(APPROVAL_PROFILE_ID.matches(profileId)) }
-    private val base = BridgeTransport.origin.newBuilder()
-        .addPathSegments("v1/profiles").addPathSegment(profileId).addPathSegment("approvals").build()
+/**
+ * List and event stream over [base]. With a [profileId] they are that profile's routes; with null
+ * they are the bridge-wide routes (every profile, each item and event names its profile).
+ */
+open class BridgeApprovalsFeed internal constructor(
+    private val client: OkHttpClient,
+    protected val base: HttpUrl,
+    private val profileId: String?,
+) : ApprovalsFeedApi {
 
     override suspend fun list(): List<ApprovalItemDto> {
         val request = Request.Builder().url(base).header("Accept", "application/json").build()
@@ -151,28 +162,6 @@ class BridgeApprovalsApi(private val client: OkHttpClient, private val profileId
                 val text = response.body?.string().orEmpty()
                 if (response.code != 200) throw ApprovalsException(approvalsError(response.code, text))
                 decodeApprovalList(text)
-            }
-        } catch (e: CancellationException) { throw e }
-        catch (e: IOException) { throw ApprovalsException(approvalsTransportError(e)) }
-    }
-
-    override suspend fun answer(requestId: String, choice: String): ApprovalAnsweredDto {
-        require(APPROVAL_REQUEST_ID.matches(requestId))
-        require(choice in APPROVAL_CHOICES)
-        val url = base.newBuilder().addPathSegment(requestId).addPathSegment("answer").build()
-        val request = Request.Builder().url(url).header("Accept", "application/json")
-            .post(approvalsJson.encodeToString(ApprovalAnswerBodyDto(choice))
-                .toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-        return try {
-            client.bridgeResponse(request) { response ->
-                val text = response.body?.string().orEmpty()
-                if (response.code != 200) throw ApprovalsException(approvalsError(response.code, text))
-                try {
-                    approvalsJson.decodeFromString<ApprovalAnsweredDto>(text).also {
-                        require(it.requestId == requestId && it.state == "answered")
-                    }
-                } catch (_: Exception) { throw ApprovalsException(ApprovalsError.InvalidResponse) }
             }
         } catch (e: CancellationException) { throw e }
         catch (e: IOException) { throw ApprovalsException(approvalsTransportError(e)) }
@@ -198,14 +187,51 @@ class BridgeApprovalsApi(private val client: OkHttpClient, private val profileId
     private suspend fun ProducerScope<ApprovalsEvent>.readFrame(frame: app.rasul.data.SseFrame) {
         when (frame.event) {
             "snapshot" -> send(ApprovalsEvent.Snapshot(decodeApprovalList(frame.data)))
-            "new" -> send(ApprovalsEvent.New(decodeRef(frame.data)))
-            "resolved" -> send(ApprovalsEvent.Resolved(decodeRef(frame.data)))
+            "new" -> decodeRef(frame.data).let { send(ApprovalsEvent.New(it.requestId, it.profile.takeIf { profileId == null })) }
+            "resolved" -> decodeRef(frame.data).let { send(ApprovalsEvent.Resolved(it.requestId, it.profile.takeIf { profileId == null })) }
         }
     }
 
-    private fun decodeRef(text: String): String = try {
+    private fun decodeRef(text: String): ApprovalRefDto = try {
         approvalsJson.decodeFromString<ApprovalRefDto>(text).also {
-            require(APPROVAL_REQUEST_ID.matches(it.requestId) && it.profile == profileId)
-        }.requestId
+            require(APPROVAL_REQUEST_ID.matches(it.requestId) && APPROVAL_PROFILE_ID.matches(it.profile))
+            require(profileId == null || it.profile == profileId)
+        }
     } catch (_: Exception) { throw ApprovalsException(ApprovalsError.InvalidResponse) }
 }
+
+private fun profileApprovalsBase(profileId: String): HttpUrl {
+    require(APPROVAL_PROFILE_ID.matches(profileId))
+    return BridgeTransport.origin.newBuilder()
+        .addPathSegments("v1/profiles").addPathSegment(profileId).addPathSegment("approvals").build()
+}
+
+class BridgeApprovalsApi(private val client: OkHttpClient, private val profileId: String) :
+    BridgeApprovalsFeed(client, profileApprovalsBase(profileId), profileId), ApprovalsApi {
+
+    override suspend fun answer(requestId: String, choice: String): ApprovalAnsweredDto {
+        require(APPROVAL_REQUEST_ID.matches(requestId))
+        require(choice in APPROVAL_CHOICES)
+        val url = base.newBuilder().addPathSegment(requestId).addPathSegment("answer").build()
+        val request = Request.Builder().url(url).header("Accept", "application/json")
+            .post(approvalsJson.encodeToString(ApprovalAnswerBodyDto(choice))
+                .toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        return try {
+            client.bridgeResponse(request) { response ->
+                val text = response.body?.string().orEmpty()
+                if (response.code != 200) throw ApprovalsException(approvalsError(response.code, text))
+                try {
+                    approvalsJson.decodeFromString<ApprovalAnsweredDto>(text).also {
+                        require(it.requestId == requestId && it.state == "answered")
+                    }
+                } catch (_: Exception) { throw ApprovalsException(ApprovalsError.InvalidResponse) }
+            }
+        } catch (e: CancellationException) { throw e }
+        catch (e: IOException) { throw ApprovalsException(approvalsTransportError(e)) }
+    }
+}
+
+/** `GET /v1/approvals` and `GET /v1/approvals/events`: one connection for every profile of a bridge. */
+class BridgeWideApprovalsApi(client: OkHttpClient) :
+    BridgeApprovalsFeed(client, BridgeTransport.origin.newBuilder().addPathSegments("v1/approvals").build(), null)

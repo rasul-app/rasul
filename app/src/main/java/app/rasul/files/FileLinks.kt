@@ -72,7 +72,7 @@ object FileLinks {
     private val docs = setOf("doc", "docx", "odt", "rtf", "ppt", "pptx", "odp")
     private val sheets = setOf("xls", "xlsx", "ods", "csv", "tsv")
     private val texts = setOf("txt", "md", "log", "json", "yaml", "yml", "ini", "toml", "py", "kt", "java", "c", "cpp", "h", "sh", "sql", "html", "htm", "xml", "js", "css")
-    private val images = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic")
+    private val images = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "heif")
     private val audio = setOf("mp3", "wav", "ogg", "m4a", "aac", "flac", "opus")
     private val video = setOf("mp4", "mkv", "mov", "webm", "avi", "m4v", "3gp")
 

@@ -20,6 +20,7 @@ REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
 PHONE_ROUTE = re.compile(
     r"/v1/profiles/([a-z0-9][a-z0-9_-]{0,63})/approvals"
     r"(?:/(events)|/([0-9a-f]{32})/(answer))?\Z")
+ALL_ROUTE = re.compile(r"/v1/approvals(?:/[^?]*)?\Z")
 INTERNAL_ROUTE = re.compile(
     r"/internal/profiles/([a-z0-9][a-z0-9_-]{0,63})/approvals"
     r"(?:/(answers|hello)|/([0-9a-f]{32})/(resolved))?\Z")
@@ -146,10 +147,15 @@ class Approvals:
             raise HTTPError(410, "approvals_expired")
         return entry
 
-    def pending(self, profile):
+    def pending(self, profile=None):
+        """One profile in arrival order, or (None) every live profile by expiry."""
         self.sweep()
-        return {"approvals": [dict(e["payload"]) for e in self.entries.values()
-                              if e["profile"] == profile and e["state"] == "pending"]}
+        live = self.profiles.directories()
+        items = [dict(e["payload"]) for e in self.entries.values()
+                 if e["state"] == "pending" and (e["profile"] == profile if profile else e["profile"] in live)]
+        if profile is None:
+            items.sort(key=lambda item: (item["expires_at"], item["request_id"]))
+        return {"approvals": items}
 
     def rate(self, device):
         now = self.clock()
@@ -180,6 +186,15 @@ class Approvals:
         finally:
             self.audit("approval", device, match[1], match[3], choice, status)
 
+    async def phone_all(self, link, device, method, target):
+        self.rate(device)
+        if method != "GET" or target not in ("/v1/approvals", "/v1/approvals/events"):
+            raise HTTPError(404, "approvals_not_found")
+        if target.endswith("/events"):
+            await self.events(link)
+        else:
+            await response(link, 200, self.pending())
+
     async def phone_request(self, link, device, method, match, body):
         profile, events, request_id, answer = match.groups()
         if profile not in self.profiles.directories():
@@ -208,7 +223,7 @@ class Approvals:
         entry.update(state="answered", choice=choice)
         return {"request_id": request_id, "state": "answered"}
 
-    async def events(self, link, profile):
+    async def events(self, link, profile=None):
         await stream_start(link)
         previous, heartbeat = None, time.monotonic()
         while True:
@@ -220,7 +235,7 @@ class Approvals:
                 continue
             batch = [h for h in self.history if h[0] > previous]
             for revision, event, value in batch:
-                if value["profile"] == profile:
+                if (value["profile"] == profile if profile else value["profile"] in self.profiles.directories()):
                     await chunk(link, f"id: {revision}\nevent: {event}\ndata: ".encode()
                                 + json.dumps(value).encode() + b"\n\n")
                 previous = revision

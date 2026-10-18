@@ -155,3 +155,42 @@ made by the bridge itself that is `installable`: no credentials or OAuth require
 build step, not already installed. Free-form commands or URLs are never accepted. Command,
 arguments, environment, headers, URLs and credentials never appear in any response. A test is
 bounded by the 10-second upstream deadline.
+
+## Messaging channels (0.2.7)
+
+| Method and suffix | Request | Response | Per minute |
+| --- | --- | --- | --- |
+| GET `/channels` | none | `{channels:[{id,name,description,enabled,configured,gateway_running,state,error_code,error_message,home_channel_set,fields:[{key,required,is_set,is_list,prompt}]}]}` | 12 |
+| PUT `/channels/{id}/enabled` | `{enabled}` | the channel row above plus `needs_restart` (true when `state` is `pending_restart`), read again after the change | 6 |
+| POST `/channels/{id}/test` | none | `{ok, state, message, auth_posture?}` | 3 |
+| POST `/channels/restart` | `{force}` | `{ok:true}` | 2 |
+| POST `/channels/telegram/setup` | optional `{bot_name}`, at most 64 characters | `{pairing_id, deep_link, suggested_username, expires_at}` | 3 |
+| GET `/channels/telegram/setup/{pairing_id}` | none | `{status:"waiting"\|"ready", bot_username?, owner_user_id?, expires_at?}` | 30 |
+| POST `/channels/telegram/setup/{pairing_id}/apply` | `{allowed_user_ids, force}` | `{ok, bot_username, restart_started, needs_restart}` | 3 |
+| DELETE `/channels/telegram/setup/{pairing_id}` | none | `{ok:true}` | 6 |
+
+`{id}` matches `[a-z0-9_]{1,32}` and `{pairing_id}` matches `[A-Za-z0-9_-]{8,128}`; anything else is
+404 before any backend call. Bodies are strict: unknown keys, wrong types or a missing key are 400
+`desktop_invalid`. `allowed_user_ids` is 1 to 20 strings of decimal digits (at most 20 digits each);
+repeats are dropped. Switching a channel on or off sends only `enabled` and the profile, never
+any setting or secret.
+
+Responses are rebuilt from checked fields. Channel rows are dropped when their id, flags or name are
+malformed. Tokens, allow-list values, redacted previews, local paths, documentation and callback
+addresses, help text and the setup poll token never appear; `fields` only says which settings exist
+and whether each one is set. The setup start call returns only the four listed values, and the
+status call never returns the bot token, which stays on the computer and is saved there by the
+apply call. `deep_link` is returned only when it is an `https` link to `t.me` or `telegram.me`
+with no user information, port or fragment, a path of 1 to 64 letters, digits, underscores or
+slashes, and a query of at most 256 letters, digits, `_`, `=`, `&` or `-`; otherwise 502
+`channel_setup_bad_link`.
+
+A restart and an apply refuse while agents are working: 409 `{error:"gateway_busy", active_agents}`
+where `active_agents` is the count, or null when it cannot be read (unknown counts as busy). Sending
+`force: true` skips that check. Both write an audit line with only the action and the force flag.
+
+Errors: 409 `channel_conflict` (Hermes refused to enable the channel, with a cleaned `message`),
+404 `channel_not_found`, 409 `gateway_busy`, 502 `channel_setup_bad_link`, 410
+`channel_setup_expired` (start a new setup), 404 `channel_setup_not_found`, 409
+`channel_setup_not_ready` (the phone has not finished in Telegram yet; with a cleaned `message`), 400
+`desktop_invalid`, 429 `desktop_rate_limited`, 502 `desktop_error`.

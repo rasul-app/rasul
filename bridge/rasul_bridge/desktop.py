@@ -18,6 +18,7 @@ import sys
 import time
 from urllib.parse import urlencode, urlsplit
 
+from .channels import CHANNEL, PAIRING, USER_ID, Refused, handle as channel_handle
 from .http import HTTPError, Reader, headers
 from .proxy import Upstream, response_body
 from .updater import Updater, clean
@@ -28,7 +29,9 @@ TABLE_CAP = 16 * 1024 * 1024
 OWNERSHIP_WAIT = 2
 SERVER = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 BODIES = {"toggle": {"name", "enabled"}, "install": {"identifier"}, "update_post": {"mode"},
-          "mcp_enabled": {"enabled"}, "mcp_install": {"id"}}
+          "mcp_enabled": {"enabled"}, "mcp_install": {"id"}, "chan_enabled": {"enabled"},
+          "chan_restart": {"force"}, "chan_apply": {"allowed_user_ids", "force"}}
+OPTIONAL = {"chan_setup": {"bot_name"}}
 RULES = [
     ("GET", r"/jobs/([A-Za-z0-9_-]{1,200})/runs", "runs", 10),
     ("GET", r"/skills", "skills", 30),
@@ -44,6 +47,14 @@ RULES = [
     ("POST", r"/hermes/update", "update_post", 6),
     ("DELETE", r"/hermes/update", "update_delete", 6),
     ("GET", r"/usage", "usage", 6),
+    ("GET", r"/channels", "chan_list", 12),
+    ("PUT", rf"/channels/({CHANNEL})/enabled", "chan_enabled", 6),
+    ("POST", rf"/channels/({CHANNEL})/test", "chan_test", 3),
+    ("POST", r"/channels/restart", "chan_restart", 2),
+    ("POST", r"/channels/telegram/setup", "chan_setup", 3),
+    ("GET", rf"/channels/telegram/setup/({PAIRING})", "chan_status", 30),
+    ("POST", rf"/channels/telegram/setup/({PAIRING})/apply", "chan_apply", 3),
+    ("DELETE", rf"/channels/telegram/setup/({PAIRING})", "chan_cancel", 6),
 ]
 USAGE = {"input_tokens": "total_input", "output_tokens": "total_output",
          "cache_read_tokens": "total_cache_read", "reasoning_tokens": "total_reasoning",
@@ -346,19 +357,25 @@ class LocalDesktop(Upstream):
             with suppress(OSError):
                 await writer.wait_closed()
 
-    async def collect_json(self, method, path, token, body=None):
+    async def collect_json(self, method, path, token, body=None, soft=()):
         self.verify()
         data = json.dumps(body).encode() if body is not None else b""
         status, head, reader, writer = await self.open(
             method, path, token, {"content-type": "application/json"}, data)
         try:
-            if not 200 <= status < 300:
+            if not 200 <= status < 300 and status not in soft:
                 raise HTTPError(502, "desktop_error")
             result = bytearray()
             async for part in response_body(reader, head):
                 result.extend(part)
                 if len(result) > CAP:
                     raise ValueError
+            if status in soft:
+                try:
+                    refusal = decode(result)
+                except ValueError:
+                    refusal = None
+                raise Refused(status, refusal)
             return decode(result)
         finally:
             writer.close()
@@ -452,11 +469,12 @@ class Desktop:
             query[query_key] = number
         value = None
         try:
-            if name in BODIES:
+            if name in BODIES or name in OPTIONAL:
                 if len(body) > 1024:
                     raise ValueError
-                value = decode(body)
-                if not isinstance(value, dict) or set(value) != BODIES[name]:
+                value = decode(body) if body or name in BODIES else {}
+                if not isinstance(value, dict) or (set(value) != BODIES[name] if name in BODIES
+                                                   else not set(value) <= OPTIONAL[name]):
                     raise ValueError
                 for key, item in value.items():
                     if key == "enabled":
@@ -465,6 +483,13 @@ class Desktop:
                         valid = type(item) is str and item in ("when_idle", "now")
                     elif key == "id":
                         valid = type(item) is str and re.fullmatch(SERVER, item) is not None
+                    elif key == "force":
+                        valid = type(item) is bool
+                    elif key == "bot_name":
+                        valid = type(item) is str and len(item) <= 64 and not re.search(r"[\x00-\x1f\x7f]", item)
+                    elif key == "allowed_user_ids":
+                        valid = (type(item) is list and 1 <= len(item) <= 20
+                                 and all(type(i) is str and re.fullmatch(USER_ID, i) for i in item))
                     else:
                         valid = type(item) is str and 0 < len(item) <= 200
                     if not valid:
@@ -486,14 +511,17 @@ class Desktop:
             async with asyncio.timeout(TIMEOUT):
                 upstream, token = await self.discover(profile)
                 discovered = True
-                async def request(verb, path, data=None, **parameters):
-                    return await upstream.collect_json(verb, path + "?" + urlencode({"profile": profile, **parameters}), token, data)
+                async def request(verb, path, data=None, soft=(), **parameters):
+                    return await upstream.collect_json(verb, path + "?" + urlencode({"profile": profile, **parameters}), token, data, soft)
                 result = await self.execute(device, profile, name, match, query, value, request, token)
+                code = 202 if name == "install" else 200
+                if name.startswith("chan_"):
+                    code, result = result
                 encoded = json.dumps(result, separators=(",", ":"), allow_nan=False).encode()
                 if (len(encoded) > CAP or contains_credential(result, token)
                         or token in encoded.decode() or json.dumps(token)[1:-1] in encoded.decode()):
                     raise ValueError
-                return (202 if name == "install" else 200), result
+                return code, result
         except HTTPError as error:
             if error.message in ("desktop_unavailable", "desktop_invalid"):
                 raise
@@ -551,6 +579,8 @@ class Desktop:
         return result
 
     async def execute(self, device, profile, name, match, query, value, request, token):
+        if name.startswith("chan_"):
+            return await channel_handle(self, profile, name, match, value, request)
         if name in ("skills", "toggle"):
             skills = rows(await request("GET", "/api/skills"))
             if name == "toggle":

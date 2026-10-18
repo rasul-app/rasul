@@ -78,8 +78,10 @@ security and device authentication.
    the computer. The invitation expires after 120 seconds, allows one ceremony,
    and contains no upstream credential. Decline or timeout consumes it. The
    temporary image is deleted when the ceremony finishes or times out.
-   Each anonymous connection lasts at most 15 seconds from TCP accept, including
-   the owner decision, and closes after one request. Reconnect with the enrolled
+   An anonymous connection must finish TLS within ten seconds of TCP accept and
+   send its one request within five seconds after that; the connection holding
+   the pairing slot then waits up to 120 seconds for the owner decision. It
+   closes after one request. Reconnect with the enrolled
    certificate after successful pairing.
 
 7. Use `rasul-bridge status` for local identity/profile information and
@@ -144,6 +146,10 @@ flags only: no addresses, keys or paths. Each probe has a short timeout, so the
 route answers within three seconds even when the upstream is down. It is limited
 to 30 requests per minute per device.
 
+With approvals enabled, `GET /v1/approvals` and `GET /v1/approvals/events` list and stream pending approvals of all profiles over one connection per device (older bridges answer 404; see `docs/bridge-approvals.md`).
+
+Messaging channels: list, switch on/off, test; Telegram setup from the phone. The bot token stays on the computer.
+
 Tunnel setup, routing, computer sleep, and network policy affect availability.
 No tunnel account or credential belongs in this repository.
 
@@ -169,12 +175,13 @@ unrevoked device. TLS is restricted to 1.3 with no tickets, resumption, or early
 
 The bridge admits at most 128 authenticated links and 64 per device. A refused link
 leaves one audit line per device per minute. Separate pools
-allow four anonymous links and eight pending upgrades or TLS handshakes. A full
-pending pool drops its oldest socket so incomplete upgrades cannot hold all
+allow 32 anonymous links and 256 pending upgrades or TLS handshakes. A full
+pending pool drops a random socket so incomplete upgrades cannot hold all
 admission slots. Pending sockets have a ten-second deadline from TCP accept;
-anonymous sockets have an absolute 15-second lifetime and allow one pairing
-request only. Pairing attempts are limited to five per minute globally and
-request bodies to 1 MiB. Requests have strict HTTP framing. The proxy
+anonymous sockets have an absolute five-second lifetime from TLS completion (the one
+socket that holds the pairing slot is kept for the owner decision instead, at most
+120 seconds) and allow one pairing request only. Pairing attempts are limited to
+five per minute globally, anonymous request bodies to 16 KiB and all others to 1 MiB. Requests have strict HTTP framing. The proxy
 allowlist covers health, capabilities, skills, toolsets, models, model options,
 runs and their events/actions, session listing/reading/title updates/deletion/messages,
 and job listing/creation/reading/updates/deletion/actions. It drops phone Authorization and

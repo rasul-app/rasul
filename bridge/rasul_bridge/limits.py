@@ -4,8 +4,8 @@ from collections import deque
 import time
 
 MAX_BODY = 1024 * 1024
-# One long-lived approvals stream per profile, plus profile/run streams and
-# short requests, must fit per device.
+# One approvals stream per device, plus profile/run streams and short
+# requests, must fit per device.
 MAX_CONNECTIONS = 128
 MAX_DEVICE_CONNECTIONS = 64
 

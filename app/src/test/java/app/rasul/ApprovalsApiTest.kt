@@ -131,4 +131,32 @@ class ApprovalsApiTest {
             assertEquals(ApprovalsError.Unsupported, (streamFailure as ApprovalsException).error)
         } finally { http.connectionPool.evictAll(); http.dispatcher.executorService.shutdownNow() }
     }
+
+    @Test fun bridgeWideRoutesCarryEveryProfileAndNameThemInEvents() = runBlocking {
+        val second = "b".repeat(32)
+        val seen = mutableListOf<String>()
+        val body = "event: snapshot\ndata: $listBody\n\nevent: new\ndata: {\"profile\":\"other\",\"request_id\":\"$second\"}\n\nevent: resolved\ndata: {\"profile\":\"sample\",\"request_id\":\"$id\"}\n\n"
+        val http = client { request ->
+            seen += request.url.encodedPath
+            if (request.url.encodedPath.endsWith("events")) response(request, 200, body) else response(request, 200, listBody)
+        }
+        try {
+            val api = BridgeWideApprovalsApi(http)
+            assertEquals("sample", api.list().single().profile)
+            val events = withTimeout(5000) { api.events().take(3).toList() }
+            assertEquals(listOf("/v1/approvals", "/v1/approvals/events"), seen)
+            assertEquals(ApprovalsEvent.New(second, "other"), events[1])
+            assertEquals(ApprovalsEvent.Resolved(id, "sample"), events[2])
+        } finally { http.connectionPool.evictAll(); http.dispatcher.executorService.shutdownNow() }
+    }
+
+    @Test fun anOlderBridgeAnswers404OnTheBridgeWideRoutes() = runBlocking {
+        val http = client { request -> response(request, 404, """{"error":"Route not found"}""") }
+        try {
+            val api = BridgeWideApprovalsApi(http)
+            assertEquals(ApprovalsError.Unsupported, (runCatching { api.list() }.exceptionOrNull() as ApprovalsException).error)
+            val stream = runCatching { withTimeout(5000) { api.events().toList() } }.exceptionOrNull()
+            assertEquals(ApprovalsError.Unsupported, (stream as ApprovalsException).error)
+        } finally { http.connectionPool.evictAll(); http.dispatcher.executorService.shutdownNow() }
+    }
 }

@@ -6,7 +6,7 @@ import json
 
 from .http import HTTPError
 
-FALLBACK_VERSION = "0.2.6"
+FALLBACK_VERSION = "0.2.7"
 PROBE_TIMEOUT = 1.5
 TOTAL_TIMEOUT = 2.5
 

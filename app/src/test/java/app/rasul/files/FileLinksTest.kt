@@ -62,6 +62,12 @@ class FileLinksTest {
         assertEquals(null, bare.sizeText)
     }
 
+    @Test fun heifIsAnImageLikeHeic() {
+        assertEquals(FileKind.Image, FileLinks.kindOf("a.HEIF"))
+        assertEquals(FileKind.Image, FileLinks.kindOf("a.heic"))
+        assertEquals("image/heif", FileLinks.mimeFor(null, "a.heif"))
+    }
+
     @Test fun notAvailableNotesAreUnavailablePartsAndFileStaysText() {
         assertEquals(listOf<MessagePart>(MessagePart.Unavailable("x.pdf")), FileLinks.split("[file not available: x.pdf]"))
         assertEquals(listOf<MessagePart>(MessagePart.Unavailable(null)), FileLinks.split("[file not available]"))
