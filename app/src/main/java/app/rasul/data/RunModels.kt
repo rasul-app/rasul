@@ -96,7 +96,8 @@ data class RunTokenUsage(
     }
 }
 
-data class RunModelSelection(val provider: String, val model: String)
+/** [effort] is a server reasoning rung ("low"/"medium"/"high"); null = the server decides. */
+data class RunModelSelection(val provider: String, val model: String, val effort: String? = null)
 
 @kotlinx.serialization.Serializable
 data class TokenUsageSummary(

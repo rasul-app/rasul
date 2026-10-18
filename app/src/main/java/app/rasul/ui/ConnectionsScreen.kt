@@ -62,6 +62,8 @@ fun ConnectionsScreen(
     bridges: BridgeBotsState = BridgeBotsState(), onBridgeOpen: (String, String) -> Unit = { _, _ -> },
     onBridgeCreate: (String) -> Unit = {},
     onSearch: () -> Unit = {}, onNewChat: () -> Unit = {}, onNewBot: () -> Unit = {},
+    pendingApprovals: Map<String, Int> = emptyMap(),
+    onApprovals: (String, String) -> Unit = { _, _ -> },
 ) {
     val state by vm.state.collectAsState()
     var pendingDelete by remember { mutableStateOf<Connection?>(null) }
@@ -71,6 +73,7 @@ fun ConnectionsScreen(
         onLanguage = { AppCompatDelegate.setApplicationLocales(it.toLocales()) },
         bridges = bridges, onBridgeOpen = onBridgeOpen, onBridgeCreate = onBridgeCreate,
         onSearch = onSearch, onNewChat = onNewChat, onNewBot = onNewBot,
+        pendingApprovals = pendingApprovals, onApprovals = onApprovals,
     )
 
     val deleteError by vm.deleteError.collectAsState()
@@ -104,6 +107,8 @@ fun BotsListContent(
     onSearch: () -> Unit = {},
     onNewChat: () -> Unit = {},
     onNewBot: () -> Unit = {},
+    pendingApprovals: Map<String, Int> = emptyMap(),
+    onApprovals: (String, String) -> Unit = { _, _ -> },
 ) {
     val c = Rasul.colors
     val empty = state is ConnectionsState.Loaded && state.items.isEmpty() && bridges.groups.isEmpty() && !bridges.storageError
@@ -133,7 +138,7 @@ fun BotsListContent(
             return@Column
         }
         if (state !is ConnectionsState.Loaded && (bridges.groups.isNotEmpty() || bridges.storageError)) {
-            LazyColumn(Modifier.weight(1f)) { bridgeBotItems(bridges, onBridgeOpen, onBridgeCreate) }
+            LazyColumn(Modifier.weight(1f)) { bridgeBotItems(bridges, onBridgeOpen, onBridgeCreate, pendingApprovals, onApprovals) }
         }
         when (state) {
             ConnectionsState.Loading -> Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
@@ -143,7 +148,7 @@ fun BotsListContent(
             )
             is ConnectionsState.Loaded -> {
                 LazyColumn(Modifier.fillMaxSize()) {
-                    bridgeBotItems(bridges, onBridgeOpen, onBridgeCreate)
+                    bridgeBotItems(bridges, onBridgeOpen, onBridgeCreate, pendingApprovals, onApprovals)
                     if (bridges.groups.isNotEmpty() && state.items.isNotEmpty()) item {
                         Text(stringResource(R.string.bridge_direct_connections), style = RasulType.meta, color = c.muted, modifier = Modifier.padding(20.dp))
                     }

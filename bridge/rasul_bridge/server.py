@@ -389,12 +389,33 @@ class Bridge:
                         raise HTTPError(400, "session_patch_invalid_fields")
                     forward_head = {**head, "content-type": "application/json"}
                     forward_body = json.dumps(patch, ensure_ascii=False).encode("utf-8")
+                if template in ("/api/sessions/{id}/fork", "/api/sessions/{id}/model"):
+                    action = template.rsplit("/", 1)[1]
+                    fields = {"title"} if action == "fork" else {"model", "provider", "require_model_lock"}
+                    try:
+                        value = json.loads(body.decode("utf-8", errors="strict"))
+                        if not isinstance(value, dict) or set(value) - fields:
+                            raise ValueError
+                        for field, item in value.items():
+                            if field == "require_model_lock":
+                                if not isinstance(item, bool):
+                                    raise ValueError
+                            elif item is not None and not isinstance(item, str):
+                                raise ValueError
+                    except (UnicodeError, ValueError, TypeError):
+                        raise HTTPError(400, action + "_invalid_fields") from None
+                    forward_head = {**head, "content-type": "application/json"}
+                    forward_body = json.dumps(value, ensure_ascii=False).encode("utf-8")
                 if profile not in self.profiles.directories():
                     profile = None
                     raise HTTPError(404, "Profile not found")
                 key = self.profiles.key(profile)
                 if not key:
                     raise HTTPError(503, "Profile key needs local initialization")
+                if template == "/api/sessions/{id}/fork" and not self.limits.fork(device, profile):
+                    raise HTTPError(429, "fork_rate_limited")
+                if template == "/api/sessions/{id}/model" and not self.limits.model(device, profile):
+                    raise HTTPError(429, "model_rate_limited")
                 status = await self.upstream.forward(link, method, self.profiles.target(profile, suffix),
                                                      key, forward_head, forward_body)
         except StreamAborted:
@@ -414,7 +435,10 @@ class Bridge:
             if summarized and not route.startswith("/v1/profiles/{id}/desktop/"):
                 self.audit_call("reject")
             if (not route.startswith("/v1/profiles/{id}/desktop/")
-                    and (not summarized or (device is not None and route == "/v1/profiles/{id}/instructions"))):
+                    and (not summarized or (device is not None and route in (
+                        "/v1/profiles/{id}/instructions",
+                        "/v1/profiles/{id}/hermes/api/sessions/{id}/fork",
+                        "/v1/profiles/{id}/hermes/api/sessions/{id}/model")))):
                 self.audit_call("record", device, method, route, profile, status)
 
     async def events(self, link):

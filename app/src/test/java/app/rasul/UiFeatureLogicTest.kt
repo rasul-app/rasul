@@ -1,9 +1,13 @@
 package app.rasul
 
 import android.content.res.Configuration
+import app.rasul.chat.ChatMessage
 import app.rasul.chat.ChatModelChoice
+import app.rasul.chat.MessageKind
 import app.rasul.chat.TokenUsageDisplay
 import app.rasul.chat.modelChoices
+import app.rasul.chat.needsDaySeparator
+import app.rasul.chat.sameSenderGroup
 import app.rasul.chat.tokenUsageDisplay
 import app.rasul.data.CapabilitiesDto
 import app.rasul.data.CapabilityEndpointDto
@@ -12,7 +16,11 @@ import app.rasul.data.ModelOptionsDto
 import app.rasul.data.ModelOptionsProviderDto
 import app.rasul.data.RunTokenUsage
 import app.rasul.data.TokenUsageSummary
+import app.rasul.data.chatSeparatorText
 import app.rasul.data.sumRunTokenUsage
+import app.rasul.data.timeMillis
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import app.rasul.settings.skillsToolsEntryVisible
 import app.rasul.ui.FeatureErrorSurface
 import app.rasul.ui.errorMessageResourceId
@@ -31,9 +39,11 @@ import app.rasul.ui.SearchFilter
 import app.rasul.ui.filterSearchEntries
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.text.DateFormat
+import java.time.ZoneId
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
@@ -151,6 +161,42 @@ class UiFeatureLogicTest {
                 ),
             ),
         )
+    }
+
+    @Test
+    fun daySeparatorsFollowLocalDayAndMissingStamps() {
+        val zone = ZoneId.of("UTC")
+        val thursday = ChatMessage(1, MessageKind.User, "a", atMillis = 1_792_097_160_000L) // Thu 2026-10-15 20:46Z
+        val sameDay = ChatMessage(2, MessageKind.Assistant, "b", atMillis = 1_792_097_220_000L)
+        val friday = ChatMessage(3, MessageKind.User, "c", atMillis = 1_792_097_160_000L + 86_400_000L)
+        val noStamp = ChatMessage(4, MessageKind.Assistant, "d")
+
+        assertTrue(needsDaySeparator(null, thursday, zone))
+        assertFalse(needsDaySeparator(thursday, sameDay, zone))
+        assertTrue(needsDaySeparator(sameDay, friday, zone))
+        assertFalse(needsDaySeparator(friday, noStamp, zone))
+        assertTrue(needsDaySeparator(noStamp, thursday, zone))
+        assertTrue(sameSenderGroup(thursday, friday))
+        assertFalse(sameSenderGroup(thursday, sameDay))
+    }
+
+    @Test
+    fun chatSeparatorReadsWeekdayAndShortTime() {
+        // JDK SHORT time uses a narrow no-break space before PM; normalize it out.
+        assertEquals(
+            "Thursday 8:46 PM",
+            chatSeparatorText(1_792_097_160_000L, ZoneId.of("UTC"), Locale.ENGLISH)
+                .replace(' ', ' ').replace(' ', ' '),
+        )
+    }
+
+    @Test
+    fun messageTimestampsParseEpochNumbersAndIsoStrings() {
+        assertEquals(1_700_000_000_000L, timeMillis(JsonPrimitive(1_700_000_000)))
+        assertEquals(1_700_000_000_000L, timeMillis(JsonPrimitive("2023-11-14T22:13:20Z")))
+        assertNull(timeMillis(JsonPrimitive("not a date")))
+        assertNull(timeMillis(JsonNull))
+        assertNull(timeMillis(null))
     }
 
     @Test

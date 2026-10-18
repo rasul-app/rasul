@@ -1,9 +1,7 @@
 package app.rasul
 
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.sp
 import app.rasul.R
@@ -12,7 +10,6 @@ import app.rasul.ui.theme.RasulMonoFontFamily
 import app.rasul.ui.theme.rasulFontFamily
 import app.rasul.ui.theme.rasulTypography
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 @org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
@@ -28,26 +25,21 @@ class CodeTextStyleTest {
     }
 
     @Test
-    fun monoFamilyIncludesNormalAndMediumWeights() {
-        assertEquals(
-            FontFamily(
-                Font(R.font.ibm_plex_mono_regular, FontWeight.Normal),
-                Font(R.font.ibm_plex_mono_medium, FontWeight.Medium),
-            ),
-            RasulMonoFontFamily,
-        )
+    fun monoFamilyIsTheSystemMonospace() {
+        assertEquals(FontFamily.Monospace, RasulMonoFontFamily)
     }
 
     @Test
-    fun appFontFamilyFollowsResolvedLanguageAndMaterialDefaults() {
+    fun appFontFamilyIsTheSystemDefaultForEveryLanguage() {
         val arabic = rasulFontFamily("ar")
         val english = rasulFontFamily("en")
         val other = rasulFontFamily("fr")
 
-        assertEquals(english, other)
-        assertEquals(english, rasulTypography(english).bodyLarge.fontFamily)
-        assertEquals(arabic, rasulTypography(arabic).bodyLarge.fontFamily)
-        assertNotEquals(english, arabic)
+        assertEquals(FontFamily.Default, english)
+        assertEquals(FontFamily.Default, arabic)
+        assertEquals(FontFamily.Default, other)
+        assertEquals(FontFamily.Default, rasulTypography(english).bodyLarge.fontFamily)
+        assertEquals(FontFamily.Default, rasulTypography(arabic).bodyLarge.fontFamily)
     }
 
     @Test
@@ -55,15 +47,15 @@ class CodeTextStyleTest {
         assertEquals(TextDirection.Ltr, codeTextStyle(TextStyle()).textDirection)
     }
 
-    @Test fun unsavedAnswerHasSpecificEnglishAndArabicMessages() {
+    @Test fun keptReplyHasSpecificEnglishAndArabicMessages() {
         val app = org.robolectric.RuntimeEnvironment.getApplication()
         fun text(language: String): String {
             val config = android.content.res.Configuration(app.resources.configuration)
             config.setLocale(java.util.Locale.forLanguageTag(language))
-            return app.createConfigurationContext(config).getString(R.string.chat_err_answer_unsaved)
+            return app.createConfigurationContext(config).getString(R.string.chat_err_reply_kept)
         }
-        assertEquals("Your PC hasn't saved the last answer yet. Try again in a moment.", text("en"))
-        assertEquals("لم يحفظ حاسوبك الإجابة الأخيرة بعد. حاول مرة أخرى بعد قليل.", text("ar"))
+        assertEquals("Couldn't send yet. Your reply is in the chat box.", text("en"))
+        assertEquals("تعذّر الإرسال الآن. ردّك في مربع الكتابة.", text("ar"))
     }
 
     @Test fun sessionReadFailureHasSpecificEnglishAndArabicMessages() {

@@ -32,6 +32,7 @@ class WebSocketSocketFactory(
     private val onConnectFailure: () -> Unit = {},
     private val onOuterConnected: () -> Unit = {},
     private val staleAfterMs: Long = BridgeTimeouts.LINK_STALE_MS,
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : SocketFactory() {
     private val urls = urls.toList().also {
         require(it.isNotEmpty() && it.all(::validBridgeUrl))
@@ -49,7 +50,7 @@ class WebSocketSocketFactory(
         val preferred = lastWorking
         val ordered = if (preferred == null) urls else listOf(preferred) + urls.filter { it != preferred }
         for (url in ordered.filterNot { it in excluded }) {
-            val socket = WebSocketSocket(outer, url, if (URI(url).path == "/v1/link") url else url.trimEnd('/') + "/v1/link", staleAfterMs)
+            val socket = WebSocketSocket(outer, url, if (URI(url).path == "/v1/link") url else url.trimEnd('/') + "/v1/link", staleAfterMs, nanoTime)
             try {
                 onAttempt(socket)
                 socket.open(timeoutMs)
@@ -143,7 +144,7 @@ internal class RoutingSocket(private val factory: WebSocketSocketFactory) : Sock
 }
 
 /** Binary frames form one byte stream. Callback threads never wait for a reader. */
-internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: String, private val url: String, private val staleAfterMs: Long = BridgeTimeouts.LINK_STALE_MS) : Socket() {
+internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: String, private val url: String, private val staleAfterMs: Long = BridgeTimeouts.LINK_STALE_MS, private val nanoTime: () -> Long = System::nanoTime) : Socket() {
     private val monitor = Object()
     private val received = Buffer()
     private val opened = CountDownLatch(1)
@@ -158,7 +159,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
 
     fun open(timeoutMs: Int) {
         if (closed) throw SocketException("Socket closed")
-        lastActivityNanos = System.nanoTime()
+        lastActivityNanos = nanoTime()
         webSocket = outer.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 synchronized(monitor) { connected = true; opened.countDown() }
@@ -172,7 +173,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                         webSocket.cancel()
                     } else {
                         received.write(bytes)
-                        lastActivityNanos = System.nanoTime()
+                        lastActivityNanos = nanoTime()
                         monitor.notifyAll()
                     }
                 }
@@ -217,7 +218,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
      * pooled connection is never mistaken for usable — OkHttp opens a fresh link instead of writing to a dead one.
      */
     private fun dead() = closed || eof || failure != null ||
-        System.nanoTime() - lastActivityNanos > TimeUnit.MILLISECONDS.toNanos(staleAfterMs)
+        nanoTime() - lastActivityNanos > TimeUnit.MILLISECONDS.toNanos(staleAfterMs)
     override fun isInputShutdown() = dead()
     override fun isOutputShutdown() = dead()
 
@@ -262,7 +263,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                 // A peer close must not hide queued TLS records behind a write failure.
                 if (eof) return
                 // A link idle past the tunnel limit is dropped even when it still looks open — never write to it.
-                if (System.nanoTime() - lastActivityNanos > TimeUnit.MILLISECONDS.toNanos(staleAfterMs)) {
+                if (nanoTime() - lastActivityNanos > TimeUnit.MILLISECONDS.toNanos(staleAfterMs)) {
                     throw BridgeLinkDroppedException("Bridge link went stale").also { fail(it) }
                 }
                 val ws = webSocket ?: throw SocketException("Socket is not open")
@@ -273,7 +274,7 @@ internal class WebSocketSocket(private val outer: OkHttpClient, val bridgeUrl: S
                     if (!ws.send(bytes.toByteString(cursor, count))) throw IOException("Bridge send failed")
                     cursor += count
                 }
-                lastActivityNanos = System.nanoTime()
+                lastActivityNanos = nanoTime()
             }
         }
         override fun close() = this@WebSocketSocket.close()

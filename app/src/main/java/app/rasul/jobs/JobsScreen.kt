@@ -71,7 +71,12 @@ private data class PendingJob(val source: ActiveTarget.Ready, val job: JobDto?)
 
 /** Jobs list and resume confirmation dialog. */
 @Composable
-fun JobsScreen(vm: JobsViewModel, onPairPc: () -> Unit = {}, onSearch: () -> Unit = {}) {
+fun JobsScreen(
+    vm: JobsViewModel,
+    onPairPc: () -> Unit = {},
+    onSearch: () -> Unit = {},
+    onOpenHistory: (ActiveTarget.Ready, JobDto) -> Unit = { _, _ -> },
+) {
     val state by vm.state.collectAsState()
     val busy by vm.busy.collectAsState()
     val actionError by vm.actionError.collectAsState()
@@ -103,6 +108,8 @@ fun JobsScreen(vm: JobsViewModel, onPairPc: () -> Unit = {}, onSearch: () -> Uni
         ) { list ->
             JobList(
                 list, busy = busy != null,
+                historyAvailable = source?.target?.bridge != null,
+                onHistory = { j -> source?.let { onOpenHistory(it, j) } },
                 // Pause is safe: one tap. Resume can run an overdue job at once: confirm.
                 onToggle = { j -> source?.let { s -> if (j.isPaused) confirmResume = Pending(s, j) else vm.togglePause(s, j) } },
                 onRunNow = { j -> source?.let { confirmRun = Pending(it, j) } },
@@ -165,6 +172,8 @@ fun JobsScreen(vm: JobsViewModel, onPairPc: () -> Unit = {}, onSearch: () -> Uni
 internal fun JobList(
     list: List<JobDto>,
     busy: Boolean,
+    historyAvailable: Boolean = false,
+    onHistory: (JobDto) -> Unit = {},
     onToggle: (JobDto) -> Unit,
     onRunNow: (JobDto) -> Unit,
     onEdit: (JobDto) -> Unit = {},
@@ -207,6 +216,9 @@ internal fun JobList(
                     ) {
                         SmallOutlineButton(stringResource(R.string.ux3c_job_edit), { onEdit(j) }, enabled = !busy)
                         SmallOutlineButton(stringResource(R.string.ux3c_job_delete), { onDelete(j) }, enabled = !busy)
+                        if (historyAvailable) {
+                            SmallOutlineButton(stringResource(R.string.job_run_history), { onHistory(j) }, enabled = !busy)
+                        }
                         if (!j.jobState.isTerminal) {
                             SmallOutlineButton(stringResource(R.string.job_run_now), { onRunNow(j) }, enabled = !busy)
                         }
@@ -223,6 +235,15 @@ internal fun JobList(
                     JobState.Completed -> RowSub(stringResource(R.string.job_completed), c.successText)
                     JobState.Error -> RowSub(stringResource(R.string.job_failed), c.danger)
                 }
+            }
+        }
+        if (!historyAvailable) {
+            item {
+                Text(
+                    stringResource(R.string.run_history_needs_bridge),
+                    style = RasulType.bodySmall, color = c.muted,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 16.dp),
+                )
             }
         }
     }
@@ -409,7 +430,8 @@ private fun JobsPreviewBody(dialog: Boolean = false) = RasulTheme(false) {
             GlassText(stringResource(R.string.refresh), {})
         }
         PcSwitcherHost(PcPicker(samplePcs, "a"), {})
-        JobList(sampleJobs, busy = false, onToggle = {}, onRunNow = {}, onEdit = {}, onDelete = {})
+        JobList(sampleJobs, busy = false, onToggle = {}, onRunNow = {}, onEdit = {}, onDelete = {},
+            historyAvailable = true, onHistory = {})
     }
     if (dialog) {
         ConfirmDialog(

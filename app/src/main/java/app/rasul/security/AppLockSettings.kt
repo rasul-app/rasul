@@ -41,6 +41,9 @@ fun shouldLockOnForeground(enabled: Boolean, backgroundedAtMs: Long?, foreground
 
 fun appLockBlocksContent(state: AppLockState): Boolean = state.enabled && state.locked
 
+/** Notifications show only their public text while the lock is on or its state is not yet read. */
+fun AppLockState.publicOnly(): Boolean = !loaded || enabled
+
 class AppLockController(private val settings: AppLockSettings, private val scope: CoroutineScope) {
     private val _state = MutableStateFlow(AppLockState())
     val state: StateFlow<AppLockState> = _state.asStateFlow()

@@ -275,18 +275,31 @@ class BridgeTransportTest {
         val pipes = CopyOnWriteArrayList<Socket>()
         val workers = Executors.newCachedThreadPool()
         try {
-            (certificates.sslContext().serverSocketFactory.createServerSocket(0, 50, InetAddress.getLoopbackAddress())
-                as javax.net.ssl.SSLServerSocket).use { inner ->
-                inner.enabledProtocols = arrayOf("TLSv1.3")
-                inner.needClientAuth = true
+            // A plain listener keeps the accepted TCP socket reachable. Closing the SSL socket
+            // while the client's still-arriving flight bytes sit unread sends RST through the
+            // relay and can drop the alert before it is forwarded; the raw socket instead stays
+            // open until teardown, with FIN emitted explicitly once the rejection is recorded.
+            java.net.ServerSocket(0, 50, InetAddress.getLoopbackAddress()).use { inner ->
+                val serverTls = certificates.sslContext().socketFactory
                 val rejectedAttempts = List(2) { java.util.concurrent.CountDownLatch(1) }
                 val rejected = workers.submit {
                     repeat(2) { attempt ->
-                        (inner.accept() as javax.net.ssl.SSLSocket).use { socket ->
+                        val raw = inner.accept()
+                        pipes.add(raw)
+                        try {
+                            val socket = serverTls.createSocket(raw, "example.invalid", 443, false)
+                                as javax.net.ssl.SSLSocket
                             pipes.add(socket)
-                            socket.soTimeout = 5000
+                            socket.useClientMode = false
+                            socket.needClientAuth = true
+                            socket.enabledProtocols = arrayOf("TLSv1.3")
+                            raw.soTimeout = 5000
                             assertThrows(javax.net.ssl.SSLHandshakeException::class.java) { socket.startHandshake() }
                             rejectedAttempts[attempt].countDown()
+                            raw.shutdownOutput()
+                        } catch (t: Throwable) {
+                            runCatching { raw.close() }
+                            throw t
                         }
                     }
                 }
@@ -413,6 +426,10 @@ class BridgeTransportTest {
         withBridgeLinks { inner, outer, transport, links ->
             inner.enqueue(MockResponse().setBody("{}"))
             inner.enqueue(MockResponse().setBody("{}"))
+            // The GET may already be on the closing link and reach the inner server before the close lands; its
+            // answer is then lost with the link and the transport re-sends it, so the inner server sees up to
+            // three requests. Without a third answer that re-send waits on an empty queue.
+            inner.enqueue(MockResponse().setBody("{}"))
             val api = HermesClient(transport.client)
             val target = HermesTarget("", null, "", app.rasul.bridge.BridgeEndpoint(transport.client, "default"))
             assertTrue(api.health(target) is HermesResult.Ok)
@@ -520,13 +537,17 @@ class BridgeTransportTest {
     /** A pooled link idle longer than the tunnel's limit is never reused (resume, network change, Doze).
      * The threshold must exceed local request latency — it only declares a link stale after real idleness. */
     @Test fun aStaleIdleLinkIsReopened() = runBlocking {
-        withBridgeLinks(timeouts = app.rasul.bridge.BridgeTimeouts().copy(linkStaleMs = 250)) { inner, outer, transport, _ ->
+        // The link clock is the test's: real time never ages the link, so a slow handshake cannot trip the
+        // stale check, and the idle period is stepped instead of slept.
+        val aged = java.util.concurrent.atomic.AtomicLong()
+        val timeouts = app.rasul.bridge.BridgeTimeouts(linkStaleMs = 60_000, nanoTime = { System.nanoTime() + aged.get() })
+        withBridgeLinks(timeouts = timeouts) { inner, outer, transport, _ ->
             inner.enqueue(MockResponse().setBody("{}"))
             inner.enqueue(MockResponse().setBody("{}"))
             val api = HermesClient(transport.client)
             val target = HermesTarget("", null, "", app.rasul.bridge.BridgeEndpoint(transport.client, "default"))
             assertTrue(api.health(target) is HermesResult.Ok)
-            Thread.sleep(500)
+            aged.addAndGet(TimeUnit.SECONDS.toNanos(61))
             assertTrue(api.health(target) is HermesResult.Ok)
             assertEquals(2, outer.requestCount)
         }

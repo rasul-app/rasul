@@ -12,7 +12,10 @@ import java.net.Proxy
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
-data class BridgeTimeouts(val requestMs: Long = REQUEST_MS, val streamIdleMs: Long = STREAM_IDLE_MS, val linkStaleMs: Long = LINK_STALE_MS) {
+data class BridgeTimeouts(val requestMs: Long = REQUEST_MS, val streamIdleMs: Long = STREAM_IDLE_MS, val linkStaleMs: Long = LINK_STALE_MS,
+    /** Clock for link idleness only, so a test can age a link without sleeping. */
+    val nanoTime: () -> Long = System::nanoTime,
+) {
     init { require(requestMs > 0 && streamIdleMs > 0 && linkStaleMs > 0) }
     companion object {
         const val REQUEST_MS = 30_000L
@@ -53,7 +56,7 @@ class BridgeTransport(
             lastWorkingUrl = url
             onWorkingUrl(url)
         }, confirmOnConnect = false, onConnectFailure = rejections::reset, onOuterConnected = rejections::outerConnected,
-        staleAfterMs = timeouts.linkStaleMs))
+        staleAfterMs = timeouts.linkStaleMs, nanoTime = timeouts.nanoTime))
         .sslSocketFactory(BridgeTlsSocketFactory(trust, identity, newContext, rejections), trust)
         .dns(object : Dns {
             override fun lookup(hostname: String): List<InetAddress> {

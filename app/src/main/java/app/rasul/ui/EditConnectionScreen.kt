@@ -88,6 +88,7 @@ internal fun HermesError.text(surface: FeatureErrorSurface? = null): String {
         HermesError.NotFound -> stringResource(R.string.err_not_found)
         HermesError.ResourceNotFound -> stringResource(R.string.err_resource_not_found)
         HermesError.ConnectionChanged -> stringResource(R.string.err_connection_changed)
+        HermesError.ChatBusy -> stringResource(R.string.err_chat_busy)
         is HermesError.Storage -> stringResource(R.string.connections_load_error, detail)
         is HermesError.ProfileUnknown -> stringResource(R.string.err_profile_unknown, profile)
         is HermesError.Unreachable -> stringResource(R.string.err_unreachable, detail)

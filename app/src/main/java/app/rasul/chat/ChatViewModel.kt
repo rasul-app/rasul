@@ -1,20 +1,31 @@
 package app.rasul.chat
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.rasul.data.ApprovalChoice
+import app.rasul.data.ConnectionStore
 import app.rasul.data.HermesError
 import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
+import app.rasul.data.PendingAttachment
 import app.rasul.data.RunEvent
+import app.rasul.data.RunInputLimits
+import app.rasul.data.RunInputPlan
 import app.rasul.data.RunUpdate
 import app.rasul.data.RunsApi
+import app.rasul.data.SentAttachment
 import app.rasul.data.followRun
+import app.rasul.data.planRunInput
+import app.rasul.data.toSent
+import app.rasul.data.timeMillis
+import app.rasul.sessions.ChatSessionControl
 import app.rasul.sessions.SessionMessageDto
 import app.rasul.sessions.SessionsApi
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +34,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import java.util.UUID
 
 enum class MessageKind {
@@ -38,8 +52,15 @@ enum class MessageKind {
     Error,
 }
 
-/** [error] is set on Error messages that come from a request; the UI turns it into specific text. */
-data class ChatMessage(val id: Long, val kind: MessageKind, val text: String = "", val error: ChatFailure? = null)
+/** [error] is set on Error messages that come from a request; the UI turns it into specific text. [atMillis] drives day separators; null shows none. */
+data class ChatMessage(
+    val id: Long,
+    val kind: MessageKind,
+    val text: String = "",
+    val error: ChatFailure? = null,
+    val attachments: List<SentAttachment> = emptyList(),
+    val atMillis: Long? = null,
+)
 
 /** Specific causes. No generic case on purpose. */
 sealed interface ChatFailure {
@@ -57,7 +78,38 @@ sealed interface ChatFailure {
     data object KeyMissing : ChatFailure
     data object PreviousRunActive : ChatFailure
     data object SessionUnavailable : ChatFailure
-    data object AnswerUnsaved : ChatFailure
+    /** The staged request would exceed the bridge's request body cap (RunInputLimits.MAX_RUN_BODY_BYTES). */
+    data object AttachmentTooLarge : ChatFailure
+
+    /** The picked file's type/extension is not a text file. */
+    data object FileTypeUnsupported : ChatFailure
+
+    /** The picked file is over RunInputLimits.MAX_FILE_BYTES. */
+    data object FileTooLarge : ChatFailure
+
+    /** One photo still exceeds RunInputLimits.MAX_PHOTO_BYTES after re-encoding. */
+    data object PhotoTooLarge : ChatFailure
+
+    /** The picked image could not be decoded. */
+    data object PhotoUnreadable : ChatFailure
+
+    /** The picked file could not be opened/read. */
+    data object FileUnreadable : ChatFailure
+
+    /** Photos and a text file are mutually exclusive in one send. */
+    data object AttachmentKindMixed : ChatFailure
+
+    /** More than RunInputLimits.MAX_PHOTOS were staged. */
+    data object AttachmentTooManyPhotos : ChatFailure
+
+    /** Steer carries only text: attachments wait for an idle composer. */
+    data object AttachmentRunActive : ChatFailure
+
+    /** A notification reply could not be sent; its text was put back into the composer draft. */
+    data object ReplyKept : ChatFailure
+
+    /** The fork request failed; [error] is the specific cause. */
+    data class ForkFailed(val error: HermesError) : ChatFailure
 }
 
 sealed interface StatusLabel {
@@ -122,55 +174,86 @@ data class ChatState(
     val finishedRunId: String? = null,
     val queuedReplies: Int = 0,
     val preparingSend: Boolean = false,
+    /** Staged (not yet sent) attachments, shown as removable chips above the composer. */
+    val attachments: List<PendingAttachment> = emptyList(),
+    /** Picker loads still in flight on the ViewModel scope; Send stays off until they land. */
+    val pendingAttachments: Int = 0,
+    /** Server-advertised per-chat actions (GET /v1/capabilities features); both stay hidden until the server says so. */
+    val supportsFork: Boolean = false,
+    val forking: Boolean = false,
+    /** A fork the server created that the screen has not opened yet; the screen calls [ChatViewModel.forkOpened] after opening it. */
+    val forkedSessionId: String? = null,
+    /** Title of this chat's session when it is a fork (it has a parent session). */
+    val forkTitle: String? = null,
+    /** Last fork or model-change failure, shown in a dismissible row. */
+    val actionFailure: ChatFailure? = null,
 ) {
     val canChooseModel: Boolean get() = load == ChatLoad.Ready && sessionId != null &&
-        run == null && !preparingSend && queuedReplies == 0
+        run == null && !preparingSend && queuedReplies == 0 && !forking
+
+    val canFork: Boolean get() = supportsFork && canChooseModel
 
     /** The one the sheet shows: the oldest still pending. */
     val approval: ApprovalUi? get() = approvals.firstOrNull()
 }
 
-/** Where a chat points: resolved once from the saved connection and its decrypted key. */
+/** Where a chat points: resolved from the saved connection and its decrypted key. */
 fun interface TargetLoader {
     suspend fun load(): HermesResult<HermesTarget>
 }
 
-/** What survives leaving the chat: one session id per connection+profile, plus the active run and its last event id. */
+/** What survives leaving the chat: the run breadcrumb lives under its OWN session id, never under a shared slot. */
 interface RunMemory {
+    fun bindRevision(revision: String) = Unit
     suspend fun sessionId(): String
     suspend fun currentSessionId(): String? = null
     suspend fun newSessionFailure(): ChatFailure? = null
     suspend fun activeRun(): String?
+    suspend fun activeRun(sessionId: String): String? = if (sessionId == currentSessionId()) activeRun() else null
+    suspend fun activeRunSessions(): Set<String> = activeRun()?.let { setOf(sessionId()) } ?: emptySet()
     suspend fun lastEventId(): Long?
+    suspend fun lastEventId(sessionId: String): Long? = if (sessionId == currentSessionId()) lastEventId() else null
     suspend fun anchor(): Anchor = Anchor.Unknown
+    suspend fun anchor(sessionId: String): Anchor = if (sessionId == currentSessionId()) anchor() else Anchor.Unknown
     suspend fun setActiveRun(runId: String?, lastEventId: Long? = null, anchor: Anchor = Anchor.Unknown)
     suspend fun setSessionId(sessionId: String) = Unit
     suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor) {
         setSessionId(sessionId)
         setActiveRun(runId, lastEventId, anchor)
     }
+    /** A new-chat route's one-shot pointer claim (ConnectionStore.setCurrentSessionRun); memories without a store ignore it. */
+    suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor, claim: ConnectionStore.PointerClaim) =
+        setCurrentSessionRun(sessionId, runId, lastEventId, anchor)
 }
 
-fun newChatRunMemory(persistent: RunMemory, newSession: String): RunMemory = object : RunMemory {
-    private suspend fun persisted() = persistent.currentSessionId() == newSession
+/**
+ * Binds a chat to [newSession]: every read and write lands under that session's own run keys.
+ * [claim] arms a one-shot pointer move for `newSession=` routes: the first `runId != null` write claims the
+ * current-session pointer inside the same store edit, only while it still equals the value seen at tap time.
+ */
+fun newChatRunMemory(persistent: RunMemory, newSession: String, claim: ConnectionStore.PointerClaim? = null): RunMemory = object : RunMemory {
+    private var pendingClaim = claim
+    override fun bindRevision(revision: String) = persistent.bindRevision(revision)
     override suspend fun sessionId() = newSession
-    override suspend fun currentSessionId() = newSession
+    override suspend fun currentSessionId() = persistent.currentSessionId()
     override suspend fun newSessionFailure(): ChatFailure? = try {
-        if (!persisted() && persistent.activeRun() != null) ChatFailure.PreviousRunActive else null
+        if (persistent.currentSessionId() != newSession && (persistent.activeRunSessions() - newSession).isNotEmpty()) ChatFailure.PreviousRunActive else null
     } catch (error: CancellationException) {
         throw error
     } catch (_: Exception) {
         ChatFailure.SessionUnavailable
     }
-    override suspend fun activeRun(): String? = if (persisted()) persistent.activeRun() else null
-    override suspend fun lastEventId(): Long? = if (persisted()) persistent.lastEventId() else null
-    override suspend fun anchor() = if (persisted()) persistent.anchor() else Anchor.Unknown
+    override suspend fun activeRun(): String? = persistent.activeRun(newSession)
+    override suspend fun activeRun(sessionId: String): String? = persistent.activeRun(sessionId)
+    override suspend fun activeRunSessions() = persistent.activeRunSessions()
+    override suspend fun lastEventId(): Long? = persistent.lastEventId(newSession)
+    override suspend fun lastEventId(sessionId: String): Long? = persistent.lastEventId(sessionId)
+    override suspend fun anchor() = persistent.anchor(newSession)
+    override suspend fun anchor(sessionId: String) = persistent.anchor(sessionId)
     override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) {
-        if (persisted()) {
-            persistent.setActiveRun(runId, lastEventId, anchor)
-        } else if (runId != null) {
-            persistent.setCurrentSessionRun(newSession, runId, lastEventId, anchor)
-        }
+        val armed = if (runId != null) pendingClaim.also { pendingClaim = null } else null
+        if (armed != null) persistent.setCurrentSessionRun(newSession, runId, lastEventId, anchor, armed)
+        else persistent.setCurrentSessionRun(newSession, runId, lastEventId, anchor)
     }
 }
 
@@ -204,6 +287,11 @@ class ChatViewModel(
     },
     private val newKey: () -> String = { UUID.randomUUID().toString() },
     scope: kotlinx.coroutines.CoroutineScope? = null,
+    /** Encode + request serialization run here; tests inject their scheduler to keep virtual time. */
+    private val workDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** Turns picker URIs into staged attachments; null in tests that never pick. */
+    private val attachLoader: AttachmentLoader? = null,
+    private val control: ChatSessionControl = ChatSessionControl.None,
 ) : ViewModel() {
     private val chatScope = kotlinx.coroutines.CoroutineScope((scope ?: viewModelScope).coroutineContext + kotlinx.coroutines.SupervisorJob((scope ?: viewModelScope).coroutineContext[Job]))
     internal var onFinished: ((String, ChatState) -> Unit)? = null
@@ -241,6 +329,9 @@ class ChatViewModel(
     private var pendingKey: Pair<String, String>? = null
     private val steerLock = Mutex()
 
+    /** Notification replies this model put back into the draft; only these may be removed from it when they start. */
+    private val keptReplies = mutableSetOf<String>()
+
     init {
         chatScope.launch {
             for (text in notificationReplies) {
@@ -248,13 +339,18 @@ class ChatViewModel(
                     state.first { it.load != ChatLoad.Loading }
                     val t = target
                     if (t == null) {
-                        restoreDraft(text, sameRun = false)
+                        restoreDraft(text, sameRun = false, keptReply = true)
+                        _state.update { it.copy(terminalFailure = ChatFailure.ReplyKept) }
                         continue
                     }
                     val active = state.value.run?.runId
                     if (active != null) {
                         val result = steerLock.withLock {
                             if (isCurrent(active)) runs.steer(t, active, text) else null
+                        }
+                        if (state.value.load != ChatLoad.Ready) {
+                            restoreDraft(text, sameRun = false)
+                            continue
                         }
                         if (result is HermesResult.Ok) {
                             updateRun(active) { it.msg(MessageKind.UserSteer, text) }
@@ -265,9 +361,12 @@ class ChatViewModel(
                         }
                         if (result is HermesResult.Err && result.error == HermesError.Server(409) && isCurrent(active)) steerRefused(t, active)
                     }
-                    state.first { it.run == null && !it.preparingSend }
+                    state.first { it.run == null && !it.preparingSend && it.pendingAttachments == 0 }
                     sendText(text, fromNotification = true)?.join()
-                    if (state.value.run == null && state.value.historyFailure != null) restoreDraft(text, sameRun = false)
+                    if (state.value.run == null) {
+                        restoreDraft(text, sameRun = false, keptReply = true)
+                        _state.update { it.copy(terminalFailure = ChatFailure.ReplyKept) }
+                    }
                 } finally {
                     _state.update { it.copy(queuedReplies = it.queuedReplies - 1) }
                 }
@@ -278,6 +377,7 @@ class ChatViewModel(
                 is HermesResult.Ok -> {
                     target = r.value
                     readSessionId()
+                    loadSessionControl(r.value)
                     // Send is available after resolving the target and stored run; load history before reattaching.
                     val stored = try {
                         memory.activeRun()
@@ -369,14 +469,14 @@ class ChatViewModel(
     }
 
     private fun ChatState.msg(kind: MessageKind, text: String): ChatState {
-        val message = ChatMessage(nextId++, kind, text)
+        val message = ChatMessage(nextId++, kind, text, atMillis = System.currentTimeMillis())
         if (kind == MessageKind.Info || kind == MessageKind.Error) addNotice(message)
         else pendingTurn = pendingTurn?.let { it.copy(messages = it.messages + message) }
         return display()
     }
 
     private fun ChatState.fail(f: ChatFailure): ChatState {
-        addNotice(ChatMessage(nextId++, MessageKind.Error, error = f))
+        addNotice(ChatMessage(nextId++, MessageKind.Error, error = f, atMillis = System.currentTimeMillis()))
         return display()
     }
 
@@ -402,10 +502,10 @@ class ChatViewModel(
         val finished = pending.finishedSequence ?: return
         val tail = after(pending.anchor)
         when (pending.outcome) {
-            Outcome.Answered -> if (tail?.any { it.role == "assistant" } == true ||
-                (pending.anchor == Anchor.Unknown && sequence > finished &&
-                    serverHistory.lastOrNull()?.role == "assistant")
-            ) retirePending(keepMessages = false)
+            // A terminal event means the server already finished writing the turn; the next
+            // served history is the truth, so the local rows retire unconditionally.
+            Outcome.Answered -> if (tail?.any { it.role == "assistant" } == true || sequence > finished)
+                retirePending(keepMessages = false)
             Outcome.NoAnswer -> if (sequence > finished) {
                 retirePending(keepMessages = tail?.any { it.role == "user" } != true)
             }
@@ -441,6 +541,9 @@ class ChatViewModel(
                         terminal = null,
                         terminalFailure = null,
                         finishedRunId = null,
+                        attachments = emptyList(),
+                        forkTitle = null,
+                        actionFailure = null,
                     )
                 }
             }
@@ -455,11 +558,69 @@ class ChatViewModel(
         }
     }
 
+    /** Reads what the server supports and whether this chat is a fork; neither blocks the chat. */
+    private fun loadSessionControl(t: HermesTarget) {
+        chatScope.launch {
+            val support = control.support(t)
+            _state.update { it.copy(supportsFork = support.fork) }
+            val id = sessionId ?: return@launch
+            val info = (control.info(t, id) as? HermesResult.Ok)?.value ?: return@launch
+            if (info.parentSessionId != null && sessionId == id) {
+                _state.update { it.copy(forkTitle = info.title?.takeIf(String::isNotBlank) ?: "") }
+            }
+        }
+    }
+
+    fun dismissActionFailure() = _state.update { it.copy(actionFailure = null) }
+
+    /**
+     * POST /api/sessions/{id}/fork. Runs in the chat's own scope, so leaving the screen does not cancel it and the
+     * [ChatState.forking] flag always resets. The new session id lands in [ChatState.forkedSessionId] (or the cause in
+     * [ChatState.actionFailure]); the screen opens it and calls [forkOpened].
+     */
+    fun fork() {
+        val t = target
+        val id = sessionId
+        if (t == null || id == null || !_state.value.canFork) return
+        _state.update { it.copy(forking = true, actionFailure = null) }
+        chatScope.launch {
+            try {
+                when (val r = control.fork(t, id)) {
+                    is HermesResult.Ok -> _state.update { it.copy(forkedSessionId = r.value.id) }
+                    is HermesResult.Err -> _state.update { it.copy(actionFailure = ChatFailure.ForkFailed(r.error)) }
+                }
+            } finally {
+                _state.update { it.copy(forking = false) }
+            }
+        }
+    }
+
+    fun forkOpened() = _state.update { it.copy(forkedSessionId = null) }
+
     private fun joinDraft(first: String, second: String) = if (second.isBlank()) first else if (first.isBlank()) second else "$first\n$second"
 
-    /** Puts an unsent text back. Touches the composer only, never the run; after the run changed it goes after what was typed since. */
-    private fun restoreDraft(text: String, sameRun: Boolean) =
-        _state.update { it.copy(draft = if (sameRun) joinDraft(text, it.draft) else joinDraft(it.draft, text)) }
+    /** True when [text] is already a whole line of [draft]; a failed send must not duplicate it. */
+    private fun draftHas(draft: String, text: String) =
+        draft == text || draft.startsWith("$text\n") || draft.endsWith("\n$text") || draft.contains("\n$text\n")
+
+    /** Removes one whole-line occurrence of [text] from [draft]; a kept reply that then starts must not stay in the composer. */
+    private fun dropDraftLine(draft: String, text: String) = when {
+        draft == text -> ""
+        draft.endsWith("\n$text") -> draft.removeSuffix("\n$text")
+        draft.startsWith("$text\n") -> draft.removePrefix("$text\n")
+        else -> draft.replaceFirst("\n$text\n", "\n")
+    }
+
+    /** Puts an unsent text back, at most once. Touches the composer only, never the run; after the run changed it goes after what was typed since. */
+    private fun restoreDraft(text: String, sameRun: Boolean, keptReply: Boolean = false) =
+        run {
+            var added = false
+            _state.update {
+                added = !draftHas(it.draft, text)
+                if (!added) it else it.copy(draft = if (sameRun) joinDraft(text, it.draft) else joinDraft(it.draft, text))
+            }
+            if (added && keptReply) keptReplies.add(text)
+        }
 
     private fun persist(runId: String?, lastEventId: Long? = null) {
         val anchor = pendingTurn?.anchor ?: Anchor.Unknown
@@ -475,7 +636,8 @@ class ChatViewModel(
     private suspend fun loadHistory(t: HermesTarget, id: String): Boolean {
         val sequence = ++historySequence
         val result = sessions.messages(t, id)
-        if (sequence < newestAppliedHistory) return false
+        // A newer applied load already settled history; a session reset leaves nothing to send against.
+        if (sequence < newestAppliedHistory) return historyLoaded
         val messages = when (result) {
             is HermesResult.Ok -> result.value
             is HermesResult.Err -> {
@@ -494,14 +656,17 @@ class ChatViewModel(
                 "assistant" -> MessageKind.Assistant
                 else -> null
             }
-            val text = message.text()
+            val text = message.displayText()
             val key = message.id?.toString() ?: "idx:$index"
-            HistoryRow(key, message.role, if (kind == null || text.isBlank()) null else {
-                ChatMessage(historyIds.getOrPut(key) { nextHistoryId-- }, kind, text)
+            val attachments = message.attachments()
+            HistoryRow(key, message.role, if (kind == null || (text.isBlank() && attachments.isEmpty())) null else {
+                ChatMessage(historyIds.getOrPut(key) { nextHistoryId-- }, kind, text, attachments = attachments, atMillis = timeMillis(message.timestamp))
             })
         }
         resolvePending(sequence)
-        _state.update { it.copy(historyFailure = null).display() }
+        _state.update {
+            it.copy(historyFailure = null).display()
+        }
         resolveMissingRunAfterHistory()
         return true
     }
@@ -531,7 +696,9 @@ class ChatViewModel(
         val run = current.run ?: return
         if (run.runId != id) return
         val changed = change(current)
-        pendingTurn = pendingTurn?.copy(outcome = outcome, finishedSequence = ++historySequence)
+        pendingTurn = pendingTurn?.let {
+            it.copy(outcome = outcome, finishedSequence = ++historySequence)
+        }
         resolvePending(newestAppliedHistory)
         followJob?.cancel()
         statusJob?.cancel()
@@ -556,7 +723,121 @@ class ChatViewModel(
     // ---- composer ----
 
     fun onDraft(text: String) {
-        if (!preparingSend) _state.update { it.copy(draft = text) }
+        if (preparingSend) return
+        _state.update { it.copy(draft = text) }
+        // A kept reply the user edited away must not delete a line typed later.
+        keptReplies.retainAll { draftHas(text, it) }
+    }
+
+    /**
+     * Stages processed attachments as composer chips. One send carries up to
+     * [RunInputLimits.MAX_PHOTOS] photos OR one text file — never a mix. A result that lands while
+     * a send is being prepared is kept: [sendText] copies its set before launching, so a late
+     * arrival simply stays staged for the next send.
+     */
+    fun addAttachments(items: List<PendingAttachment>) {
+        if (items.isEmpty()) return
+        val current = _state.value.attachments
+        val next = current + items
+        val hasFile = next.any { it is PendingAttachment.TextFile }
+        if ((hasFile && next.size > 1) || (current.isNotEmpty() && items.any { it is PendingAttachment.TextFile })) {
+            _state.update { it.fail(ChatFailure.AttachmentKindMixed) }
+            return
+        }
+        if (next.size > RunInputLimits.MAX_PHOTOS) {
+            _state.update { it.fail(ChatFailure.AttachmentTooManyPhotos) }
+            return
+        }
+        _state.update { it.copy(attachments = next) }
+    }
+
+    fun removeAttachment(key: Long) {
+        if (preparingSend) return
+        _state.update { it.copy(attachments = it.attachments.filterNot { a -> a.key == key }) }
+    }
+
+    /** The picker/loader layer reports why an attachment could not be staged. */
+    fun attachError(failure: ChatFailure) {
+        _state.update { it.fail(failure) }
+    }
+
+    /**
+     * The photo picker's result. Loading runs on this ViewModel's scope — not the screen's — so a
+     * recreation cannot drop it, and [ChatState.pendingAttachments] keeps Send off until it lands.
+     */
+    fun loadPhotos(uris: List<Uri>) {
+        val loader = attachLoader ?: return
+        if (uris.isEmpty()) return
+        // Photos already staged and photos still loading share the same request: count both.
+        val total = (_state.value.attachments.size + inFlightPhotos + uris.size).coerceIn(1, RunInputLimits.MAX_PHOTOS)
+        val budget = RunInputLimits.photoBudget(total)
+        inFlightPhotos += uris.size
+        pendingAttachmentLoad({ inFlightPhotos -= uris.size }) { loader.loadPhotos(uris, budget) }
+    }
+
+    private var inFlightPhotos = 0
+
+    /** The file picker's result; same ViewModel-owned loading as [loadPhotos]. */
+    fun loadFile(uri: Uri) {
+        val loader = attachLoader ?: return
+        pendingAttachmentLoad({}) { loader.loadFile(uri) }
+    }
+
+    /**
+     * One picker load: counted in [ChatState.pendingAttachments] for its whole flight. A result is
+     * staged only when the session it was picked under is still current — a session switch mid-load
+     * must not leak the old pick into the new chat.
+     */
+    private fun pendingAttachmentLoad(done: () -> Unit, load: suspend () -> AttachLoad) {
+        val atSession = sessionId
+        _state.update { it.copy(pendingAttachments = it.pendingAttachments + 1) }
+        chatScope.launch {
+            try {
+                when (val r = load()) {
+                    is AttachLoad.Ok -> stageLoaded(r.items, atSession)
+                    is AttachLoad.Failed -> if (sessionId == atSession) _state.update { it.fail(r.failure) }
+                }
+            } finally {
+                done()
+                _state.update { it.copy(pendingAttachments = (it.pendingAttachments - 1).coerceAtLeast(0)) }
+            }
+        }
+    }
+
+    /** One staging at a time: a fit suspends, and an interleaved staging would read stale staged photos. */
+    private val stagingLock = Mutex()
+
+    /**
+     * Stages a load's result under [stagingLock]. Photos encoded for a larger budget than the final
+     * total — staged earlier or in this very result — are re-encoded first; if one cannot fit,
+     * nothing is staged and the photo-too-large message shows. The session is re-checked after
+     * every suspension: a pick made in another chat is dropped, never staged into this one.
+     */
+    private suspend fun stageLoaded(items: List<PendingAttachment>, atSession: String?) = stagingLock.withLock {
+        if (sessionId != atSession) return@withLock
+        val loader = attachLoader
+        var toAdd = items
+        val staged = _state.value.attachments
+        if (staged.size + items.size > RunInputLimits.MAX_PHOTOS) {
+            addAttachments(items) // refuses with the too-many message before any refit
+            return@withLock
+        }
+        if (loader != null && items.any { it is PendingAttachment.Photo }) {
+            val budget = RunInputLimits.photoBudget((staged.size + items.size).coerceIn(1, RunInputLimits.MAX_PHOTOS))
+            val over = (staged + items).filterIsInstance<PendingAttachment.Photo>().filter { it.jpeg.size > budget }
+            if (over.isNotEmpty()) {
+                // A new key: Photo equality is by key, so the same key would make the update a no-op.
+                val fitted = over.associate { it.key to loader.fit(it, budget)?.copy(key = PendingAttachment.newKey()) }
+                if (sessionId != atSession) return@withLock
+                if (fitted.values.any { it == null }) {
+                    _state.update { it.fail(ChatFailure.PhotoTooLarge) }
+                    return@withLock
+                }
+                _state.update { s -> s.copy(attachments = s.attachments.map { fitted[it.key] ?: it }) }
+                toAdd = items.map { fitted[it.key] ?: it }
+            }
+        }
+        addAttachments(toAdd)
     }
 
     /** Captures notification input before any asynchronous work. */
@@ -573,8 +854,16 @@ class ChatViewModel(
     private fun sendText(text: String, fromNotification: Boolean = false): Job? {
         val s = _state.value
         val t = target
-        if (text.isEmpty() || t == null || s.load != ChatLoad.Ready || preparingSend) return null
+        // Read the user-chosen attachments before any suspend point; they cannot change while sending.
+        // Notification replies stay text-only: staged chips are left in the composer for the next manual send.
+        val staged = if (fromNotification) emptyList() else s.attachments
+        if ((text.isEmpty() && staged.isEmpty()) || t == null || s.load != ChatLoad.Ready || preparingSend || s.pendingAttachments > 0) return null
         val run = s.run
+        if (staged.isNotEmpty() && run != null) {
+            // Steer is text-only: keep chips and draft, explain instead of silently dropping the send.
+            _state.update { it.fail(ChatFailure.AttachmentRunActive) }
+            return null
+        }
         return when {
             run == null -> {
                 preparingSend = true
@@ -585,19 +874,23 @@ class ChatViewModel(
                             return@launch
                         }
                         val session = readSessionId() ?: return@launch
-                        val attempts = if (pendingTurn?.outcome == Outcome.Answered) 3 else 1
-                        repeat(attempts) { attempt ->
-                            if (attempt > 0) delay(attempt * 1_000L)
-                            if (loadHistory(t, session)) {
-                                if (pendingTurn?.outcome == Outcome.NoAnswer) retirePending(keepMessages = true)
-                                if (pendingTurn == null) {
-                                    startRun(t, text, clearDraft = !fromNotification)
-                                    return@launch
-                                }
+                        // Base64 encode + serialize happen once, on the worker; the client posts the element as-is.
+                        val plan = if (staged.isEmpty()) RunInputPlan.TextOnly
+                            else withContext(workDispatcher) { planRunInput(text, staged) }
+                        val input = when (plan) {
+                            is RunInputPlan.WithParts -> plan.input
+                            RunInputPlan.TextOnly -> JsonPrimitive(text)
+                            RunInputPlan.TooLarge -> {
+                                _state.update { it.fail(ChatFailure.AttachmentTooLarge) }
+                                return@launch
                             }
-                            if (pendingTurn?.outcome != Outcome.Answered) return@launch
                         }
-                        _state.update { it.copy(historyFailure = ChatFailure.AnswerUnsaved) }
+                        // The previous run's terminal event already settled its turn; one reload
+                        // shows what the server kept. A failed reload keeps the text unsent
+                        // rather than anchoring the new turn to stale history.
+                        if (!loadHistory(t, session)) return@launch
+                        pendingTurn?.let { retirePending(keepMessages = it.outcome != Outcome.Answered) }
+                        startRun(t, text, input, staged, clearDraft = !fromNotification, fromNotification = fromNotification)
                     } finally {
                         preparingSend = false
                     }
@@ -608,47 +901,68 @@ class ChatViewModel(
         }
     }
 
-    private fun startRun(t: HermesTarget, text: String, clearDraft: Boolean = true) {
-        val key = pendingKey?.takeIf { it.first == text }?.second ?: newKey()
-        pendingKey = text to key
+    private fun startRun(t: HermesTarget, text: String, input: JsonElement, staged: List<PendingAttachment> = emptyList(), clearDraft: Boolean = true, fromNotification: Boolean = false) {
+        // The idempotency key tracks the send intent: same text + same staged attachments reuse it.
+        val keySeed = if (staged.isEmpty()) text else text + "|" + staged.joinToString(",") { it.key.toString() }
+        val key = pendingKey?.takeIf { it.first == keySeed }?.second ?: newKey()
+        pendingKey = keySeed to key
         check(historyLoaded && pendingTurn == null)
-        val message = ChatMessage(nextId++, MessageKind.User, text)
+        val message = ChatMessage(nextId++, MessageKind.User, text, attachments = staged.map { it.toSent() }, atMillis = System.currentTimeMillis())
         pendingTurn = PendingTurn(Anchor.Known(serverHistory.lastOrNull()?.key), messages = listOf(message))
+        if (clearDraft) keptReplies.clear()
         _state.update {
             it.copy(draft = if (clearDraft) "" else it.draft, terminal = null, terminalFailure = null, finishedRunId = null, run = ActiveRun(null, now(), StatusLabel.Starting)).display()
         }
         val session = sessionId
         chatScope.launch {
-            when (val r = runs.startRun(t, text, session, key)) {
+            when (val r = runs.startRun(t, input, session, key)) {
                 is HermesResult.Ok -> {
                     val id = r.value.runId
                     var applied = false
                     _state.update {
                         applied = it.run != null && it.run.runId == null
-                        if (applied) it.withRun { run -> run.copy(runId = id) } else it
+                        // Drop only the attachments this send carried; a text-only notification reply leaves staged chips.
+                        if (applied) it.withRun { run -> run.copy(runId = id) }
+                            .copy(attachments = it.attachments.filterNot { a -> staged.any { s -> s.key == a.key } }) else it
                     }
                     if (!applied) return@launch
+                    // A kept reply that now started must not stay in the composer to be sent twice.
+                    if (fromNotification && keptReplies.remove(text)) _state.update {
+                        it.copy(draft = if (draftHas(it.draft, text)) dropDraftLine(it.draft, text) else it.draft)
+                    }
                     pendingKey = null
                     persist(id)
                     followJob = chatScope.launch { collectRun(t, id, null) }
                 }
-                is HermesResult.Err -> _state.update {
-                    // Only the run still waiting for its id can fail to start.
-                    if (it.run == null || it.run.runId != null) it
-                    else {
-                        pendingTurn = null
-                        it.copy(run = null, terminalFailure = ChatFailure.Api(r.error), draft = joinDraft(text, it.draft)).fail(ChatFailure.Api(r.error))
+                is HermesResult.Err -> {
+                    var kept = false
+                    _state.update {
+                        // Only the run still waiting for its id can fail to start.
+                        if (it.run == null || it.run.runId != null) it
+                        else {
+                            pendingTurn = null
+                            kept = fromNotification && !draftHas(it.draft, text)
+                            it.copy(run = null, terminalFailure = if (fromNotification) ChatFailure.ReplyKept else ChatFailure.Api(r.error), draft = if (draftHas(it.draft, text)) it.draft else joinDraft(text, it.draft)).fail(ChatFailure.Api(r.error))
+                        }
                     }
+                    if (kept) keptReplies.add(text)
                 }
             }
         }
     }
 
     private fun steer(t: HermesTarget, id: String, text: String) {
+        keptReplies.clear()
         _state.update { it.copy(draft = "") }
         chatScope.launch {
             // One steer at a time, in the order typed; a run that ended while this one waited gets nothing sent.
-            val r = steerLock.withLock { if (isCurrent(id)) runs.steer(t, id, text) else null }
+            val r = steerLock.withLock {
+                if (isCurrent(id)) runs.steer(t, id, text) else null
+            }
+            if (state.value.load != ChatLoad.Ready) {
+                restoreDraft(text, sameRun = false)
+                return@launch
+            }
             when {
                 r == null -> restoreDraft(text, sameRun = false)
                 r is HermesResult.Ok -> updateRun(id) { it.msg(MessageKind.UserSteer, text) }
@@ -903,7 +1217,7 @@ class ChatViewModel(
         val pending = pendingTurn ?: return s
         val id = s.run?.draftId
         return if (id == null) {
-            val message = ChatMessage(nextId++, MessageKind.Assistant, delta)
+            val message = ChatMessage(nextId++, MessageKind.Assistant, delta, atMillis = System.currentTimeMillis())
             pendingTurn = pending.copy(messages = pending.messages + message)
             s.display().withRun { it.copy(draftId = message.id) }
         } else {

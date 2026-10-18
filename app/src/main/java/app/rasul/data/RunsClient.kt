@@ -5,11 +5,13 @@ import app.rasul.bridge.bridgeError
 import app.rasul.bridge.bridgeStreamClient
 import app.rasul.bridge.bridgeStatus
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -42,7 +45,17 @@ class RunStreamException(val error: HermesError) : Exception(error.toString())
 
 /** What the chat needs from the server; the real client is [RunsClient], tests use a fake whose replies can be held. */
 interface RunsApi {
-    suspend fun startRun(target: HermesTarget, input: String, sessionId: String?, idempotencyKey: String? = null): HermesResult<StartedRun>
+    /**
+     * [input] is the finished wire `input` element: a JsonPrimitive holding the typed text, or the
+     * one-message parts list from [runInputElement] when the send carries attachments. The caller
+     * builds it once on a worker thread; the client posts it untouched.
+     */
+    suspend fun startRun(
+        target: HermesTarget,
+        input: JsonElement,
+        sessionId: String?,
+        idempotencyKey: String? = null,
+    ): HermesResult<StartedRun>
     suspend fun status(target: HermesTarget, runId: String): HermesResult<RunStatus>
     suspend fun stop(target: HermesTarget, runId: String): HermesResult<Unit>
     suspend fun steer(target: HermesTarget, runId: String, text: String): HermesResult<Unit>
@@ -71,7 +84,12 @@ class RunsClient(
     private val sseHttp = http.newBuilder().readTimeout(45, TimeUnit.SECONDS).build()
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonType = "application/json".toMediaType()
-    private val selectedModels = MutableStateFlow<Map<String, RunModelSelection>>(emptyMap())
+    private val mutableSelectedModels = MutableStateFlow<Map<String, RunModelSelection>>(emptyMap())
+
+    /** The model picked per chat (session id). With a [usageStore] it is kept on the phone and survives a restart. */
+    val chatModels: StateFlow<Map<String, RunModelSelection>> = mutableSelectedModels
+    private val modelsLoaded = CompletableDeferred<Unit>()
+    private val modelWrites = Channel<Pair<String, RunModelSelection?>>(Channel.UNLIMITED)
     private val pendingSelectionBySession = ConcurrentHashMap<String, PendingRunSelection>()
     private val sessionByRun = ConcurrentHashMap<String, String>()
     private val recordedUsageRuns = ConcurrentHashMap.newKeySet<String>()
@@ -80,7 +98,28 @@ class RunsClient(
     private val usageScope = scope ?: CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
+        if (usageStore == null) modelsLoaded.complete(Unit)
         usageStore?.let { store ->
+            usageScope.launch {
+                try {
+                    val saved = store.chatModels()
+                    mutableSelectedModels.update { saved + it }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // A broken store leaves chats on the server default; picks still work for this app session.
+                } finally {
+                    modelsLoaded.complete(Unit)
+                }
+                for ((session, selection) in modelWrites) {
+                    try {
+                        store.setChatModel(session, selection)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                    }
+                }
+            }
             usageScope.launch {
                 store.runUsageBySession
                     .catch { mutableUsageBySession.value = emptyMap() }
@@ -91,17 +130,25 @@ class RunsClient(
 
     fun selectModelForChat(sessionId: String, selection: RunModelSelection?) {
         require(sessionId.isNotBlank())
-        selectedModels.update { current ->
+        mutableSelectedModels.update { current ->
             if (selection == null) current - sessionId else current + (sessionId to selection)
         }
+        modelWrites.trySend(sessionId to selection)
     }
 
-    fun selectedModelForChat(sessionId: String): RunModelSelection? = selectedModels.value[sessionId]
+    fun selectedModelForChat(sessionId: String): RunModelSelection? = mutableSelectedModels.value[sessionId]
 
     /**
      * POST /v1/runs. [idempotencyKey] goes in `Idempotency-Key`, so a retry after a lost reply returns the same run
-     * (api_server_runs.py:636-642, 470-478). Body `input` (+ `session_id`), reply 202 `{"run_id"}` (api_server_runs.py:650-657, 466-467). */
-    override suspend fun startRun(target: HermesTarget, input: String, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
+     * (api_server_runs.py:636-642, 470-478). Body `input` (+ `session_id`), reply 202 `{"run_id"}` (api_server_runs.py:650-657, 466-467).
+     * [input] is the already-built element (plain string for text-only, parts list with attachments). */
+    override suspend fun startRun(
+        target: HermesTarget,
+        input: JsonElement,
+        sessionId: String?,
+        idempotencyKey: String?,
+    ): HermesResult<StartedRun> {
+        modelsLoaded.await()
         val selectedNow = sessionId?.let(::selectedModelForChat)
         val pendingSelection = if (sessionId != null && idempotencyKey != null) {
             pendingSelectionBySession.compute(sessionId) { _, current ->
@@ -116,6 +163,14 @@ class RunsClient(
             if (selection != null) {
                 put("provider", selection.provider)
                 put("model", selection.model)
+                selection.effort?.let { effort ->
+                    put("model_options", buildJsonObject {
+                        put("reasoning", buildJsonObject {
+                            put("enabled", true)
+                            put("effort", effort)
+                        })
+                    })
+                }
             }
         }
         return when (val r = post(target, "v1/runs", body, idempotencyKey)) {

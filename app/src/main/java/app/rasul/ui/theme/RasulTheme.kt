@@ -14,12 +14,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalInspectionMode
-import app.rasul.R
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -46,6 +44,8 @@ data class RasulColors(
     val badge: Color,
     val onAccent: Color,
     val scrim: Color,
+    val bubbleUser: Color,
+    val bubbleAssistant: Color,
     val avatarCrimson: Color,
     val avatarViolet: Color,
     val avatarTan: Color,
@@ -59,6 +59,7 @@ val LightRasulColors = RasulColors(
     success = Color(0xFF1F9D55), successSoft = Color(0xFFE2F4EA), successText = Color(0xFF14703B),
     danger = Color(0xFFC0243F), dangerSoft = Color(0xFFFCE6EA), dangerText = Color(0xFF8E1B30),
     warn = Color(0xFFD98200), warnText = Color(0xFF8A5200), badge = Color(0xFFF23C3C), onAccent = Color.White, scrim = Color(0x73000000),
+    bubbleUser = Color(0xFFE4E4E8), bubbleAssistant = Color(0xFFF3F3F6),
     avatarCrimson = Color(0xFFB3274A), avatarViolet = Color(0xFF9B7BF5), avatarTan = Color(0xFFC98A54),
     toggleOff = Color(0xFFD0D0D5),
 )
@@ -71,6 +72,7 @@ val DarkRasulColors = RasulColors(
     success = Color(0xFF3CC47A), successSoft = Color(0xFF13301F), successText = Color(0xFF8EE0B1),
     danger = Color(0xFFF0627A), dangerSoft = Color(0xFF3A1820), dangerText = Color(0xFFF7A9B6),
     warn = Color(0xFFF0A63A), warnText = Color(0xFFF0A63A), badge = Color(0xFFF23C3C), onAccent = Color(0xFF0B1B3A), scrim = Color(0x99000000),
+    bubbleUser = Color(0xFF3A3A40), bubbleAssistant = Color(0xFF1E1E22),
     avatarCrimson = Color(0xFFB3274A), avatarViolet = Color(0xFF9B7BF5), avatarTan = Color(0xFFC98A54),
     toggleOff = Color(0xFF45454C),
 )
@@ -78,26 +80,9 @@ val DarkRasulColors = RasulColors(
 val LocalRasulColors = staticCompositionLocalOf { LightRasulColors }
 private val LocalRasulFontFamily = staticCompositionLocalOf<FontFamily> { FontFamily.Default }
 
-internal fun rasulFontFamily(language: String): FontFamily = if (language == "ar") {
-    FontFamily(
-        Font(R.font.ibm_plex_sans_arabic_regular, FontWeight.Normal),
-        Font(R.font.ibm_plex_sans_arabic_medium, FontWeight.Medium),
-        Font(R.font.ibm_plex_sans_arabic_semibold, FontWeight.SemiBold),
-        Font(R.font.ibm_plex_sans_arabic_bold, FontWeight.Bold),
-    )
-} else {
-    FontFamily(
-        Font(R.font.readex_pro_regular, FontWeight.Normal),
-        Font(R.font.readex_pro_medium, FontWeight.Medium),
-        Font(R.font.readex_pro_semibold, FontWeight.SemiBold),
-        Font(R.font.readex_pro_bold, FontWeight.Bold),
-    )
-}
+internal fun rasulFontFamily(language: String): FontFamily = FontFamily.Default
 
-internal val RasulMonoFontFamily = FontFamily(
-    Font(R.font.ibm_plex_mono_regular, FontWeight.Normal),
-    Font(R.font.ibm_plex_mono_medium, FontWeight.Medium),
-)
+internal val RasulMonoFontFamily = FontFamily.Monospace
 
 internal fun rasulTypography(fontFamily: FontFamily): Typography {
     val base = Typography()
@@ -120,7 +105,7 @@ internal fun rasulTypography(fontFamily: FontFamily): Typography {
     )
 }
 
-/** Text styles use the current app locale's Readex Pro or IBM Plex Sans Arabic family. */
+/** Text styles use the phone's system font family. */
 object RasulType {
     private val family: FontFamily @Composable get() = LocalRasulFontFamily.current
     val title: TextStyle @Composable get() = TextStyle(fontSize = 34.sp, fontWeight = FontWeight.Bold, fontFamily = family)
@@ -130,6 +115,7 @@ object RasulType {
     val rowTitle: TextStyle @Composable get() = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold, fontFamily = family)
     val rowSub: TextStyle @Composable get() = TextStyle(fontSize = 14.sp, lineHeight = 19.sp, fontFamily = family)
     val body: TextStyle @Composable get() = TextStyle(fontSize = 15.sp, lineHeight = 21.sp, fontFamily = family)
+    val chatBody: TextStyle @Composable get() = TextStyle(fontSize = 17.sp, lineHeight = 25.sp, fontFamily = family)
     val bodySmall: TextStyle @Composable get() = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontFamily = family)
     val meta: TextStyle @Composable get() = TextStyle(fontSize = 13.sp, fontFamily = family)
     val sectionLabel: TextStyle @Composable get() = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = family)
@@ -144,6 +130,8 @@ object RasulType {
 }
 
 object RasulShapes {
+    val bubble = RoundedCornerShape(24.dp)
+    val composer = RoundedCornerShape(28.dp)
     val glassPill = RoundedCornerShape(20.dp)
     val tabBar = RoundedCornerShape(30.dp)
     val tabSelected = RoundedCornerShape(24.dp)

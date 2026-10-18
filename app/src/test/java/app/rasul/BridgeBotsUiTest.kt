@@ -15,6 +15,8 @@ import app.rasul.settings.MoreScreen
 import app.rasul.ui.*
 import app.rasul.ui.theme.RasulTheme
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collect
 import androidx.navigation.compose.composable
 import androidx.compose.runtime.mutableStateOf
 import org.junit.Assert.assertEquals
@@ -289,7 +291,7 @@ class BridgeBotsUiTest {
             RasulTheme(false) {
                 SearchScreen(ConnectionsState.Loaded(listOf(Connection("one", "deploy", "", null))),
                     BridgeBotsState(loaded = true), app.rasul.data.Load.NoConnection, app.rasul.data.Load.NoConnection,
-                    {}, { _, _ -> }, {}, {})
+                    {}, { _, _, _ -> }, {}, {})
             }
         }
         compose.onNode(hasSetTextAction()).performTextInput("deploy")
@@ -324,7 +326,7 @@ class BridgeBotsUiTest {
             RasulTheme(false) {
                 SearchScreen(ConnectionsState.Loaded(emptyList()), BridgeBotsState(loaded = true),
                     app.rasul.data.Load.NoConnection, app.rasul.data.Load.Failed(HermesError.Server(503)),
-                    {}, { _, _ -> }, {}, {}, initialQuery = "deploy")
+                    {}, { _, _, _ -> }, {}, {}, initialQuery = "deploy")
             }
         }
         compose.onNodeWithText("No results for “deploy”").assertExists()
@@ -475,4 +477,100 @@ class BridgeBotsUiTest {
         compose.onNodeWithText("This device no longer has access. Remove the bridge and pair again.").assertExists()
         compose.onNodeWithText("default").assertHasNoClickAction()
     }
+    private fun withTranscriptNavigation(sessionSource: String,
+        check: (AppContainer, app.rasul.data.ConnectionStore, CoroutineScope, androidx.navigation.NavHostController) -> Unit) {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val pickerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val container = AppContainer(context, appScope = appScope)
+        val snapshots = MutableStateFlow(androidx.datastore.preferences.core.emptyPreferences())
+        val ds = object : androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
+            override val data = snapshots
+            override suspend fun updateData(transform: suspend (androidx.datastore.preferences.core.Preferences) -> androidx.datastore.preferences.core.Preferences): androidx.datastore.preferences.core.Preferences {
+                snapshots.value = transform(snapshots.value)
+                return snapshots.value
+            }
+        }
+        val store = app.rasul.data.ConnectionStore(ds, object : SecretCipher {
+            override fun encrypt(plain: String) = plain
+            override fun decrypt(token: String) = token
+        })
+        runBlocking { store.save(Connection("a", "Bot", "https://example.invalid"), "sample") }
+        val session = app.rasul.sessions.SessionDto("session-a", "Sample session", source = sessionSource)
+        val sessionList = kotlinx.serialization.json.Json.encodeToString(app.rasul.sessions.SessionListDto.serializer(),
+            app.rasul.sessions.SessionListDto(listOf(session)))
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            val body = if (chain.request().url.encodedPath.endsWith("/api/sessions")) sessionList else "{\"data\":[]}"
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("sample").body(body.toResponseBody()).build()
+        }.build()
+        val pcs = ActivePcHolder(store, pickerScope)
+        container.javaClass.getDeclaredField("connections").apply { isAccessible = true }.set(container, store)
+        container.javaClass.getDeclaredField("activePc").apply { isAccessible = true }.set(container, pcs)
+        container.javaClass.getDeclaredField("sessions").apply { isAccessible = true }
+            .set(container, app.rasul.sessions.SessionsClient(app.rasul.data.HermesClient(http)))
+        container.javaClass.getDeclaredField("runWatcher").apply { isAccessible = true }
+            .set(container, app.rasul.notifications.RunWatcher(container, context, appScope))
+        lateinit var nav: androidx.navigation.NavHostController
+        try {
+            compose.setContent {
+                nav = androidx.navigation.compose.rememberNavController()
+                RasulTheme(false) { RasulNav(container, false, false, {}, { _, cancel -> cancel() }, nav) }
+            }
+            compose.runOnIdle { nav.navigate("sessions") }
+            compose.waitUntil(10_000) { compose.onAllNodesWithText("Sample session").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Sample session").performClick()
+            lateinit var vm: app.rasul.sessions.TranscriptViewModel
+            compose.runOnIdle { vm = androidx.lifecycle.ViewModelProvider(nav.currentBackStackEntry!!)[app.rasul.sessions.TranscriptViewModel::class.java] }
+            val settled = CompletableDeferred<Unit>()
+            val collector = CoroutineScope(Dispatchers.Default).launch {
+                vm.state.collect { if (it !is app.rasul.data.Load.Loading) settled.complete(Unit) }
+            }
+            try {
+                compose.waitUntil(10_000) {
+                    compose.onRoot().fetchSemanticsNode()
+                    settled.isCompleted
+                }
+                runBlocking { settled.await() }
+                assertTrue("Transcript state: ${vm.state.value}", vm.state.value is app.rasul.data.Load.Ready)
+            } finally { collector.cancel() }
+            compose.onNodeWithText("This session has no messages.").assertExists()
+            check(container, store, pickerScope, nav)
+        } finally {
+            pickerScope.cancel(); appScope.cancel()
+            http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
+        }
+    }
+
+    @Test fun cronSessionSourceHidesContinueThroughNavigation() {
+        withTranscriptNavigation("cron") { _, _, _, nav ->
+            compose.runOnIdle { assertEquals("cron", nav.currentBackStackEntry?.arguments?.getString("sessionSource")) }
+            compose.onNodeWithText("Continue in chat").assertDoesNotExist()
+        }
+    }
+
+    @Test fun continueThroughNavigationSelectsPointerAndUsesPlainRoute() {
+        withTranscriptNavigation("api_server") { _, store, _, nav ->
+            compose.onNodeWithText("Continue in chat").performClick()
+            compose.waitUntil(10_000) { nav.currentDestination?.route?.startsWith("chat/") == true }
+            compose.runOnIdle {
+                assertNull(nav.currentBackStackEntry?.arguments?.getString("session"))
+                assertNull(nav.currentBackStackEntry?.arguments?.getString("source"))
+                assertEquals("a", nav.currentBackStackEntry?.arguments?.getString("id"))
+            }
+            assertEquals("session-a", runBlocking { store.currentSessionId("a", null) })
+        }
+    }
+
+    @Test fun continueThroughNavigationRefusesEditDespiteStalePickerHint() {
+        withTranscriptNavigation("api_server") { _, store, pickerScope, nav ->
+            pickerScope.cancel()
+            runBlocking { store.save(Connection("a", "Bot", "https://example.invalid/changed"), null) }
+            compose.onNodeWithText("Continue in chat").performClick()
+            compose.onNodeWithText("The connection changed since this item was loaded, so your request was not sent.").assertExists()
+            compose.runOnIdle { assertTrue(nav.currentDestination?.route?.startsWith("transcript/") == true) }
+            assertNull(runBlocking { store.currentSessionId("a", null) })
+        }
+    }
+
 }

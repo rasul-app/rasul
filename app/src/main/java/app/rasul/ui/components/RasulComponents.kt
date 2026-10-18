@@ -29,8 +29,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -38,6 +40,7 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
@@ -242,8 +245,8 @@ fun RasulRow(
 }
 
 @Composable
-fun RowTitle(text: String, color: Color = Rasul.colors.ink) =
-    Text(text, style = RasulType.rowTitle, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
+fun RowTitle(text: String, color: Color = Rasul.colors.ink, maxLines: Int = 1) =
+    Text(text, style = RasulType.rowTitle, color = color, maxLines = maxLines, overflow = TextOverflow.Ellipsis)
 
 @Composable
 fun RowSub(text: String, color: Color = Rasul.colors.muted, maxLines: Int = 2) =
@@ -484,17 +487,28 @@ fun ConfirmDialog(
     actionPadding: Dp = 10.dp,
     confirmTextStyle: TextStyle? = null,
     decoration: @Composable () -> Unit = {},
+    content: (@Composable () -> Unit)? = null,
 ) {
     val c = Rasul.colors
     Dialog(onDismissRequest = onCancel) {
         decoration()
         app.rasul.WindowHapticFeedbackProvider {
             Column(
-                Modifier.fillMaxWidth().background(c.bg, RasulShapes.dialog).padding(contentPadding),
+                Modifier.fillMaxWidth()
+                    // Tall content must never push the actions off screen: the dialog caps at
+                    // 90% of the window and the content block scrolls inside the rest.
+                    .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.9f).dp)
+                    .background(c.bg, RasulShapes.dialog).padding(contentPadding),
                 verticalArrangement = Arrangement.spacedBy(spacing),
             ) {
                 Text(title, style = RasulType.dialogTitle, color = c.ink)
                 Text(body, style = RasulType.body, color = c.muted)
+                if (content != null) {
+                    Column(
+                        Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(spacing),
+                    ) { content() }
+                }
                 Row(Modifier.fillMaxWidth().padding(top = actionPadding), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Box(
                         Modifier.weight(1f).heightIn(min = 48.dp).clip(RasulShapes.dialog).background(c.fill)

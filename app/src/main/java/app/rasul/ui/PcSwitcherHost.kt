@@ -43,6 +43,7 @@ import app.rasul.bridge.BridgeBotsRepository
 import app.rasul.bridge.BridgeGroup
 import app.rasul.bridge.BridgeSelection
 import app.rasul.bridge.bridgeBotId
+import app.rasul.bridge.bridgeTargetName
 import app.rasul.data.HermesResult
 import app.rasul.data.Load
 import app.rasul.data.activeTarget
@@ -134,7 +135,7 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
                         Triple(s, bots, selected)
                     }.collect { (s, bots, savedSelection) ->
                     val choices = bots.groups.flatMap { group -> group.profiles.map { profile ->
-                        Connection(bridgeBotId(group.id, profile.id), group.name + " · " + profile.displayName, "", profile.id)
+                        Connection(bridgeBotId(group.id, profile.id), bridgeTargetName(group, profile.id), "", profile.id)
                     } }
                     val selection = savedSelection
                     val directActive = s.target !is ActiveTarget.None
@@ -152,12 +153,11 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
                         picks.trySend(PickRequest.Bridge(defaultPick))
                     }
                     val selectedGroup = effectiveSelection?.let { picked -> bots.groups.firstOrNull { it.id == picked.bridgeId } }
-                    val selectedProfile = effectiveSelection?.let { picked -> selectedGroup?.profiles?.firstOrNull { it.id == picked.profileId } }
                     val selectedId = effectiveSelection?.let { bridgeBotId(it.bridgeId, it.profileId) }
                     val target = if (effectiveSelection == null) s.target else when (val result = bridges.target(effectiveSelection.bridgeId, effectiveSelection.profileId)) {
                         is HermesResult.Ok -> ActiveTarget.Ready(
                             selectedId.orEmpty(),
-                            selectedGroup?.name.orEmpty() + " · " + (selectedProfile?.displayName ?: effectiveSelection.profileId),
+                            bridgeTargetName(selectedGroup, effectiveSelection.profileId),
                             result.value,
                         )
                         is HermesResult.Err -> ActiveTarget.Failed(result.error)
@@ -191,8 +191,7 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
                     val missingSelection = effectiveSelection?.let { picked ->
                         val id = bridgeBotId(picked.bridgeId, picked.profileId)
                         if (choices.any { it.id == id }) null else {
-                            val name = listOfNotNull(selectedGroup?.name, selectedProfile?.displayName ?: picked.profileId).joinToString(" · ")
-                            Connection(id, name, "", picked.profileId)
+                            Connection(id, bridgeTargetName(selectedGroup, picked.profileId), "", picked.profileId)
                         }
                     }
                     _state.update {
@@ -236,9 +235,8 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
             }
             ?: return store.activeTarget()
         val group = repository.state.value.groups.firstOrNull { it.id == selected.bridgeId } ?: return ActiveTarget.None
-        val profile = group.profiles.firstOrNull { it.id == selected.profileId }
         return when (val result = repository.target(selected.bridgeId, selected.profileId)) {
-            is HermesResult.Ok -> ActiveTarget.Ready(bridgeBotId(selected.bridgeId, selected.profileId), group.name + " · " + (profile?.displayName ?: selected.profileId), result.value)
+            is HermesResult.Ok -> ActiveTarget.Ready(bridgeBotId(selected.bridgeId, selected.profileId), bridgeTargetName(group, selected.profileId), result.value)
             is HermesResult.Err -> ActiveTarget.Failed(result.error)
         }
     }

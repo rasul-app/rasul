@@ -67,11 +67,13 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
             val screen = method.removeSuffix("Ar").removeSuffix("En")
             val n = when {
                 screen == "ChatIdle" -> 10
+                screen == "VoiceListening" -> 56
                 screen == "ChatThinking" -> 25
                 screen == "ChatTool" -> 26
                 screen == "ChatApproval" -> 27
                 screen == "ChatLost" -> 28
                 screen == "ChatHistoryError" -> 29
+                screen == "ChatFork" -> 57
                 screen == "Lock" -> 11
                 screen == "LockSetting" -> 12
                 screen == "ScanPermission" -> 13
@@ -106,6 +108,12 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
                 screen == "JobForm" -> 47
                 screen == "JobDelete" -> 48
                 screen == "SessionRename" -> 49
+                screen == "RunHistory" -> 50
+                screen == "Usage" -> 51
+                screen == "SkillsDesktop" -> 52
+                screen == "SkillToggleConfirm" -> 53
+                screen == "SkillInstallConfirm" -> 54
+                screen == "MoreAlerts" -> 55
                 else -> order.indexOf(screen).let { if (it < 0) order.size else it } + 1
             }
             val suffix = if (dark) "-dark" else ""
@@ -115,7 +123,7 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
         @JvmStatic
         @Parameters(name = "{0}, dark={1}")
         fun previews(): List<Array<Any>> =
-            allPreviews().filterNot { it.methodName.startsWith("PlusMenu") }.flatMap {
+            allPreviews().filterNot { it.methodName.startsWith("PlusMenu") || it.methodName.startsWith("VoiceListening") }.flatMap {
                 listOf(arrayOf(it, false), arrayOf(it, true))
             }
 

@@ -6,6 +6,7 @@ import app.rasul.sessions.SessionsClient
 import app.rasul.jobs.JobsClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.*
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
@@ -82,7 +83,7 @@ class BridgeRoutingTest {
         val target = HermesTarget("", null, "", BridgeEndpoint(http, "default"))
         assertSame(http, target.bridge!!.client)
         val runs = RunsClient(unused)
-        assertTrue(runs.startRun(target, "", null) is HermesResult.Ok)
+        assertTrue(runs.startRun(target, JsonPrimitive("continue"), "session-one") is HermesResult.Ok)
         assertTrue(runs.status(target, "one") is HermesResult.Ok)
         assertTrue(runs.stop(target, "one") is HermesResult.Ok)
         assertTrue(runs.steer(target, "one", "") is HermesResult.Ok)
@@ -113,7 +114,7 @@ class BridgeRoutingTest {
             }.build()
             val target = HermesTarget("", null, "", BridgeEndpoint(http, "default"))
             assertEquals(error, (HermesClient().health(target) as HermesResult.Err).error)
-            assertEquals(error, (RunsClient().startRun(target, "", null) as HermesResult.Err).error)
+            assertEquals(error, (RunsClient().startRun(target, JsonPrimitive(""), null) as HermesResult.Err).error)
             assertEquals(error, (RunsClient().status(target, "one") as HermesResult.Err).error)
             try { withTimeout(5000) { RunsClient().events(target, "one").first() }; fail("expected stream error") }
             catch (e: RunStreamException) { assertEquals(error, e.error) }

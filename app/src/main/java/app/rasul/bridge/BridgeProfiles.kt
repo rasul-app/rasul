@@ -3,6 +3,8 @@ package app.rasul.bridge
 import app.rasul.data.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -108,18 +110,30 @@ class BridgeBotsRepository(
     private val mutable = MutableStateFlow(BridgeBotsState())
     val state: StateFlow<BridgeBotsState> = mutable
     val activeSelection: Flow<BridgeSelection?> = store.activeSelection
+    private val retries = MutableStateFlow(0L)
     suspend fun setActiveSelection(selection: BridgeSelection?) = store.setActiveSelection(selection)
+
+    /** Restarts every profile stream now (the approvals screen's Retry uses it after a dead one). */
+    fun retry() { retries.update { it + 1 } }
 
     suspend fun forget(bridge: SavedBridge) {
         mutable.update { state -> state.copy(groups = state.groups.filterNot { it.id == bridge.bridgeId }) }
         clients.forget(bridge)
     }
 
-    /** Called only by the visible, resumed Bots destination. Cancellation closes every SSE read. */
-    suspend fun follow(): Unit = try {
-        store.bridges.distinctUntilChanged { old, new ->
-            old.map { it.copy(lastWorkingUrl = null) } == new.map { it.copy(lastWorkingUrl = null) }
-        }.collectLatest { bridges ->
+    /** The UI follower (RESUMED) and the alerts service share one follower; the second caller waits. */
+    private val followMutex = Mutex()
+
+    /** Cancellation closes every SSE read. */
+    suspend fun follow(): Unit = followMutex.withLock { followOnce() }
+
+    private suspend fun followOnce(): Unit = try {
+        combine(
+            store.bridges.distinctUntilChanged { old, new ->
+                old.map { it.copy(lastWorkingUrl = null) } == new.map { it.copy(lastWorkingUrl = null) }
+            },
+            retries,
+        ) { bridges, _ -> bridges }.collectLatest { bridges ->
             val cached = mutable.value.groups.associateBy { it.id }
             mutable.value = BridgeBotsState(bridges.map { bridge ->
                 cached[bridge.bridgeId]?.copy(name = bridge.name, loading = true)
@@ -154,8 +168,12 @@ class BridgeBotsRepository(
         val profile = group.profiles.firstOrNull { it.id == profileId }
             ?: return HermesResult.Err(HermesError.ProfileUnknown(profileId))
         if (!profile.ready) return HermesResult.Err(HermesError.ProfileNotReady)
-        return HermesResult.Ok(HermesTarget("", null, "", BridgeEndpoint(clients.client(bridge).client, profileId)))
+        return HermesResult.Ok(HermesTarget("", null, "", BridgeEndpoint(clients.client(bridge).client, profileId), revision = bridge.keyAlias.ifEmpty { "0" }))
     }
 }
 
 fun bridgeBotId(bridgeId: String, profileId: String) = "bridge:$bridgeId:$profileId"
+
+/** The one bridge-bot name: picker rows, target snapshots and continuation checks all build it here. */
+fun bridgeTargetName(group: BridgeGroup?, profileId: String) =
+    listOfNotNull(group?.name, group?.profiles?.firstOrNull { it.id == profileId }?.displayName ?: profileId).joinToString(" · ")

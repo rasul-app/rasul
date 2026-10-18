@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -63,8 +64,15 @@ import app.rasul.sessions.TranscriptViewModel
 import app.rasul.settings.MoreScreen
 import app.rasul.settings.AppPreferences
 import app.rasul.settings.PrivacyScreen
+import app.rasul.bridge.ApprovalsBanner
+import app.rasul.bridge.ApprovalsError
+import app.rasul.bridge.ApprovalsException
+import app.rasul.bridge.ApprovalsScreen
+import app.rasul.bridge.ApprovalsViewModel
 import app.rasul.bridge.BridgeBotsState
+import app.rasul.bridge.approvalsBannerData
 import app.rasul.bridge.bridgeBotId
+import app.rasul.bridge.nextApprovalExpiryDelayMs
 import app.rasul.chat.ChatScreen
 import app.rasul.chat.ChatViewModel
 import app.rasul.chat.TargetLoader
@@ -77,7 +85,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import app.rasul.bridge.bridgeTargetLoader
 import app.rasul.bridge.bridgeRunMemory
+import app.rasul.bridge.desktopApi
+import app.rasul.desktop.RunHistoryScreen
+import app.rasul.desktop.RunHistoryViewModel
+import app.rasul.desktop.UsageScreen
+import app.rasul.desktop.UsageViewModel
+import app.rasul.skills.HermesSkillsHostApi
 import app.rasul.skills.SkillsToolsScreen
+import app.rasul.skills.SkillsToolsViewModel
 import app.rasul.ui.components.RasulIcons
 import app.rasul.ui.components.RasulTab
 import app.rasul.ui.components.RasulTabBar
@@ -93,6 +108,7 @@ import app.rasul.ui.components.ScreenHeader
 import app.rasul.ui.LoadView
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 
 private const val BOTS = "bots"
@@ -104,8 +120,10 @@ private const val PRIVACY = "privacy"
 private const val HELP_URL = "https://github.com/rasul-app/rasul#readme"
 private const val FEEDBACK_URL = "https://github.com/rasul-app/rasul/issues/new"
 private const val SKILLS_TOOLS = "skills-tools"
+private const val USAGE = "usage"
+private const val RUN_HISTORY = "job-runs/{id}?src={src}&name={name}&bridge={bridge}&profile={profile}"
 private const val EDIT = "edit?id={id}"
-private const val TRANSCRIPT = "transcript/{id}?src={src}"
+private const val TRANSCRIPT = "transcript/{id}?src={src}&sessionSource={sessionSource}"
 
 private data class SettingsWrite(val message: Int, val save: suspend () -> Unit)
 
@@ -117,10 +135,11 @@ private val TABS = listOf(
     Tab(JOBS, R.string.tab_jobs, RasulIcons.Calendar),
     Tab(MORE, R.string.tab_more, RasulIcons.Dots),
 )
-private const val CHAT = "chat/{id}?run_profile={run_profile}&newSession={newSession}&session={session}"
-private const val BRIDGE_CHAT = "bridge-chat/{bridge}/{profile}?newSession={newSession}&session={session}"
+private const val CHAT = "chat/{id}?run_profile={run_profile}&newSession={newSession}&session={session}&rev={rev}"
+private const val BRIDGE_CHAT = "bridge-chat/{bridge}/{profile}?newSession={newSession}&session={session}&rev={rev}"
 private const val BRIDGE_DETAIL = "bridge-detail/{id}"
 private const val INSTRUCTIONS = "instructions?bridge={bridge}&profile={profile}&name={name}"
+private const val APPROVALS = "approvals/{bridge}/{profile}"
 
 @Composable
 fun RasulNav(
@@ -139,6 +158,9 @@ fun RasulNav(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle, container.bridgeBots) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { container.bridgeBots.follow() }
+    }
+    LaunchedEffect(lifecycle, container.approvals) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { container.approvals.follow() }
     }
     val context = LocalContext.current
     var unavailableExternalAddress by remember { mutableStateOf<String?>(null) }
@@ -174,10 +196,19 @@ fun RasulNav(
             }
         },
     ) { outer ->
-        NavHost(
-            nav, startDestination = BOTS,
-            modifier = Modifier.padding(outer).consumeWindowInsets(outer).imePadding(),
-        ) {
+        val approvalFeeds by container.approvals.state.collectAsState()
+        val approvalBots by container.bridgeBots.state.collectAsState()
+        val banner = approvalsBannerData(approvalFeeds, approvalBots, approvalsNowSec(approvalFeeds))
+        Column(Modifier.padding(outer).consumeWindowInsets(outer)) {
+            if (banner != null && route?.startsWith("approvals/") != true) {
+                ApprovalsBanner(
+                    pluralStringResource(R.plurals.approvals_waiting, banner.count, banner.count, banner.botName),
+                ) { nav.navigate("approvals/" + Uri.encode(banner.bridgeId) + "/" + Uri.encode(banner.profileId)) }
+            }
+            NavHost(
+                nav, startDestination = BOTS,
+                modifier = Modifier.weight(1f).imePadding(),
+            ) {
             composable("bridges") {
                 app.rasul.bridge.SavedBridgesScreen(container.bridges, container.bridgeBots,
                     onScan = { nav.navigate("pair-guide") }, onDirect = { nav.navigate("edit") }, onClose = { nav.popBackStack() })
@@ -240,9 +271,10 @@ fun RasulNav(
                 ActionPickerHost(connections, bridgeState, picker.activeId, nav, container.activePc::selectBridge) { onNewChat, onNewBot ->
                     SessionsScreen(
                         vm,
-                        onOpen = { id, source ->
+                        onOpen = { session, source ->
                             val token = container.transcriptSources.put(source)
-                            nav.navigate("transcript/" + Uri.encode(id) + "?src=" + Uri.encode(token))
+                            nav.navigate("transcript/" + Uri.encode(session.id) + "?src=" + Uri.encode(token) +
+                                "&sessionSource=" + Uri.encode(session.source.orEmpty()))
                         },
                         onPairPc = { nav.navigate("pair-guide") },
                         onSearch = { nav.navigate(SEARCH) },
@@ -256,23 +288,56 @@ fun RasulNav(
                 arguments = listOf(
                     navArgument("id") { type = NavType.StringType },
                     navArgument("src") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("sessionSource") { type = NavType.StringType; nullable = true; defaultValue = null },
                 ),
             ) { entry ->
                 val id = entry.arguments?.getString("id").orEmpty()
-                val source = container.transcriptSources.get(entry.arguments?.getString("src").orEmpty())
+                val sourceToken = entry.arguments?.getString("src").orEmpty()
+                val source = container.transcriptSources.get(sourceToken)
+                val sessionSource = entry.arguments?.getString("sessionSource")
+                val picker by container.activePc.state.collectAsState()
+                val continueScope = androidx.compose.runtime.rememberCoroutineScope()
                 val vm: TranscriptViewModel = viewModel(
                     factory = viewModelFactory {
-                        initializer { TranscriptViewModel(container.connections, container.sessions, id, source, container.activePc::currentTarget) }
+                        initializer { TranscriptViewModel(container.connections, container.sessions, id, source, container.activePc::currentTarget, sessionSource, container.runWatcher::busySession) }
                     },
                 )
-                TranscriptScreen(vm, onBack = { nav.popBackStack() })
+                TranscriptScreen(
+                    vm,
+                    onBack = { nav.popBackStack() },
+                    connectionUnchanged = picker.target == source,
+                    onContinue = {
+                        val selected = source?.takeIf { picker.target == it }
+                        if (selected != null) continueScope.launch {
+                            if (vm.continueSession()) nav.navigate(continueChatRoute(selected))
+                        }
+                    },
+                )
             }
             composable(JOBS) {
                 val vm: JobsViewModel = viewModel(
                     viewModelStoreOwner = sharedOwner,
                     factory = viewModelFactory { initializer { JobsViewModel(container.connections, container.activePc, container.jobs) } },
                 )
-                JobsScreen(vm, onPairPc = { nav.navigate("pair-guide") }, onSearch = { nav.navigate(SEARCH) })
+                JobsScreen(
+                    vm, onPairPc = { nav.navigate("pair-guide") }, onSearch = { nav.navigate(SEARCH) },
+                    onOpenHistory = { source, job ->
+                        val token = container.transcriptSources.put(source)
+                        // Stable, secret-free identity so the target survives process death: saved bridge id
+                        // + bridge profile id, looked up from the same bot id the job list was read on.
+                        val restore = container.bridgeBots.state.value.groups.firstNotNullOfOrNull { group ->
+                            group.profiles.firstOrNull { bridgeBotId(group.id, it.id) == source.id }
+                                ?.let { group.id to it.id }
+                        }
+                        nav.navigate(
+                            "job-runs/" + Uri.encode(job.id) + "?src=" + Uri.encode(token) +
+                                "&name=" + Uri.encode(job.name?.takeIf { it.isNotBlank() } ?: job.id) +
+                                (restore?.let { (bridge, profile) ->
+                                    "&bridge=" + Uri.encode(bridge) + "&profile=" + Uri.encode(profile)
+                                } ?: ""),
+                        )
+                    },
+                )
             }
             composable(MORE) {
                 val pcState by container.activePc.state.collectAsState()
@@ -296,16 +361,58 @@ fun RasulNav(
                     onHapticsChanged = { enabled ->
                         saveSettings(SettingsWrite(R.string.settings_haptics_write_error) { container.settings.setHapticsEnabled(enabled) })
                     },
+                    approvalAlertsEnabled = preferences.approvalAlerts,
+                    onApprovalAlertsChanged = { enabled ->
+                        saveSettings(SettingsWrite(R.string.approval_alerts_write_error) {
+                            container.settings.setApprovalAlerts(enabled)
+                            container.approvalAlerts.sync()
+                        })
+                    },
                     onHelp = { launchExternal(context, HELP_URL) { unavailableExternalAddress = it } },
                     onPrivacy = { nav.navigate(PRIVACY) },
                     onFeedback = { launchExternal(context, FEEDBACK_URL) { unavailableExternalAddress = it } },
                     client = container.client,
                     onSkillsTools = { nav.navigate(SKILLS_TOOLS) },
+                    onUsage = { nav.navigate(USAGE) },
                 )
             }
             composable(SKILLS_TOOLS) {
                 val picker by container.activePc.state.collectAsState()
                 SkillsToolsDestination(picker, container, onBack = { nav.popBackStack() })
+            }
+            composable(USAGE) {
+                val picker by container.activePc.state.collectAsState()
+                UsageDestination(picker, container, onBack = { nav.popBackStack() })
+            }
+            composable(
+                RUN_HISTORY,
+                arguments = listOf(
+                    navArgument("id") { type = NavType.StringType },
+                    navArgument("src") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("name") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("bridge") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("profile") { type = NavType.StringType; defaultValue = "" },
+                ),
+            ) { entry ->
+                val id = entry.arguments?.getString("id").orEmpty()
+                val source = container.transcriptSources.get(entry.arguments?.getString("src").orEmpty())
+                val bridgeId = entry.arguments?.getString("bridge").orEmpty()
+                val profileId = entry.arguments?.getString("profile").orEmpty()
+                val name = entry.arguments?.getString("name").orEmpty().ifBlank { id }
+                // Same process: the handed-off connection. After process death: resolve the route's saved
+                // bridge + profile ids from the stores (a removed bridge yields the no-longer-saved state).
+                val service: (suspend () -> app.rasul.bridge.DesktopApi?)? =
+                    source?.target?.desktopApi()?.let { api -> { api } }
+                        ?: if (bridgeId.isNotEmpty() && profileId.isNotEmpty()) {
+                            app.rasul.desktop.runHistoryService(container.bridges, container.bridgeClients, bridgeId, profileId)
+                        } else null
+                val vm: RunHistoryViewModel = viewModel(
+                    key = "job-runs-" + id + "-" + bridgeId + "-" + profileId,
+                    factory = viewModelFactory {
+                        initializer { RunHistoryViewModel(id, service) }
+                    },
+                )
+                RunHistoryScreen(vm, name, onBack = { nav.popBackStack() })
             }
             composable(SEARCH) { SearchDestination(container, nav, sharedOwner) }
             composable(PRIVACY) { PrivacyScreen(onBack = { nav.popBackStack() }) }
@@ -331,15 +438,51 @@ fun RasulNav(
                 })
                 app.rasul.bridge.InstructionsScreen(vm, name, onBack = { nav.popBackStack() })
             }
+            composable(APPROVALS, arguments = listOf(
+                navArgument("bridge") { type = NavType.StringType },
+                navArgument("profile") { type = NavType.StringType },
+            )) { entry ->
+                val bridge = entry.arguments?.getString("bridge").orEmpty()
+                val profile = entry.arguments?.getString("profile").orEmpty()
+                // Visible only while the screen is STARTED: stopping the activity (Home) clears it, so a
+                // new approval for this bot is alerted instead of silently suppressed.
+                androidx.lifecycle.compose.LifecycleStartEffect(bridge, profile) {
+                    val bot = bridgeBotId(bridge, profile)
+                    container.approvalsVisible.value = bot
+                    onStopOrDispose { container.approvalsVisible.compareAndSet(bot, null) }
+                }
+                val bots by container.bridgeBots.state.collectAsState()
+                val name = bots.groups.firstOrNull { it.id == bridge }?.profiles
+                    ?.firstOrNull { it.id == profile }?.displayName.orEmpty()
+                val vm: ApprovalsViewModel = viewModel(factory = viewModelFactory {
+                    initializer {
+                        ApprovalsViewModel(
+                            feed = container.approvals.feed(bridge, profile),
+                            service = {
+                                container.approvals.api(bridge, profile)
+                                    ?: throw ApprovalsException(ApprovalsError.BridgeRemoved)
+                            },
+                            refreshFeed = { container.approvals.refresh(bridge, profile) },
+                            bots = container.bridgeBots.state,
+                            bridgeId = bridge,
+                            profileId = profile,
+                            retryDiscovery = { container.bridgeBots.retry() },
+                        )
+                    }
+                })
+                ApprovalsScreen(vm, name, onBack = { nav.popBackStack() })
+            }
             composable(BRIDGE_CHAT, arguments = listOf(
                 navArgument("bridge") { type = NavType.StringType }, navArgument("profile") { type = NavType.StringType },
                 navArgument("newSession") { type = NavType.StringType; nullable = true; defaultValue = null },
                 navArgument("session") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("rev") { type = NavType.StringType; nullable = true; defaultValue = null },
             )) { entry ->
                 val bridge = entry.arguments?.getString("bridge").orEmpty()
                 val profile = entry.arguments?.getString("profile").orEmpty()
                 val newSession = entry.arguments?.getString("newSession")
                 val session = entry.arguments?.getString("session")
+                val revision = entry.arguments?.getString("rev")
                 val bots by container.bridgeBots.state.collectAsState()
                 val group = bots.groups.firstOrNull { it.id == bridge }
                 val name = group?.profiles?.firstOrNull { it.id == profile }?.displayName.orEmpty()
@@ -347,6 +490,7 @@ fun RasulNav(
                     val query = buildList {
                         if (newSession != null) add("newSession=" + Uri.encode(newSession))
                         if (session != null) add("session=" + Uri.encode(session))
+                        if (revision != null) add("rev=" + Uri.encode(revision))
                     }
                     val route = "bridge-chat/" + Uri.encode(bridge) + "/" + Uri.encode(profile) +
                         if (query.isEmpty()) "" else query.joinToString("&", "?")
@@ -362,7 +506,9 @@ fun RasulNav(
                     ChatScreen(vm = model, title = name, onBack = { nav.popBackStack() },
                         runs = container.runs, modelOptionsLoader = optionsLoader,
                         onInstructions = { nav.navigate("instructions?bridge=" + Uri.encode(bridge) + "&profile=" +
-                            Uri.encode(profile) + "&name=" + Uri.encode(name)) })
+                            Uri.encode(profile) + "&name=" + Uri.encode(name)) },
+                        onOpenFork = { forked, rev -> nav.navigate(forkChatRoute(bridge = bridge, profile = profile, session = forked, revision = rev)) },
+                        onApprovals = { nav.navigate("approvals/" + Uri.encode(bridge) + "/" + Uri.encode(profile)) })
                 }
             }
             composable(CHAT, arguments = listOf(
@@ -370,10 +516,12 @@ fun RasulNav(
                 navArgument("run_profile") { type = NavType.StringType; nullable = true; defaultValue = null },
                 navArgument("newSession") { type = NavType.StringType; nullable = true; defaultValue = null },
                 navArgument("session") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("rev") { type = NavType.StringType; nullable = true; defaultValue = null },
             )) { entry ->
                 val id = entry.arguments?.getString("id").orEmpty()
                 val newSession = entry.arguments?.getString("newSession")
                 val session = entry.arguments?.getString("session")
+                val revision = entry.arguments?.getString("rev")
                 val name by produceState("") { value = container.connections.get(id)?.name.orEmpty() }
                 val profile = entry.arguments?.getString("run_profile")
                 val vm by produceState<ChatViewModel?>(null, entry) {
@@ -381,6 +529,7 @@ fun RasulNav(
                         if (profile != null) add("run_profile=" + Uri.encode(profile))
                         if (newSession != null) add("newSession=" + Uri.encode(newSession))
                         if (session != null) add("session=" + Uri.encode(session))
+                        if (revision != null) add("rev=" + Uri.encode(revision))
                     }
                     val route = "chat/" + Uri.encode(id) + if (query.isEmpty()) "" else query.joinToString("&", "?")
                     value = container.runWatcher.resolve(route)
@@ -394,7 +543,8 @@ fun RasulNav(
                     }
                     ChatScreen(vm = model, title = name, onBack = { nav.popBackStack() },
                         runs = container.runs, modelOptionsLoader = optionsLoader,
-                        onInstructions = { nav.navigate("instructions?name=" + Uri.encode(name)) })
+                        onInstructions = { nav.navigate("instructions?name=" + Uri.encode(name)) },
+                        onOpenFork = { forked, rev -> nav.navigate(forkChatRoute(id = id, runProfile = profile, session = forked, revision = rev)) })
                 }
             }
             composable(
@@ -411,6 +561,7 @@ fun RasulNav(
                 )
                 EditConnectionScreen(vm = vm, onClose = { nav.popBackStack() })
             }
+        }
         }
         failedSettingsWrite?.let { write ->
             AlertDialog(
@@ -460,30 +611,85 @@ private fun modelOptionsLoader(
 private fun SkillsToolsDestination(picker: PcPicker, container: AppContainer, onBack: () -> Unit) {
     val target = picker.target as? ActiveTarget.Ready
     if (target != null) {
-        SkillsToolsScreen(target, container.client, onBack)
+        val vm: SkillsToolsViewModel = viewModel(
+            key = "skills-tools-" + target.target.hashCode(),
+            factory = viewModelFactory {
+                initializer {
+                    SkillsToolsViewModel(
+                        target, HermesSkillsHostApi(container.client),
+                        target.target.desktopApi()?.let { api -> { api } },
+                    )
+                }
+            },
+        )
+        SkillsToolsScreen(vm, onBack)
     } else {
-        val load = picker.pendingLoad() ?: when (val current = picker.target) {
-            ActiveTarget.None -> Load.NoConnection
-            is ActiveTarget.Failed -> Load.Failed(current.error)
-            is ActiveTarget.NoKey -> Load.NoKey(current.name)
-            is ActiveTarget.Unreadable -> Load.Failed(HermesError.Storage(current.detail))
-            is ActiveTarget.Ready -> error("handled above")
-        }
-        Column(Modifier.fillMaxSize()) {
-            ScreenHeader(
-                stringResource(R.string.ux3b_skills_tools_title),
-                actions = {
-                    IconButton(onClick = onBack) {
-                        Icon(RasulIcons.Back, contentDescription = stringResource(R.string.back), tint = Rasul.colors.accent)
-                    }
-                },
-            )
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                LoadView(load, container.activePc::retry) {}
-            }
+        TargetLoadFallback(picker, container, R.string.ux3b_skills_tools_title, onBack)
+    }
+}
+
+@Composable
+private fun UsageDestination(picker: PcPicker, container: AppContainer, onBack: () -> Unit) {
+    val target = picker.target as? ActiveTarget.Ready
+    if (target != null) {
+        val vm: UsageViewModel = viewModel(
+            key = "usage-" + target.target.hashCode(),
+            factory = viewModelFactory {
+                initializer {
+                    UsageViewModel(
+                        target.target, container.client::modelOptions,
+                        target.target.desktopApi()?.let { api -> { api } },
+                    )
+                }
+            },
+        )
+        UsageScreen(vm, target.name, onBack)
+    } else {
+        TargetLoadFallback(picker, container, R.string.usage_title, onBack)
+    }
+}
+
+@Composable
+private fun TargetLoadFallback(picker: PcPicker, container: AppContainer, title: Int, onBack: () -> Unit) {
+    val load = picker.pendingLoad() ?: when (val current = picker.target) {
+        ActiveTarget.None -> Load.NoConnection
+        is ActiveTarget.Failed -> Load.Failed(current.error)
+        is ActiveTarget.NoKey -> Load.NoKey(current.name)
+        is ActiveTarget.Unreadable -> Load.Failed(HermesError.Storage(current.detail))
+        is ActiveTarget.Ready -> error("handled above")
+    }
+    Column(Modifier.fillMaxSize()) {
+        ScreenHeader(
+            stringResource(title),
+            actions = {
+                IconButton(onClick = onBack) {
+                    Icon(RasulIcons.Back, contentDescription = stringResource(R.string.back), tint = Rasul.colors.accent)
+                }
+            },
+        )
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            LoadView(load, container.activePc::retry) {}
         }
     }
 }
+/**
+ * Current epoch seconds, re-ticked when the next pending approval expires so banner and badge
+ * counts clear themselves without waiting for another recomposition. Rests while nothing pending.
+ */
+@Composable
+private fun approvalsNowSec(feeds: Map<String, app.rasul.bridge.ApprovalsRepository.Feed>): Long {
+    val now by produceState(System.currentTimeMillis() / 1000, feeds) {
+        while (true) {
+            val t = System.currentTimeMillis() / 1000
+            value = t
+            val wait = nextApprovalExpiryDelayMs(
+                feeds.values.flatMap { it.items }.map { it.expiresAt }, t) ?: return@produceState
+            delay(wait)
+        }
+    }
+    return now
+}
+
 @Composable
 private fun Connections(container: AppContainer, nav: androidx.navigation.NavController, sharedOwner: androidx.lifecycle.ViewModelStoreOwner) {
     val vm: ConnectionsViewModel = viewModel(
@@ -493,10 +699,19 @@ private fun Connections(container: AppContainer, nav: androidx.navigation.NavCon
     val bridges by container.bridgeBots.state.collectAsState()
     val connectionState by vm.state.collectAsState()
     val picker by container.activePc.state.collectAsState()
+    val approvalFeeds by container.approvals.state.collectAsState()
+    val nowSec = approvalsNowSec(approvalFeeds)
+    val pendingApprovals = approvalFeeds.mapNotNull { (key, feed) ->
+        if (feed.unsupported) null else feed.items.count { it.expiresAt > nowSec }.takeIf { it > 0 }?.let { key to it }
+    }.toMap()
     ActionPickerHost(connectionState, bridges, picker.activeId, nav, container.activePc::selectBridge) { onNewChat, onNewBot ->
         ConnectionsScreen(
             vm = vm,
             bridges = bridges,
+            pendingApprovals = pendingApprovals,
+            onApprovals = { bridge, profile ->
+                nav.navigate("approvals/" + Uri.encode(bridge) + "/" + Uri.encode(profile))
+            },
             onBridgeCreate = { nav.navigate("bridge-create/" + Uri.encode(it)) },
             onBridgeOpen = { bridge, profile ->
                 container.activePc.selectBridge(bridge, profile)
@@ -607,9 +822,10 @@ private fun SearchDestination(container: AppContainer, nav: androidx.navigation.
         sessions = sessions,
         jobs = jobs,
         onBack = { nav.popBackStack() },
-        onOpenChat = { id, source ->
+        onOpenChat = { id, source, sessionSource ->
             val token = container.transcriptSources.put(source)
-            nav.navigate("transcript/" + Uri.encode(id) + "?src=" + Uri.encode(token))
+            nav.navigate("transcript/" + Uri.encode(id) + "?src=" + Uri.encode(token) +
+                "&sessionSource=" + Uri.encode(sessionSource.orEmpty()))
         },
         onOpenBot = { choice -> openBotChoice(nav, choice, container.activePc::selectBridge) },
         onOpenJobs = { nav.openJobsFromSearch() },
@@ -633,6 +849,32 @@ internal fun chatRoute(choice: ChatBotChoice, newSession: Boolean = false): Stri
         "chat/" + Uri.encode(choice.id)
     }
     return if (newSession) "$route?newSession=" + Uri.encode("rasul-" + java.util.UUID.randomUUID()) else route
+}
+
+/** The chat route for a forked session: the same bot, bound to [session] at connection [revision]. */
+internal fun forkChatRoute(
+    session: String,
+    revision: String,
+    id: String? = null,
+    runProfile: String? = null,
+    bridge: String? = null,
+    profile: String? = null,
+): String {
+    val tail = "session=" + Uri.encode(session) + "&rev=" + Uri.encode(revision)
+    return if (bridge != null && profile != null) {
+        "bridge-chat/" + Uri.encode(bridge) + "/" + Uri.encode(profile) + "?" + tail
+    } else {
+        "chat/" + Uri.encode(checkNotNull(id)) + "?" + (if (runProfile != null) "run_profile=" + Uri.encode(runProfile) + "&" else "") + tail
+    }
+}
+
+internal fun continueChatRoute(source: ActiveTarget.Ready): String {
+    val bridge = source.target.bridge
+    if (bridge != null) {
+        val bridgeId = source.id.removePrefix("bridge:").substringBeforeLast(":")
+        return "bridge-chat/${Uri.encode(bridgeId)}/${Uri.encode(bridge.profileId)}"
+    }
+    return "chat/${Uri.encode(source.id)}?run_profile=" + Uri.encode(source.target.profile.orEmpty())
 }
 
 internal fun launchExternal(context: Context, address: String, onUnavailable: (String) -> Unit) {
@@ -661,6 +903,4 @@ internal fun bridgeChatTargetLoader(repository: app.rasul.bridge.BridgeBotsRepos
     }
 
 internal fun bridgeSessionMemory(container: AppContainer, bridge: String, profile: String): app.rasul.chat.RunMemory =
-    object : app.rasul.chat.RunMemory by bridgeRunMemory(container.connections, bridge, profile) {
-        override suspend fun currentSessionId() = container.connections.currentSessionId(bridgeBotId(bridge, profile), profile)
-    }
+    bridgeRunMemory(container.connections, bridge, profile)

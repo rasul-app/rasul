@@ -15,6 +15,7 @@ class Limits:
         self.devices = {}
         self.pairs = deque()
         self.instruction_requests = {}
+        self.session_requests = {}
 
     def connect(self):
         if self.connections >= MAX_CONNECTIONS:
@@ -57,3 +58,28 @@ class Limits:
             return False
         times.append(now)
         return True
+
+    def _session_action(self, device, profile, action):
+        now = self.clock()
+        self.session_requests = {
+            key: deque(t for t in times if t > now - 60)
+            for key, times in self.session_requests.items() if times and times[-1] > now - 60
+        }
+        key = (device, profile, action)
+        times = self.session_requests.get(key)
+        if times is None:
+            if len(self.session_requests) >= 256:
+                oldest = min(self.session_requests, key=lambda saved: self.session_requests[saved][-1])
+                del self.session_requests[oldest]
+            times = self.session_requests[key] = deque()
+        limit = 6 if action == "fork" else 20
+        if len(times) >= limit:
+            return False
+        times.append(now)
+        return True
+
+    def fork(self, device, profile):
+        return self._session_action(device, profile, "fork")
+
+    def model(self, device, profile):
+        return self._session_action(device, profile, "model")

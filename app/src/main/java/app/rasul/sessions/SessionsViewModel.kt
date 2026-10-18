@@ -207,6 +207,9 @@ class TranscriptSources {
     fun get(token: String): ActiveTarget.Ready? = byToken[token]
 }
 
+internal fun canContinueSession(source: ActiveTarget.Ready?, sessionSource: String?): Boolean =
+    source != null && !isCronSessionSource(sessionSource)
+
 /**
  * Read-only transcript of one session. [source] is the exact connection the session list came from (id, name,
  * address, profile, key). Any change to it since then -> ConnectionChanged, nothing is requested. A null
@@ -218,12 +221,44 @@ class TranscriptViewModel(
     private val sessionId: String,
     private val source: ActiveTarget.Ready?,
     private val currentTarget: suspend () -> ActiveTarget = { store.activeTarget() },
+    private val sessionSource: String? = null,
+    private val busySession: suspend (connectionId: String, profileId: String?) -> String? = { _, _ -> null },
 ) : ViewModel() {
+    private val _continuing = MutableStateFlow(false)
+    val continuing: StateFlow<Boolean> = _continuing
+    val isCronSession: Boolean get() = isCronSessionSource(sessionSource)
+    val canContinue: Boolean get() = canContinueSession(source, sessionSource)
     private val _state = MutableStateFlow<Load<List<SessionMessageDto>>>(Load.Loading)
     val state: StateFlow<Load<List<SessionMessageDto>>> = _state
     private var job: Job? = null
 
     init { refresh() }
+
+    suspend fun continueSession(): Boolean {
+        val selected = source ?: return false
+        if (!canContinue || state.value !is Load.Ready || _continuing.value) return false
+        val profile = selected.target.bridge?.profileId ?: selected.target.profile
+        _continuing.value = true
+        return try {
+            val busy = busySession(selected.id, profile)
+            if (busy != null && busy != sessionId) {
+                _state.value = Load.Failed(HermesError.ChatBusy)
+                return false
+            }
+            val result = store.continueSession(selected.id, profile, selected.target.revision, sessionId)
+            if (result != ConnectionStore.ContinueResult.Selected) {
+                _state.value = Load.Failed(if (result == ConnectionStore.ContinueResult.Busy) HermesError.ChatBusy else HermesError.ConnectionChanged)
+            }
+            result == ConnectionStore.ContinueResult.Selected
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _state.value = Load.Failed(HermesError.Storage(e.message ?: e.javaClass.simpleName))
+            false
+        } finally {
+            _continuing.value = false
+        }
+    }
 
     fun refresh() {
         job?.cancel()

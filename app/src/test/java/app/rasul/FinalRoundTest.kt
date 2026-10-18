@@ -61,7 +61,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Final round after the Opus audit of R1 (items 1-8): one holder snapshot, ordered picks, source-bound actions. */
+/** Final round of R1 (items 1-8): one holder snapshot, ordered picks, source-bound actions. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class FinalRoundTest {
     @get:Rule val tmp = TemporaryFolder()
@@ -384,8 +384,8 @@ class FinalRoundTest {
         val bridgeSessionKey = stringPreferencesKey("session_${bridgeId}_profile-one")
         runBlocking {
             ds.edit { prefs -> prefs[bridgeSessionKey] = currentSession }
-            store.setActiveRun(directId, null, "direct-run", 7L, "direct-anchor")
-            store.setActiveRun(bridgeId, "profile-one", "bridge-run", 9L, "bridge-anchor")
+            store.setActiveRun(directId, null, currentSession, "direct-run", 7L, "direct-anchor")
+            store.setActiveRun(bridgeId, "profile-one", currentSession, "bridge-run", 9L, "bridge-anchor")
         }
 
         val holder = ActivePcHolder(store, scope())
@@ -398,12 +398,12 @@ class FinalRoundTest {
 
         assertNotEquals(currentSession, runBlocking { store.sessionId(directId, null) })
         assertNotEquals(currentSession, runBlocking { store.sessionId(bridgeId, "profile-one") })
-        assertNull(runBlocking { store.activeRun(directId, null) })
-        assertNull(runBlocking { store.lastEventId(directId, null) })
-        assertNull(runBlocking { store.runAnchor(directId, null) })
-        assertNull(runBlocking { store.activeRun(bridgeId, "profile-one") })
-        assertNull(runBlocking { store.lastEventId(bridgeId, "profile-one") })
-        assertNull(runBlocking { store.runAnchor(bridgeId, "profile-one") })
+        assertNull(runBlocking { store.activeRun(directId, null, currentSession) })
+        assertNull(runBlocking { store.lastEventId(directId, null, currentSession) })
+        assertNull(runBlocking { store.runAnchor(directId, null, currentSession) })
+        assertNull(runBlocking { store.activeRun(bridgeId, "profile-one", currentSession) })
+        assertNull(runBlocking { store.lastEventId(bridgeId, "profile-one", currentSession) })
+        assertNull(runBlocking { store.runAnchor(bridgeId, "profile-one", currentSession) })
     }
 
     @Test fun deletingAnotherSessionLeavesTheCurrentSessionPointerUntouched() {

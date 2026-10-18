@@ -1,9 +1,12 @@
 package app.rasul.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,24 +17,32 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.rasul.R
 import app.rasul.data.HermesError
+import app.rasul.data.ModelCapabilityDto
 import app.rasul.data.ModelOptionsDto
 import app.rasul.data.ModelOptionsProviderDto
 import app.rasul.data.RunModelSelection
 import app.rasul.data.TokenUsageSummary
 import app.rasul.ui.FeatureErrorSurface
 import app.rasul.ui.text
+import app.rasul.ui.components.Hairline
 import app.rasul.ui.components.InsetGroup
 import app.rasul.ui.components.RasulRow
 import app.rasul.ui.components.RasulSheet
@@ -40,6 +51,7 @@ import app.rasul.ui.components.RowTitle
 import app.rasul.ui.components.SectionLabel
 import app.rasul.ui.components.ScreenHeader
 import app.rasul.ui.theme.Rasul
+import app.rasul.ui.theme.RasulShapes
 import app.rasul.ui.theme.RasulTheme
 import app.rasul.ui.theme.RasulType
 
@@ -55,11 +67,21 @@ fun ModelPickerSheet(
     selectedModel: RunModelSelection?,
     onDismiss: () -> Unit,
     onChoose: (RunModelSelection?) -> Unit,
+    onChooseEffort: (String?) -> Unit,
     onRefresh: () -> Unit,
 ) {
     RasulSheet(stringResource(R.string.ux3b_model_picker_title), onDismiss) {
-        ModelPickerContent(state, selectedModel, onChoose, onRefresh)
+        ModelPickerContent(state, selectedModel, onChoose, onChooseEffort, onRefresh)
     }
+}
+
+/** Localized label for a server reasoning rung; unknown/empty -> null (label shows the model alone). */
+@Composable
+internal fun effortText(effort: String?): String? = when (effort) {
+    "low" -> stringResource(R.string.chat_effort_low)
+    "medium" -> stringResource(R.string.chat_effort_medium)
+    "high" -> stringResource(R.string.chat_effort_high)
+    else -> null
 }
 
 @Composable
@@ -67,6 +89,7 @@ internal fun ModelPickerContent(
     state: ModelPickerUiState,
     selectedModel: RunModelSelection?,
     onChoose: (RunModelSelection?) -> Unit,
+    onChooseEffort: (String?) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val isArabic = androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "ar"
@@ -135,18 +158,92 @@ internal fun ModelPickerContent(
                             key = { index, choice -> "${provider.slug}:${choice.model}:$index" },
                         ) { index, choice ->
                             val selection = choice.toRunModelSelection()
-                            RasulRow(
-                                selected = selectedModel == selection,
-                                onClick = { onChoose(selection) },
-                                last = index == providerChoices.lastIndex,
-                                hairlineStart = if (isArabic) 16.dp else 0.dp, hairlineEnd = if (isArabic) 0.dp else 16.dp,
-                                contentPadding = PaddingValues(start = if (isArabic) 16.dp else 0.dp, end = if (isArabic) 0.dp else 16.dp, top = 12.dp, bottom = 12.dp),
-                            ) {
-                                RowTitle(choice.model)
+                            val isSelected = selectedModel?.provider == selection.provider && selectedModel.model == selection.model
+                            val supportsReasoning = provider.capabilities[choice.model]?.reasoning == true
+                            val showEffort = isSelected && supportsReasoning
+                            Column {
+                                RasulRow(
+                                    selected = isSelected,
+                                    onClick = {
+                                        // Carry the picked effort only across models that can reason.
+                                        onChoose(selection.copy(effort = if (supportsReasoning) selectedModel?.effort else null))
+                                    },
+                                    last = index == providerChoices.lastIndex || showEffort,
+                                    hairlineStart = if (isArabic) 16.dp else 0.dp, hairlineEnd = if (isArabic) 0.dp else 16.dp,
+                                    contentPadding = PaddingValues(start = if (isArabic) 16.dp else 0.dp, end = if (isArabic) 0.dp else 16.dp, top = 12.dp, bottom = 12.dp),
+                                ) {
+                                    RowTitle(choice.model)
+                                }
+                                if (showEffort) {
+                                    EffortChips(
+                                        effort = selectedModel?.effort,
+                                        onChooseEffort = onChooseEffort,
+                                        contentPadding = PaddingValues(
+                                            start = if (isArabic) 40.dp else 24.dp,
+                                            end = 16.dp,
+                                            bottom = 12.dp,
+                                        ),
+                                    )
+                                    if (index != providerChoices.lastIndex) {
+                                        Hairline(
+                                            Modifier.padding(
+                                                start = if (isArabic) 16.dp else 0.dp,
+                                                end = if (isArabic) 0.dp else 16.dp,
+                                            ),
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Reasoning rung row under the selected model; server sends no effort = "Auto" (null). */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun EffortChips(
+    effort: String?,
+    onChooseEffort: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(),
+) {
+    val colors = Rasul.colors
+    val options = listOf<String?>(
+        null,
+        "low",
+        "medium",
+        "high",
+    )
+    Column(modifier.fillMaxWidth().padding(contentPadding)) {
+        Text(
+            stringResource(R.string.chat_reasoning_label),
+            style = RasulType.meta,
+            color = colors.muted,
+            modifier = Modifier.padding(bottom = 2.dp),
+        )
+        FlowRow(
+            Modifier.fillMaxWidth().selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            options.forEach { value ->
+                val label = effortText(value) ?: stringResource(R.string.chat_effort_auto)
+                val chosen = effort == value
+                Text(
+                    label,
+                    style = RasulType.chip.copy(fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal),
+                    color = if (chosen) colors.onAccent else colors.ink,
+                    maxLines = 1,
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                        .clip(RasulShapes.chip)
+                        .background(if (chosen) colors.accent else colors.fill)
+                        .selectable(selected = chosen, role = Role.RadioButton) { onChooseEffort(value) }
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                )
             }
         }
     }
@@ -189,7 +286,10 @@ fun TokenUsageDialog(summary: TokenUsageSummary?, onDismiss: () -> Unit) {
 
 private val sampleModelOptions = ModelOptionsDto(
     providers = listOf(
-        ModelOptionsProviderDto("example-provider", "Example provider", listOf("example-model", "example-model-small")),
+        ModelOptionsProviderDto(
+            "example-provider", "Example provider", listOf("example-model", "example-model-small"),
+            capabilities = mapOf("example-model" to ModelCapabilityDto(reasoning = true)),
+        ),
     ),
     model = "example-model",
     provider = "example-provider",
@@ -203,7 +303,7 @@ private fun ModelPickerEn() = RasulTheme(false) {
             start = if (androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "ar") 0.dp else 20.dp,
             end = 20.dp, top = 10.dp, bottom = 6.dp,
         ))
-        ModelPickerContent(ModelPickerUiState.Ready(sampleModelOptions), null, {}, {})
+        ModelPickerContent(ModelPickerUiState.Ready(sampleModelOptions), RunModelSelection("example-provider", "example-model", "high"), {}, {}, {})
     }
 }
 
@@ -215,7 +315,7 @@ private fun ModelPickerAr() = RasulTheme(false) {
             start = if (androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "ar") 0.dp else 20.dp,
             end = 20.dp, top = 10.dp, bottom = 6.dp,
         ))
-        ModelPickerContent(ModelPickerUiState.Ready(sampleModelOptions), null, {}, {})
+        ModelPickerContent(ModelPickerUiState.Ready(sampleModelOptions), RunModelSelection("example-provider", "example-model", "high"), {}, {}, {})
     }
 }
 

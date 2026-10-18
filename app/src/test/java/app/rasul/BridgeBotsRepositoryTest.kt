@@ -322,6 +322,7 @@ class BridgeBotsRepositoryTest {
             assertEquals(a.sessionId(), same.sessionId())
             assertNotEquals(a.sessionId(), otherProfile.sessionId())
             assertNotEquals(a.sessionId(), otherBridge.sessionId())
+            a.setSessionId(a.sessionId())
             a.setActiveRun("one")
             assertEquals("one", same.activeRun())
             assertNull(otherProfile.activeRun())

@@ -32,3 +32,22 @@ internal fun isoText(s: String, zone: ZoneId = ZoneId.systemDefault(), locale: L
     } catch (e: DateTimeException) {
         s
     }
+
+/** The same two wire shapes [timeText] reads, as epoch milliseconds. Unparseable/other -> null. */
+fun timeMillis(e: JsonElement?): Long? {
+    val p = e as? JsonPrimitive ?: return null
+    if (p.isString) return try {
+        OffsetDateTime.parse(p.content.trim()).toInstant().toEpochMilli()
+    } catch (e: DateTimeException) {
+        null
+    }
+    return p.doubleOrNull?.let { (it * 1000.0).toLong() }
+}
+
+/** Day-of-week + short time for chat separators ("Thursday 8:46 PM" in EN; localized in AR). */
+fun chatSeparatorText(millis: Long, zone: ZoneId = ZoneId.systemDefault(), locale: Locale = Locale.getDefault()): String {
+    val dt = java.time.Instant.ofEpochMilli(millis).atZone(zone)
+    val day = DateTimeFormatter.ofPattern("EEEE", locale).format(dt)
+    val time = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale).format(dt)
+    return "$day $time"
+}

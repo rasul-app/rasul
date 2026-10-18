@@ -8,6 +8,7 @@ import app.rasul.chat.MessageKind
 import app.rasul.chat.StatusLabel
 import app.rasul.data.HermesError
 import app.rasul.data.RunEvent
+import app.rasul.ui.rateLimitMessage
 
 data class RunNotice(val active: Boolean, val text: String, val approval: Boolean = false, val openOnly: Boolean = false)
 
@@ -79,11 +80,12 @@ fun failureText(context: Context, failure: ChatFailure): String {
             HermesError.NotFound -> text(R.string.chat_err_run_gone)
             HermesError.ResourceNotFound -> text(R.string.err_resource_not_found)
             HermesError.ConnectionChanged -> text(R.string.err_connection_changed)
+            HermesError.ChatBusy -> text(R.string.err_chat_busy)
             is HermesError.Storage -> text(R.string.connections_load_error, error.detail)
             is HermesError.ProfileUnknown -> text(R.string.err_profile_unknown, error.profile)
             is HermesError.Unreachable -> text(R.string.err_unreachable, error.detail)
             is HermesError.Incompatible -> text(R.string.err_incompatible, error.missing.joinToString())
-            is HermesError.Server -> text(R.string.err_server, error.code)
+            is HermesError.Server -> rateLimitMessage(error, context) ?: text(R.string.err_server, error.code)
             is HermesError.InvalidAddress -> text(R.string.addr_invalid)
             HermesError.AddressRejected -> text(R.string.addr_cleartext_rejected)
             HermesError.InvalidKey -> text(R.string.err_invalid_key)
@@ -96,6 +98,17 @@ fun failureText(context: Context, failure: ChatFailure): String {
         ChatFailure.KeyMissing -> text(R.string.chat_err_key_missing)
         ChatFailure.PreviousRunActive -> text(R.string.chat_err_previous_run_active)
         ChatFailure.SessionUnavailable -> text(R.string.chat_err_session_unavailable)
-        ChatFailure.AnswerUnsaved -> text(R.string.chat_err_answer_unsaved)
+        ChatFailure.AttachmentTooLarge -> text(R.string.chat_err_attach_too_large)
+        ChatFailure.FileTypeUnsupported -> text(R.string.chat_err_attach_file_type)
+        ChatFailure.FileTooLarge -> text(R.string.chat_err_attach_file_too_large)
+        ChatFailure.PhotoTooLarge -> text(R.string.chat_err_attach_photo_too_large)
+        ChatFailure.PhotoUnreadable -> text(R.string.chat_err_attach_photo_unreadable)
+        ChatFailure.FileUnreadable -> text(R.string.chat_err_attach_file_unreadable)
+        ChatFailure.AttachmentKindMixed -> text(R.string.chat_err_attach_mixed)
+        ChatFailure.AttachmentTooManyPhotos -> text(R.string.chat_err_attach_too_many)
+        ChatFailure.AttachmentRunActive -> text(R.string.chat_err_attach_run_active)
+        ChatFailure.ReplyKept -> text(R.string.chat_err_reply_kept)
+        is ChatFailure.ForkFailed -> app.rasul.chat.sessionActionMessage(context, failure.error)
+            ?: failureText(context, ChatFailure.Api(failure.error))
     }
 }

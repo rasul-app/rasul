@@ -8,10 +8,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.semantics.SemanticsProperties
+import app.rasul.data.ActiveTarget
 import app.rasul.data.HermesClient
 import app.rasul.data.HermesError
 import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
+import app.rasul.bridge.BridgeEndpoint
 import app.rasul.jobs.JobState
 import app.rasul.jobs.JobDeleteConfirmDialog
 import app.rasul.jobs.JobDto
@@ -20,13 +22,27 @@ import app.rasul.jobs.JobsClient
 import app.rasul.sessions.SessionDeleteConfirmDialog
 import app.rasul.sessions.SessionDto
 import app.rasul.sessions.SessionList
+import app.rasul.sessions.ContinueInChatButton
+import app.rasul.sessions.TranscriptMessages
+import app.rasul.sessions.isCronSessionSource
+import app.rasul.sessions.canContinueSession
 import app.rasul.sessions.SessionRenameContent
 import app.rasul.sessions.SessionsClient
+import app.rasul.sessions.sessionMessageText
+import app.rasul.sessions.sessionValidationText
 import app.rasul.settings.LanguageOption
 import app.rasul.ui.theme.RasulTheme
+import app.rasul.ui.continueChatRoute
+import app.rasul.ui.rateLimitMessage
+import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -102,6 +118,53 @@ class SessionsJobsClientTest {
         val r = sessions.messages(target(), "api_1_ab") as HermesResult.Ok
         assertEquals(listOf("hi", "hello\nthere", ""), r.value.map { it.text() })
         assertEquals("/api/sessions/api_1_ab/messages?inline_images=false", server.takeRequest().path)
+    }
+
+    @Test fun historyDataUrlsAreDroppedForThumbsOrPlaceholders() = runBlocking {
+        val big = "data:image/jpeg;base64," + "A".repeat(200_000)
+        server.enqueue(MockResponse().setBody(
+            """{"object":"list","data":[{"id":1,"role":"user","content":[{"type":"image_url","image_url":{"url":"$big"}}]}]}""",
+        ))
+        val r = sessions.messages(target(), "s1") as HermesResult.Ok
+        val url = (r.value[0].attachments().single() as app.rasul.data.SentAttachment.RemotePhoto).dataUrl
+        assertTrue("history must not retain the full data URL (${url.length} chars)", url.length < 2_000)
+    }
+
+    @Test fun historyKeepsNewestThumbsAndOmitsOlder() = runBlocking {
+        // The thumbnail seam returns a fixed 3-byte JPEG; history must keep it only for the newest N.
+        val client = SessionsClient(hermes, thumbnail = { byteArrayOf(1, 2, 3) })
+        val parts = (1..26).joinToString(",") {
+            """{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,$it"}}"""
+        }
+        server.enqueue(MockResponse().setBody(
+            """{"object":"list","data":[{"id":1,"role":"user","content":[$parts]}]}""",
+        ))
+        val r = client.messages(target(), "s1") as HermesResult.Ok
+        val urls = r.value.single().attachments().map { (it as app.rasul.data.SentAttachment.RemotePhoto).dataUrl }
+        val thumb = "data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(byteArrayOf(1, 2, 3))
+        assertEquals(26, urls.size)
+        assertEquals(app.rasul.data.REMOTE_PHOTO_OMITTED, urls[0])
+        assertEquals(app.rasul.data.REMOTE_PHOTO_OMITTED, urls[1])
+        assertTrue(urls.drop(2).all { it == thumb })
+    }
+
+    @Test fun messagesDecodeRunsOnTheInjectedDispatcher() = runBlocking {
+        val decodeThread = CompletableDeferred<String>()
+        val pool = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "history-decode") }
+        try {
+            val client = SessionsClient(
+                hermes,
+                work = pool.asCoroutineDispatcher(),
+                thumbnail = { decodeThread.complete(Thread.currentThread().name); null },
+            )
+            server.enqueue(MockResponse().setBody(
+                """{"object":"list","data":[{"id":1,"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AA"}}]}]}""",
+            ))
+            client.messages(target(), "s1")
+            assertTrue(decodeThread.await().startsWith("history-decode"))
+        } finally {
+            pool.shutdown()
+        }
     }
 
     @Test fun sessions401IsUnauthorizedAndBadBodyIsIncompatible() = runBlocking {
@@ -403,6 +466,22 @@ class SessionsJobsUiTest {
         assertEquals("Current title", renamed)
     }
 
+    @Test fun transcriptShowsPhotoLabelForImageParts() {
+        compose.setContent {
+            RasulTheme(false) {
+                app.rasul.sessions.TranscriptMessages(listOf(
+                    app.rasul.sessions.SessionMessageDto(role = "user", content = kotlinx.serialization.json.buildJsonArray {
+                        add(kotlinx.serialization.json.buildJsonObject {
+                            put("type", "image_url")
+                            put("image_url", kotlinx.serialization.json.buildJsonObject { put("url", "data:image/jpeg;base64,AA") })
+                        })
+                    }),
+                ))
+            }
+        }
+        compose.onNodeWithText("Photo").assertExists()
+    }
+
     private class SuspendedJobRequest {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
@@ -425,5 +504,186 @@ class SessionsJobsUiTest {
             started.complete(Unit)
             release.await()
         }
+    }
+    @Test fun continueRouteBindsTheSelectedSessionForDirectAndBridgeTargets() {
+        val direct = ActiveTarget.Ready(
+            "connection-one", "Sample bot", HermesTarget("http://192.0.2.10:8642/", "profile-one", "sample"),
+        )
+        val bridge = ActiveTarget.Ready(
+            "bridge:bridge-one:profile-one", "Sample bridge",
+            HermesTarget("http://192.0.2.11:8642/", null, "sample", BridgeEndpoint(OkHttpClient(), "profile-one")),
+        )
+        val directRoute = continueChatRoute(direct)
+        assertEquals("chat/connection-one?run_profile=profile-one", directRoute)
+        assertFalse(directRoute.contains(direct.target.baseUrl))
+        assertFalse(directRoute.contains(direct.target.apiKey))
+        assertEquals(
+            "bridge-chat/bridge-one/profile-one",
+            continueChatRoute(bridge),
+        )
+        val defaultProfile = direct.copy(id = "connection-default", target = direct.target.copy(profile = null))
+        assertEquals(
+            "chat/connection-default?run_profile=",
+            continueChatRoute(defaultProfile),
+        )
+    }
+
+    private fun transcriptForScreen(sessionSource: String? = null, code: Int = 200,
+        gate: java.util.concurrent.CountDownLatch? = null): app.rasul.sessions.TranscriptViewModel {
+        val snapshots = kotlinx.coroutines.flow.MutableStateFlow(androidx.datastore.preferences.core.emptyPreferences())
+        val dataStore = object : androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
+            override val data = snapshots
+            override suspend fun updateData(transform: suspend (androidx.datastore.preferences.core.Preferences) -> androidx.datastore.preferences.core.Preferences): androidx.datastore.preferences.core.Preferences {
+                snapshots.value = transform(snapshots.value)
+                return snapshots.value
+            }
+        }
+        val store = app.rasul.data.ConnectionStore(dataStore, object : app.rasul.data.SecretCipher {
+            override fun encrypt(plain: String) = plain
+            override fun decrypt(token: String) = token
+        })
+        val source = ActiveTarget.Ready("a", "Bot", HermesTarget("https://example.invalid", null, "sample"))
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            check(gate?.await(10, java.util.concurrent.TimeUnit.SECONDS) != false)
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(code).message("sample")
+                .body("{\"data\":[]}".toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        return app.rasul.sessions.TranscriptViewModel(store, SessionsClient(HermesClient(http)), "session-a", source,
+            currentTarget = { source }, sessionSource = sessionSource)
+    }
+
+    private fun awaitTranscript(vm: app.rasul.sessions.TranscriptViewModel) {
+        val settled = CompletableDeferred<Unit>()
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val collector = scope.launch {
+            vm.state.collect { if (it !is app.rasul.data.Load.Loading) settled.complete(Unit) }
+        }
+        try {
+            compose.waitUntil(10_000) { settled.isCompleted }
+            runBlocking { settled.await() }
+        } finally { collector.cancel() }
+    }
+
+    @Test fun transcriptLoadingHidesContinueThroughScreen() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val vm = transcriptForScreen(gate = gate)
+        try {
+            compose.setContent { RasulTheme(false) { app.rasul.sessions.TranscriptScreen(vm, {}) } }
+            compose.onNodeWithText("Continue in chat").assertDoesNotExist()
+        } finally { gate.countDown() }
+    }
+
+    @Test fun transcriptFailureHidesContinueThroughScreen() {
+        val vm = transcriptForScreen(code = 500)
+        compose.setContent { RasulTheme(false) { app.rasul.sessions.TranscriptScreen(vm, {}) } }
+        awaitTranscript(vm)
+        assertTrue(vm.state.value is app.rasul.data.Load.Failed)
+        compose.onNodeWithText("Continue in chat").assertDoesNotExist()
+    }
+
+    @Test fun cronTranscriptHidesContinueDespiteCurrentConnectionHint() {
+        val session = SessionDto("session-a", source = "cron")
+        val vm = transcriptForScreen(sessionSource = session.source)
+        compose.setContent { RasulTheme(false) { app.rasul.sessions.TranscriptScreen(vm, {}, true) } }
+        awaitTranscript(vm)
+        assertTrue(vm.state.value is app.rasul.data.Load.Ready)
+        compose.onNodeWithText("Continue in chat").assertDoesNotExist()
+    }
+
+    @Test fun cronSourceShowsJobBadge() {
+        assertTrue(isCronSessionSource("cron"))
+        assertFalse(isCronSessionSource("api_server"))
+        assertFalse(isCronSessionSource(null))
+        val target = ActiveTarget.Ready("connection-one", "Sample bot", HermesTarget("http://192.0.2.10:8642/", null, "sample"))
+        assertFalse(canContinueSession(target, "cron"))
+        assertFalse(canContinueSession(null, "api_server"))
+        assertTrue(canContinueSession(target, "api_server"))
+        compose.setContent {
+            RasulTheme(false) {
+                SessionList(listOf(SessionDto("session-one", "Sample job", source = "cron")), "source", 1_760_000_000_000L, onOpen = {})
+            }
+        }
+        compose.onNodeWithText("Job run").assertExists()
+    }
+
+    @Test fun cronInstructionsStartCollapsedAndCanExpand() {
+        val messages = listOf(
+            app.rasul.sessions.SessionMessageDto(role = "user", content = JsonPrimitive("job instruction body")),
+            app.rasul.sessions.SessionMessageDto(role = "assistant", content = JsonPrimitive("job result")),
+        )
+        compose.setContent { RasulTheme(false) { TranscriptMessages(messages, isCronRun = true) } }
+        val instructions = compose.onNodeWithText("Job instructions")
+        instructions.assertHeightIsAtLeast(androidx.compose.ui.unit.Dp(48f))
+        val minimumHeight = (48 * compose.density.density).toInt()
+        val measuredHeight = instructions.fetchSemanticsNode().layoutInfo.height
+        assertTrue("Measured instruction toggle height $measuredHeight must be at least $minimumHeight", measuredHeight >= minimumHeight)
+        instructions.assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, androidx.compose.ui.semantics.Role.Button))
+        instructions.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
+        compose.onNodeWithText("job instruction body").assertDoesNotExist()
+        instructions.performClick()
+        instructions.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Expanded"))
+        compose.onNodeWithText("job instruction body").assertExists()
+        compose.onNodeWithText("You").assertDoesNotExist()
+    }
+
+    @Test fun continuationAndRateLimitMessagesHaveEnglishAndArabicValues() {
+        val base = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val english = base.createConfigurationContext(
+            android.content.res.Configuration(base.resources.configuration).apply { setLocale(java.util.Locale.ENGLISH) },
+        )
+        val arabic = base.createConfigurationContext(
+            android.content.res.Configuration(base.resources.configuration).apply { setLocale(java.util.Locale("ar")) },
+        )
+        assertEquals("Expanded", english.getString(R.string.transcript_instructions_expanded))
+        assertEquals("Collapsed", english.getString(R.string.transcript_instructions_collapsed))
+        assertEquals("التعليمات مفتوحة", arabic.getString(R.string.transcript_instructions_expanded))
+        assertEquals("التعليمات مطوية", arabic.getString(R.string.transcript_instructions_collapsed))
+        assertEquals("The connection changed since this item was loaded, so your request was not sent.", english.getString(R.string.err_connection_changed))
+        assertEquals("Finish or stop the current reply first", english.getString(R.string.err_chat_busy))
+        assertEquals("أنهِ الرد الحالي أو أوقفه أولاً", arabic.getString(R.string.err_chat_busy))
+        assertEquals("Too many session forks. Wait a minute before trying again.", english.getString(R.string.fork_rate_limited))
+        assertEquals("Too many model changes. Wait a minute before trying again.", english.getString(R.string.model_rate_limited))
+        assertEquals("طلبات تفريع الجلسات كثيرة جدًا. انتظر دقيقة قبل المحاولة مجددًا.", arabic.getString(R.string.fork_rate_limited))
+        assertEquals("طلبات تغيير النموذج كثيرة جدًا. انتظر دقيقة قبل المحاولة مجددًا.", arabic.getString(R.string.model_rate_limited))
+        assertEquals("The fork request has unsupported fields. Open the session again and retry.",
+            rateLimitMessage(HermesError.Server(400, serverCode = "fork_invalid_fields"), english))
+        assertEquals("The model request has unsupported fields. Choose the model again.",
+            rateLimitMessage(HermesError.Server(400, serverCode = "model_invalid_fields"), english))
+        assertEquals("طلب تفرّع المحادثة يحتوي على حقول غير مدعومة. افتح الجلسة مجددًا وحاول مرة أخرى.",
+            rateLimitMessage(HermesError.Server(400, serverCode = "fork_invalid_fields"), arabic))
+        assertEquals("طلب النموذج يحتوي على حقول غير مدعومة. اختر النموذج مجددًا.",
+            rateLimitMessage(HermesError.Server(400, serverCode = "model_invalid_fields"), arabic))
+        val forkError = HermesError.Server(429, message = "fork_rate_limited", serverCode = "fork_rate_limited")
+        val modelError = HermesError.Server(429, message = "model_rate_limited", serverCode = "model_rate_limited")
+        assertEquals(english.getString(R.string.fork_rate_limited), rateLimitMessage(forkError, english))
+        val flatForkError = HermesError.Server(429, message = "fork_rate_limited")
+        val flatModelError = HermesError.Server(429, message = "model_rate_limited")
+        assertEquals(english.getString(R.string.fork_rate_limited), rateLimitMessage(flatForkError, english))
+        assertEquals(english.getString(R.string.model_rate_limited), rateLimitMessage(flatModelError, english))
+        assertEquals(english.getString(R.string.fork_rate_limited), sessionMessageText(flatForkError, english))
+        assertEquals(english.getString(R.string.model_rate_limited), sessionValidationText(flatModelError, english))
+        assertEquals(english.getString(R.string.model_rate_limited), rateLimitMessage(modelError, english))
+        assertEquals(english.getString(R.string.fork_rate_limited), sessionMessageText(forkError, english))
+        assertEquals(english.getString(R.string.model_rate_limited), sessionValidationText(modelError, english))
+    }
+
+    @Test fun nonCronTranscriptKeepsExistingMessages() {
+        val messages = listOf(
+            app.rasul.sessions.SessionMessageDto(role = "user", content = JsonPrimitive("job instruction body")),
+            app.rasul.sessions.SessionMessageDto(role = "assistant", content = JsonPrimitive("job result")),
+        )
+        compose.setContent { RasulTheme(false) { TranscriptMessages(messages, isCronRun = false) } }
+        compose.onNodeWithText("You").assertExists()
+        compose.onNodeWithText("job instruction body").assertExists()
+    }
+    @Test fun continueActionHasButtonRoleAndName() {
+        var continued = false
+        compose.setContent { RasulTheme(false) { ContinueInChatButton { continued = true } } }
+        compose.onNodeWithText("Continue in chat")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, androidx.compose.ui.semantics.Role.Button))
+            .performClick()
+        assertTrue(continued)
     }
 }

@@ -14,8 +14,8 @@ android {
         applicationId = "app.rasul"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.2.4"
+        versionCode = 7
+        versionName = "0.2.5"
     }
 
     buildTypes {
@@ -30,7 +30,6 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
-    sourceSets.getByName("main").assets.srcDir(rootProject.file("third_party/fonts"))
     testOptions {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true

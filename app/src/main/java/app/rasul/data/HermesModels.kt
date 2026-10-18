@@ -74,6 +74,48 @@ data class ModelOptionsProviderDto(
     val slug: String,
     val name: String,
     val models: List<String> = emptyList(),
+    val limit: ModelOptionsLimitDto? = null,
+    val usage: ModelOptionsUsageDto? = null,
+    /** Per-model flags from `capabilities[model]` in GET /api/model/options (inventory.py `_apply_capabilities`). */
+    val capabilities: Map<String, ModelCapabilityDto> = emptyMap(),
+)
+
+/** Credential-pool bench: scope "account" carries one resets_at, scope "models" carries per-model times. */
+@Serializable
+data class ModelOptionsLimitDto(
+    val scope: String? = null,
+    @SerialName("resets_at") val resetsAt: String? = null,
+    val models: Map<String, String> = emptyMap(),
+)
+
+@Serializable
+data class ModelOptionsUsageWindowDto(
+    val label: String? = null,
+    @SerialName("used_percent") val usedPercent: Double? = null,
+    @SerialName("resets_at") val resetsAt: String? = null,
+    val scope: String? = null,
+)
+
+@Serializable
+data class ModelOptionsUsageAccountDto(
+    val id: String? = null,
+    val label: String? = null,
+    val windows: List<ModelOptionsUsageWindowDto> = emptyList(),
+    val state: String? = null,
+    @SerialName("resets_at") val resetsAt: String? = null,
+)
+
+/** Subscription windows: `windows` for single-account providers, `accounts` for pooled credentials. */
+@Serializable
+data class ModelOptionsUsageDto(
+    val windows: List<ModelOptionsUsageWindowDto> = emptyList(),
+    val accounts: List<ModelOptionsUsageAccountDto> = emptyList(),
+)
+
+@Serializable
+data class ModelCapabilityDto(
+    val fast: Boolean? = null,
+    val reasoning: Boolean? = null,
 )
 
 /** Specific failure causes. No generic case on purpose. */
@@ -105,6 +147,9 @@ sealed interface HermesError {
     /** The active connection changed (switched, edited or deleted) since the data on screen was loaded. */
     data object ConnectionChanged : HermesError
 
+    /** The chat this transcript would continue is already replying on another session; nothing was written. */
+    data object ChatBusy : HermesError
+
     /** Phone storage or the saved connection list could not be read. */
     data class Storage(val detail: String) : HermesError
     data class ProfileUnknown(val profile: String) : HermesError
@@ -129,4 +174,4 @@ sealed interface HermesResult<out T> {
 }
 
 /** Where and how to reach one Hermes API server. */
-data class HermesTarget(val baseUrl: String, val profile: String?, val apiKey: String, val bridge: app.rasul.bridge.BridgeEndpoint? = null)
+data class HermesTarget(val baseUrl: String, val profile: String?, val apiKey: String, val bridge: app.rasul.bridge.BridgeEndpoint? = null, val revision: String = "0")

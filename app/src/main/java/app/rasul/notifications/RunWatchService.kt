@@ -16,6 +16,7 @@ import androidx.core.app.RemoteInput
 import app.rasul.MainActivity
 import app.rasul.R
 import app.rasul.RasulApp
+import app.rasul.security.publicOnly
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -120,7 +121,7 @@ class RunWatchService : Service() {
         if (stopping) return
         val all = container.runWatcher.all()
         val lock = container.appLock.state.value
-        val publicOnly = !lock.loaded || lock.enabled
+        val publicOnly = lock.publicOnly()
         refusals.entries.removeAll { (route, refusal) ->
             val changed = refusal.model?.state?.value != refusal.state
             if (changed) manager.cancel(route, 3)

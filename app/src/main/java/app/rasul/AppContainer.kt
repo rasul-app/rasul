@@ -29,6 +29,7 @@ class AppContainer(
 ) {
     val client = HermesClient()
     val sessions = SessionsClient(client)
+    val sessionControl = app.rasul.sessions.SessionControlClient(client)
     val jobs = JobsClient(client)
     val connections = ConnectionStore(context.dataStore, KeystoreSecretCipher())
 
@@ -37,6 +38,7 @@ class AppContainer(
     val appLockSettings = AppLockSettings(context.dataStore)
     val appLock = AppLockController(appLockSettings, appScope)
     val bridgeBots = app.rasul.bridge.BridgeBotsRepository(bridges, bridgeClients)
+    val approvals = app.rasul.bridge.ApprovalsRepository(bridges, bridgeClients, bridgeBots.state)
     val activePc = ActivePcHolder(connections, appScope, bridgeBots)
     val transcriptSources = app.rasul.sessions.TranscriptSources()
     val pendingChat = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
@@ -44,9 +46,16 @@ class AppContainer(
     val runWatcher = app.rasul.notifications.RunWatcher(
         this, context.applicationContext, CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
     )
+    /** Bot key (`bridge:<bridgeId>:<profileId>`) of the open approvals screen, if any. */
+    val approvalsVisible = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val approvalAlerts = app.rasul.notifications.ApprovalAlerts(this, context.applicationContext)
 
     /** The single ordered queue for those writes, shared by every chat screen. */
     val runWriter = OrderedWriter(appScope)
+
+    /** The one place a chat is wired to the app's clients, including fork (see AppContainerWiringTest). */
+    internal fun newChatModel(scope: CoroutineScope, loader: app.rasul.chat.TargetLoader, memory: app.rasul.chat.RunMemory, attachLoader: app.rasul.chat.AttachmentLoader? = null) =
+        app.rasul.chat.ChatViewModel(loader, runs, sessions, memory, runWriter, scope = scope, attachLoader = attachLoader, control = sessionControl)
 }
 
 class RasulApp : Application() {

@@ -32,6 +32,11 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -71,10 +76,34 @@ class RunsClientTest {
         client.selectModelForChat("session-1", selected.toRunModelSelection())
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_provider"}"""))
 
-        client.startRun(target(), "hello", "session-1")
+        client.startRun(target(), JsonPrimitive("hello"), "session-1")
 
         assertEquals(
             """{"input":"hello","session_id":"session-1","provider":"provider-two","model":"shared-model"}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
+    @Test fun selectedEffortSendsReasoningModelOptions() = runBlocking {
+        client.selectModelForChat("session-1", RunModelSelection("provider-one", "example-model", effort = "high"))
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_effort"}"""))
+
+        client.startRun(target(), JsonPrimitive("hello"), "session-1")
+
+        assertEquals(
+            """{"input":"hello","session_id":"session-1","provider":"provider-one","model":"example-model","model_options":{"reasoning":{"enabled":true,"effort":"high"}}}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
+    @Test fun noEffortLeavesBodyWithoutModelOptions() = runBlocking {
+        client.selectModelForChat("session-1", RunModelSelection("provider-one", "example-model"))
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_no_effort"}"""))
+
+        client.startRun(target(), JsonPrimitive("hello"), "session-1")
+
+        assertEquals(
+            """{"input":"hello","session_id":"session-1","provider":"provider-one","model":"example-model"}""",
             server.takeRequest().body.readUtf8(),
         )
     }
@@ -88,7 +117,7 @@ class RunsClientTest {
             val firstStore = ConnectionStore(PreferenceDataStoreFactory.create(scope = firstScope) { file }, cipher)
             val firstClient = RunsClient(usageStore = firstStore, scope = firstScope)
             server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_restore"}"""))
-            firstClient.startRun(target(), "hello", "session-restore")
+            firstClient.startRun(target(), JsonPrimitive("hello"), "session-restore")
             server.takeRequest()
 
             firstScope.cancel()
@@ -136,7 +165,7 @@ class RunsClientTest {
                 scope = writeScope,
             )
             server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_restore"}"""))
-            val writeResult = runCatching { writeClient.startRun(target(), "hello", "session-restore") }.getOrNull()
+            val writeResult = runCatching { writeClient.startRun(target(), JsonPrimitive("hello"), "session-restore") }.getOrNull()
             server.takeRequest()
             val writeFailureContained = writeResult is HermesResult.Ok && writeResult.value.runId == "run_restore"
             writeScope.cancel()
@@ -169,7 +198,7 @@ class RunsClientTest {
 
     @Test fun startRunPostsInputAndSessionThenEventsStreamToCompleted() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_1","status":"started","replayed":false}"""))
-        val started = (client.startRun(target("bob"), "hello", "sess-1") as HermesResult.Ok).value
+        val started = (client.startRun(target("bob"), JsonPrimitive("hello"), "sess-1") as HermesResult.Ok).value
         assertEquals("run_1", started.runId)
         val post = server.takeRequest()
         assertEquals("POST", post.method)
@@ -197,7 +226,7 @@ class RunsClientTest {
         client.selectModelForChat("sess-1", RunModelSelection("provider-one", "example-model"))
         server.enqueue(MockResponse().setHeadersDelay(500, TimeUnit.MILLISECONDS)
             .setResponseCode(202).setBody("""{"run_id":"run_2","status":"started"}"""))
-        val pending = async(Dispatchers.Default) { client.startRun(target("bob"), "next", "sess-1") }
+        val pending = async(Dispatchers.Default) { client.startRun(target("bob"), JsonPrimitive("next"), "sess-1") }
         val selectedRequest = server.takeRequest()
         client.selectModelForChat("sess-1", null)
         assertEquals("POST", selectedRequest.method)
@@ -216,7 +245,7 @@ class RunsClientTest {
         )
 
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_3","status":"started"}"""))
-        assertTrue(client.startRun(target("bob"), "other", "sess-2") is HermesResult.Ok)
+        assertTrue(client.startRun(target("bob"), JsonPrimitive("other"), "sess-2") is HermesResult.Ok)
         val defaultRequest = server.takeRequest()
         assertEquals("POST", defaultRequest.method)
         assertEquals("/p/bob/v1/runs", defaultRequest.path)
@@ -257,7 +286,7 @@ class RunsClientTest {
 
     @Test fun unauthorizedAndConflictAreSpecific() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(401))
-        assertEquals(HermesResult.Err(HermesError.Unauthorized), client.startRun(target(), "x", null))
+        assertEquals(HermesResult.Err(HermesError.Unauthorized), client.startRun(target(), JsonPrimitive("x"), null))
         server.enqueue(MockResponse().setResponseCode(409).setBody("""{"error":{"code":"run_not_accepting_steer"}}"""))
         assertEquals(HermesResult.Err(HermesError.Server(409)), client.steer(target(), "r1", "x"))
         server.enqueue(MockResponse().setResponseCode(404))
@@ -276,11 +305,40 @@ class RunsClientTest {
 
     @Test fun badRunIdBodyIsIncompatibleAndPolicyBlocksBeforeAnyRequest() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(202).setBody("{}"))
-        assertTrue((client.startRun(target(), "x", null) as HermesResult.Err).error is HermesError.Incompatible)
+        assertTrue((client.startRun(target(), JsonPrimitive("x"), null) as HermesResult.Err).error is HermesError.Incompatible)
         server.takeRequest()
         val bad = HermesTarget("http://example.com/", null, "k")
-        assertEquals(HermesResult.Err(HermesError.AddressRejected), client.startRun(bad, "x", null))
+        assertEquals(HermesResult.Err(HermesError.AddressRejected), client.startRun(bad, JsonPrimitive("x"), null))
         assertEquals(1, server.requestCount)
+    }
+
+    @Test fun startRunPostsTheFinishedPartsElementWithTheImageDataUrl() = runBlocking {
+        // The full path the composer takes: photo bytes -> plan -> client -> wire.
+        val plan = app.rasul.data.planRunInput("cap", listOf(
+            app.rasul.data.PendingAttachment.Photo(1, byteArrayOf(1, 2, 3), ByteArray(4)),
+        )) as app.rasul.data.RunInputPlan.WithParts
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_img"}"""))
+        assertTrue(client.startRun(target(), plan.input, "sess-9") is HermesResult.Ok)
+        val input = (Json.parseToJsonElement(server.takeRequest().body.readUtf8())
+            .jsonObject["input"] as JsonArray).single() as JsonObject
+        val content = input["content"] as JsonArray
+        assertEquals("cap", ((content[0] as JsonObject)["text"] as JsonPrimitive).content)
+        val url = (((content[1] as JsonObject)["image_url"]) as JsonObject)["url"] as JsonPrimitive
+        assertTrue(url.content.startsWith("data:image/jpeg;base64,"))
+    }
+
+    @Test fun keyedRetryResendsTheSameBodyWithTheReasoningLevel() = runBlocking {
+        val retryClient = RunsClient(base = OkHttpClient.Builder().readTimeout(100, TimeUnit.MILLISECONDS).build())
+        retryClient.selectModelForChat("session-1", RunModelSelection("provider-one", "model-one", effort = "high"))
+        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
+        assertTrue(retryClient.startRun(target(), JsonPrimitive("hello"), "session-1", "key-2") is HermesResult.Err)
+        val first = server.takeRequest().body.readUtf8()
+        assertTrue(first, first.contains("\"effort\":\"high\""))
+
+        retryClient.selectModelForChat("session-1", RunModelSelection("provider-two", "model-two", effort = "low"))
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_k"}"""))
+        assertTrue(retryClient.startRun(target(), JsonPrimitive("hello"), "session-1", "key-2") is HermesResult.Ok)
+        assertEquals(first, server.takeRequest().body.readUtf8())
     }
 
     @Test fun startRunSendsTheIdempotencyKeyHeader() = runBlocking {
@@ -288,7 +346,7 @@ class RunsClientTest {
         val originalSelection = RunModelSelection("provider-one", "model-one")
         retryClient.selectModelForChat("session-1", originalSelection)
         server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
-        assertTrue(retryClient.startRun(target(), "hello", "session-1", "key-1") is HermesResult.Err)
+        assertTrue(retryClient.startRun(target(), JsonPrimitive("hello"), "session-1", "key-1") is HermesResult.Err)
         val first = server.takeRequest()
         val originalBody = """{"input":"hello","session_id":"session-1","provider":"provider-one","model":"model-one"}"""
         assertEquals("key-1", first.getHeader("Idempotency-Key"))
@@ -296,14 +354,69 @@ class RunsClientTest {
 
         retryClient.selectModelForChat("session-1", RunModelSelection("provider-two", "model-two"))
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_1"}"""))
-        assertTrue(retryClient.startRun(target(), "hello", "session-1", "key-1") is HermesResult.Ok)
+        assertTrue(retryClient.startRun(target(), JsonPrimitive("hello"), "session-1", "key-1") is HermesResult.Ok)
         val retry = server.takeRequest()
         assertEquals("key-1", retry.getHeader("Idempotency-Key"))
         assertEquals(originalBody, retry.body.readUtf8())
 
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_2"}"""))
-        retryClient.startRun(target(), "hello", null)
+        retryClient.startRun(target(), JsonPrimitive("hello"), null)
         assertEquals(null, server.takeRequest().getHeader("Idempotency-Key"))
+    }
+
+    @Test fun aChatsModelSurvivesARestartAndNamesEveryRun() = runBlocking {
+        val file = tmp.root.resolve("chat-models.preferences_pb")
+        val pick = RunModelSelection("provider-one", "model-one")
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val secondScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val firstStore = ConnectionStore(PreferenceDataStoreFactory.create(scope = firstScope) { file }, cipher)
+            val first = RunsClient(usageStore = firstStore, scope = firstScope)
+            first.selectModelForChat("sess-a", pick)
+            first.selectModelForChat("sess-b", RunModelSelection("provider-two", "model-two"))
+            first.selectModelForChat("sess-b", null)
+            first.selectModelForChat("sess-c", pick)
+            // The write queue is ordered and asynchronous: wait for the file to hold both final states.
+            // sess-c is written after the clear of sess-b, so seeing it means every earlier write has landed.
+            withTimeout(5000) { while (firstStore.chatModels() != mapOf("sess-a" to pick, "sess-c" to pick)) kotlinx.coroutines.delay(20) }
+            firstScope.cancel()
+            firstScope.coroutineContext[Job]!!.join()
+
+            val restored = RunsClient(usageStore = ConnectionStore(PreferenceDataStoreFactory.create(scope = secondScope) { file }, cipher), scope = secondScope)
+            server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_1"}"""))
+            // startRun waits for the saved picks, so even the very first message after a restart names the model.
+            restored.startRun(target(), JsonPrimitive("hello"), "sess-a")
+            assertEquals(
+                """{"input":"hello","session_id":"sess-a","provider":"provider-one","model":"model-one"}""",
+                server.takeRequest().body.readUtf8(),
+            )
+            assertEquals(pick, restored.selectedModelForChat("sess-a"))
+            assertEquals(null, restored.selectedModelForChat("sess-b"))
+        } finally {
+            firstScope.cancel()
+            secondScope.cancel()
+        }
+    }
+
+    @Test fun serverDefaultAfterAPickClearsTheChatsModel() = runBlocking {
+        client.selectModelForChat("sess-1", RunModelSelection("provider-one", "model-one"))
+        client.selectModelForChat("sess-1", null)
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run_1"}"""))
+        client.startRun(target(), JsonPrimitive("hello"), "sess-1")
+        assertEquals("""{"input":"hello","session_id":"sess-1"}""", server.takeRequest().body.readUtf8())
+    }
+
+    @Test fun deletingASessionForgetsItsModel() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val store = ConnectionStore(PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("del.preferences_pb") }, cipher)
+            store.setChatModel("sess-a", RunModelSelection("provider-one", "model-one"))
+            store.setChatModel("sess-b", RunModelSelection("provider-two", "model-two"))
+            store.clearSessionPointers("sess-a")
+            assertEquals(mapOf("sess-b" to RunModelSelection("provider-two", "model-two")), store.chatModels())
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test fun statusParsesTheOpenApprovalAndPendingSteer() = runBlocking {

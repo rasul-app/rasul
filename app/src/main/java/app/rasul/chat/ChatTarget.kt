@@ -1,6 +1,7 @@
 package app.rasul.chat
 
 import app.rasul.AppContainer
+import app.rasul.data.ConnectionStore
 import app.rasul.data.HermesError
 import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
@@ -11,6 +12,9 @@ fun chatRunMemory(container: AppContainer, id: String) = runMemory(container, id
 fun chatRunMemory(container: AppContainer, id: String, profile: String?) = runMemory(container, id, true, profile)
 
 private fun runMemory(container: AppContainer, id: String, fixed: Boolean, selectedProfile: String?) = object : RunMemory {
+    private var revision: String? = null
+    override fun bindRevision(revision: String) { this.revision = revision }
+    private suspend fun revision(): String = revision ?: container.connections.revision(id).also { revision = it }
     private var profile: String? = selectedProfile
     private var read = fixed
 
@@ -23,28 +27,33 @@ private fun runMemory(container: AppContainer, id: String, fixed: Boolean, selec
     }
 
     override suspend fun currentSessionId() = container.connections.currentSessionId(id, profile())
-    override suspend fun sessionId() = container.connections.sessionId(id, profile())
-    override suspend fun activeRun() = container.connections.activeRun(id, profile())
-    override suspend fun lastEventId() = container.connections.lastEventId(id, profile())
-    override suspend fun anchor(): Anchor = container.connections.runAnchor(id, profile())?.let {
+    override suspend fun sessionId() = container.connections.sessionId(id, profile(), revision())
+    override suspend fun activeRun() = container.connections.activeRun(id, profile(), sessionId())
+    override suspend fun activeRun(sessionId: String) = container.connections.activeRun(id, profile(), sessionId)
+    override suspend fun activeRunSessions() = container.connections.activeRunSessions(id, profile())
+    override suspend fun lastEventId() = container.connections.lastEventId(id, profile(), sessionId())
+    override suspend fun lastEventId(sessionId: String) = container.connections.lastEventId(id, profile(), sessionId)
+    override suspend fun anchor(): Anchor = anchor(sessionId())
+    override suspend fun anchor(sessionId: String): Anchor = container.connections.runAnchor(id, profile(), sessionId)?.let {
         Anchor.Known(it.takeIf { key -> key.isNotEmpty() })
     } ?: Anchor.Unknown
+    private var boundSession: String? = null
+    override suspend fun setSessionId(sessionId: String) {
+        boundSession = sessionId
+    }
+    // Writes never follow the pointer: the session must be explicit (bound via setSessionId/setCurrentSessionRun).
     override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) =
-        container.connections.setActiveRun(id, profile(), runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null)
+        container.connections.setActiveRun(id, profile(), checkNotNull(boundSession) { "setActiveRun needs an explicit session id" }, runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null, revision())
     override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor) =
-        container.connections.setCurrentSessionRun(id, profile(), sessionId, runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null)
+        container.connections.setCurrentSessionRun(id, profile(), sessionId, runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null, revision())
+    override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor, claim: ConnectionStore.PointerClaim) =
+        container.connections.setCurrentSessionRun(id, profile(), sessionId, runId, lastEventId, (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null, revision(), claim)
 }
 
 /** Reads the saved connection and decrypts its key; a missing piece is a specific error, not a blank screen. */
 fun chatTargetLoader(container: AppContainer, id: String) = TargetLoader {
     try {
-        val c = container.connections.get(id)
-        val key = c?.let { container.connections.apiKey(id) }
-        when {
-            c == null -> HermesResult.Err(HermesError.NotFound)
-            key == null -> HermesResult.Err(HermesError.InvalidKey)
-            else -> HermesResult.Ok(HermesTarget(c.baseUrl, c.profile, key))
-        }
+        container.connections.target(id)
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (e: Exception) {

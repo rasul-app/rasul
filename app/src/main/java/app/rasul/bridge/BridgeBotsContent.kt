@@ -21,7 +21,13 @@ import app.rasul.ui.components.*
 import app.rasul.ui.text
 import app.rasul.ui.theme.*
 
-fun LazyListScope.bridgeBotItems(state: BridgeBotsState, onOpen: (String, String) -> Unit, onCreate: (String) -> Unit = {}) {
+fun LazyListScope.bridgeBotItems(
+    state: BridgeBotsState,
+    onOpen: (String, String) -> Unit,
+    onCreate: (String) -> Unit = {},
+    pendingApprovals: Map<String, Int> = emptyMap(),
+    onApprovals: (String, String) -> Unit = { _, _ -> },
+) {
     if (state.storageError) item {
         Text(stringResource(R.string.bridge_bots_storage_error), color = Rasul.colors.danger, modifier = Modifier.padding(20.dp))
     }
@@ -48,13 +54,21 @@ fun LazyListScope.bridgeBotItems(state: BridgeBotsState, onOpen: (String, String
                 textSpacing = if (profile.ready) 3.dp else 4.dp,
                 leading = { BotAvatar(avatarStyleFor(bridgeBotId(group.id, profile.id))) },
                 trailing = {
-                    StatusChip(stringResource(if (profile.ready) R.string.bridge_ready else R.string.bridge_not_ready),
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+                    ) {
+                        pendingApprovals[bridgeBotId(group.id, profile.id)]?.let { count ->
+                            ApprovalsCountBadge(count) { onApprovals(group.id, profile.id) }
+                        }
+                        StatusChip(stringResource(if (profile.ready) R.string.bridge_ready else R.string.bridge_not_ready),
                         if (profile.ready) ChipKind.Done else ChipKind.Neutral,
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.widthIn(min = if (LocalConfiguration.current.locales[0].language == "ar") {
                             if (profile.ready) 48.dp else 72.dp
                         } else if (profile.ready) 51.dp else 79.dp))
+                    }
                 },
             ) {
                 RowTitle(profile.displayName)

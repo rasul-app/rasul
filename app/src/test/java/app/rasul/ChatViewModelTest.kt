@@ -1,8 +1,12 @@
 package app.rasul
 
+import android.net.Uri
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import app.rasul.chat.Anchor
+import app.rasul.chat.AttachLoad
+import app.rasul.chat.AttachmentLoader
 import app.rasul.chat.ChatFailure
+import app.rasul.chat.ChatLoad
 import app.rasul.chat.ChatViewModel
 import app.rasul.chat.MessageKind
 import app.rasul.chat.RunMemory
@@ -21,8 +25,18 @@ import app.rasul.data.RunStatus
 import app.rasul.sessions.SessionMessageDto
 import app.rasul.sessions.SessionsApi
 import app.rasul.data.RunUpdate
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import app.rasul.data.PendingAttachment
+import app.rasul.data.SentAttachment
+import app.rasul.data.RunInputPlan
 import app.rasul.data.RunsApi
+import app.rasul.data.planRunInput
 import app.rasul.data.StartedRun
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -57,6 +71,7 @@ import org.junit.rules.TemporaryFolder
 private class FakeRuns : RunsApi {
     val calls = mutableListOf<String>()
     val startKeys = mutableListOf<String?>()
+    val startInputs = mutableListOf<kotlinx.serialization.json.JsonElement>()
     var startN = 0
     var onStart: suspend (String) -> HermesResult<StartedRun> = { HermesResult.Ok(StartedRun("run_$startN")) }
     var onStatus: suspend (String) -> HermesResult<RunStatus> = { HermesResult.Ok(RunStatus("running", null, null)) }
@@ -64,11 +79,13 @@ private class FakeRuns : RunsApi {
     var onSteer: suspend (String, String) -> HermesResult<Unit> = { _, _ -> HermesResult.Ok(Unit) }
     var onApprove: suspend (String, String?) -> HermesResult<Unit> = { _, _ -> HermesResult.Ok(Unit) }
 
-    override suspend fun startRun(target: HermesTarget, input: String, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
+    override suspend fun startRun(target: HermesTarget, input: kotlinx.serialization.json.JsonElement, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
         startN++
-        calls += "start $input session=$sessionId"
+        val text = (input as? JsonPrimitive)?.contentOrNull ?: input.toString()
+        calls += "start $text session=$sessionId"
         startKeys += idempotencyKey
-        return onStart(input)
+        startInputs += input
+        return onStart(text)
     }
 
     override suspend fun status(target: HermesTarget, runId: String): HermesResult<RunStatus> {
@@ -100,6 +117,38 @@ private class FakeRuns : RunsApi {
     }
 }
 
+/** Picker loads the tests can hold and release; records the per-photo budget the VM computed. */
+private class FakeAttachLoader : AttachmentLoader {
+    var gate: CompletableDeferred<Unit>? = null
+
+    /** Gates handed to successive loads, one each, before [gate] is used. */
+    val gateQueue = ArrayDeque<CompletableDeferred<Unit>>()
+    var nextPhotos: AttachLoad = AttachLoad.Ok(emptyList())
+    var nextFile: AttachLoad = AttachLoad.Ok(emptyList())
+    val photoBudgets = mutableListOf<Int>()
+    val fitBudgets = mutableListOf<Int>()
+
+    /** When set, [fit] waits here (completed by the test) so a session switch can land mid-fit. */
+    var fitGate: CompletableDeferred<Unit>? = null
+
+    override suspend fun loadPhotos(uris: List<Uri>, photoBudget: Int): AttachLoad {
+        photoBudgets += photoBudget
+        (gateQueue.removeFirstOrNull() ?: gate)?.await()
+        return nextPhotos
+    }
+
+    override suspend fun fit(photo: PendingAttachment.Photo, budget: Int): PendingAttachment.Photo? {
+        fitBudgets += budget
+        fitGate?.await()
+        return photo.copy(jpeg = ByteArray(minOf(photo.jpeg.size, budget)))
+    }
+
+    override suspend fun loadFile(uri: Uri): AttachLoad {
+        gate?.await()
+        return nextFile
+    }
+}
+
 private class FakeSessions : SessionsApi {
     val calls = mutableListOf<String>()
     var result: HermesResult<List<SessionMessageDto>> = HermesResult.Ok(emptyList())
@@ -122,36 +171,66 @@ private class FakeMemory(var active: String? = null, var cursor: Long? = null) :
     val writes = mutableListOf<String?>()
     val sessionWrites = mutableListOf<String>()
 
-    /** When set, activeRun() / setActiveRun() suspend until the gate is released. */
+    /** When set, run-state reads and writes suspend until the gate is released. */
     var readGate: CompletableDeferred<Unit>? = null
     var writeGate: CompletableDeferred<Unit>? = null
     var sessionFailure = false
-    var storedSession = "sess-1"
+    var storedSession: String? = "sess-1"
     var storedAnchor: Anchor = Anchor.Unknown
-    override suspend fun anchor() = storedAnchor
+
+    /** Run triples stored under sessions other than the current one (session-keyed persistence). */
+    private val otherRuns = mutableMapOf<String, Triple<String?, Long?, Anchor>>()
+
+    /** The persisted run under [sessionId]; `active`/`cursor`/`storedAnchor` hold the current session's slot. */
+    fun runFor(sessionId: String?): String? = if (sessionId == storedSession) active else otherRuns[sessionId]?.first
+
+    override suspend fun anchor() = anchor(storedSession.orEmpty())
+    override suspend fun anchor(sessionId: String): Anchor =
+        if (sessionId == storedSession) storedAnchor else otherRuns[sessionId]?.third ?: Anchor.Unknown
     override suspend fun currentSessionId() = storedSession
     override suspend fun sessionId(): String {
         check(!sessionFailure)
-        return storedSession
+        return storedSession ?: "sess-1".also { storedSession = it }
     }
-    override suspend fun activeRun(): String? {
+    override suspend fun activeRun(): String? = activeRun(storedSession.orEmpty())
+    override suspend fun activeRun(sessionId: String): String? {
         readGate?.await()
-        return active
+        return if (sessionId == storedSession) active else otherRuns[sessionId]?.first
     }
-
-    override suspend fun lastEventId(): Long? = cursor
-
+    override suspend fun activeRunSessions(): Set<String> {
+        readGate?.await()
+        val sessions = otherRuns.filterValues { it.first != null }.keys.toMutableSet()
+        if (active != null) storedSession?.let { sessions += it }
+        return sessions
+    }
+    override suspend fun lastEventId() = lastEventId(storedSession.orEmpty())
+    override suspend fun lastEventId(sessionId: String): Long? =
+        if (sessionId == storedSession) cursor else otherRuns[sessionId]?.second
     override suspend fun setSessionId(sessionId: String) {
         storedSession = sessionId
         sessionWrites += sessionId
     }
-
     override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) {
         writeGate?.await()
         active = runId
         storedAnchor = if (runId == null) Anchor.Unknown else anchor
         cursor = if (runId == null) null else lastEventId
         writes += runId
+    }
+    override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: Anchor) {
+        writeGate?.await()
+        if (sessionId == storedSession) {
+            active = runId
+            storedAnchor = if (runId == null) Anchor.Unknown else anchor
+            cursor = if (runId == null) null else lastEventId
+        } else {
+            otherRuns[sessionId] = Triple(runId, lastEventId, if (runId == null) Anchor.Unknown else anchor)
+        }
+        writes += runId
+        if (storedSession == null) {
+            storedSession = sessionId
+            sessionWrites += sessionId
+        }
     }
 }
 
@@ -162,6 +241,7 @@ class ChatViewModelTest {
     private val fake = FakeRuns()
     private val sessions = FakeSessions()
     private val memory = FakeMemory()
+    private val fakeAttach = FakeAttachLoader()
     private val followAfter = mutableListOf<Long?>()
     private val flows = mutableListOf<MutableSharedFlow<RunUpdate>>()
     private var keyN = 0
@@ -174,13 +254,21 @@ class ChatViewModelTest {
 
     private val writer = app.rasul.chat.OrderedWriter(CoroutineScope(StandardTestDispatcher(sched)))
 
-    private fun build(mem: RunMemory = memory): ChatViewModel {
+    private fun build(mem: RunMemory = memory, loader: TargetLoader? = null): ChatViewModel {
         val t = HermesTarget("http://example.invalid/", null, "k")
         return ChatViewModel(
-            TargetLoader { HermesResult.Ok(t) }, fake, sessions, mem, writer, now = { 0L },
+            loader ?: TargetLoader { HermesResult.Ok(t) }, fake, sessions, mem, writer, now = { 0L },
             follow = { _, _, after -> followAfter += after; MutableSharedFlow<RunUpdate>(replay = 64).also { flows += it } },
             newKey = { "key${++keyN}" },
+            workDispatcher = StandardTestDispatcher(sched),
+            attachLoader = fakeAttach,
         )
+    }
+
+    /** The last content part of the input element the last send posted. */
+    private fun lastContentPart(): JsonObject {
+        val message = (fake.startInputs.last() as JsonArray).single() as JsonObject
+        return (message["content"] as JsonArray).last() as JsonObject
     }
 
     private fun vm(): ChatViewModel = build().also { idle() }
@@ -209,21 +297,21 @@ class ChatViewModelTest {
             )
             val deletedSession = runBlocking {
                 store.sessionId(id, null).also { session ->
-                    store.setActiveRun(id, null, "run_old", 8L, "old-anchor")
+                    store.setActiveRun(id, null, session, "run_old", 8L, "old-anchor")
                     store.clearSessionPointers(session)
                 }
             }
             val persistedMemory = object : RunMemory {
                 override suspend fun sessionId() = runBlocking { store.sessionId(id, null) }
-                override suspend fun activeRun() = runBlocking { store.activeRun(id, null) }
-                override suspend fun lastEventId() = runBlocking { store.lastEventId(id, null) }
+                override suspend fun activeRun() = runBlocking { store.activeRun(id, null, sessionId()) }
+                override suspend fun lastEventId() = runBlocking { store.lastEventId(id, null, sessionId()) }
                 override suspend fun anchor(): Anchor = runBlocking {
-                    store.runAnchor(id, null)?.let { Anchor.Known(it) } ?: Anchor.Unknown
+                    store.runAnchor(id, null, sessionId())?.let { Anchor.Known(it) } ?: Anchor.Unknown
                 }
                 override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: Anchor) {
                     runBlocking {
                         store.setActiveRun(
-                            id, null, runId, lastEventId,
+                            id, null, sessionId(), runId, lastEventId,
                             (anchor as? Anchor.Known)?.key ?: if (anchor is Anchor.Known) "" else null,
                         )
                     }
@@ -357,6 +445,16 @@ class ChatViewModelTest {
         assertEquals("", v.state.value.draft)
     }
 
+    @Test fun ordinaryChatKeepsTreating404HistoryAsEmpty() {
+        sessions.result = HermesResult.Err(HermesError.NotFound)
+        val ordinary = vm()
+        assertEquals(ChatLoad.Ready, ordinary.state.value.load)
+        ordinary.onDraft("hello")
+        ordinary.send()
+        idle()
+        assertEquals(1, fake.startN)
+    }
+
     @Test fun newChatPersistsItsSessionAndActiveRunForReopen() {
         memory.storedSession = "old-session"
         memory.active = null
@@ -370,10 +468,12 @@ class ChatViewModelTest {
         val startedSession = sessions.calls.first()
         assertEquals("rasul-fixed", startedSession)
         assertTrue(startedSession != "old-session")
-        assertEquals(startedSession, memory.storedSession)
-        assertEquals("run_1", memory.active)
+        // The run is stored under the new session's own keys; the pointer only moves by user intent.
+        assertEquals("old-session", memory.storedSession)
+        assertEquals("run_1", memory.runFor("rasul-fixed"))
+        assertNull(memory.active)
         assertEquals(listOf("run_1"), memory.writes)
-        assertEquals(listOf(startedSession), memory.sessionWrites)
+        assertTrue(memory.sessionWrites.isEmpty())
 
         val reopened = build(newChatRunMemory(memory, "rasul-fixed"))
         idle()
@@ -384,7 +484,7 @@ class ChatViewModelTest {
         reopened.stop()
         idle()
         assertTrue(fake.calls.contains("stop run_1"))
-        assertEquals(startedSession, memory.storedSession)
+        assertEquals("old-session", memory.storedSession)
     }
 
     @Test fun firstNewChatSendKeepsPreviousActiveRunReachable() {
@@ -549,16 +649,18 @@ class ChatViewModelTest {
     @Test fun afterARunIsGoneTheNextRunsDeltasGoToANewBubble() {
         val v = vm().startWithRun()
         emit(ev(RunEvent.MessageDelta("old")))
+        // The completed event settles the turn; the post-event reload serves its persisted rows.
+        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "x"), row("aA", "assistant", "old")))
         emit(ev(RunEvent.Completed("old")))
         assertNull(v.state.value.run)
-        v.type("again")
         display(v, "x", "old")
-        assertEquals(1, fake.startN)
-        assertEquals("again", v.state.value.draft)
-        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "x"), row("aA", "assistant", "old")))
-        v.send()
-        idle()
+        v.type("again")
         display(v, "x", "old", "again")
+        assertEquals(2, fake.startN)
+        assertEquals("", v.state.value.draft)
+        sessions.result = HermesResult.Ok(listOf(
+            row("qA", "user", "x"), row("aA", "assistant", "old"),
+            row("qB", "user", "again"), row("aB", "assistant", "new")))
         emit(ev(RunEvent.MessageDelta("new")))
         emit(ev(RunEvent.Completed("new")))
         assertEquals(listOf("old", "new"), v.state.value.messages.filter { it.kind == MessageKind.Assistant }.map { it.text })
@@ -858,7 +960,17 @@ class ChatViewModelTest {
         emit(ev(RunEvent.ToolStarted("bash", null)))
         emit(ev(RunEvent.MessageDelta("Second ")))
         emit(ev(RunEvent.MessageDelta("part")))
+        // Hold the post-completion reload: the streamed segments are checked while the local
+        // rows are still shown, then the served transcript replaces them with the same rows.
+        val gate = CompletableDeferred<Unit>()
+        sessions.historyGate = gate
+        sessions.result = HermesResult.Ok(listOf(
+            row("u1", "user", "x"), row("a1", "assistant", "First part"), row("a2", "assistant", "Second part")))
         emit(ev(RunEvent.Completed("Second part")))
+        assertEquals(listOf("First part", "Second part"), v.state.value.messages.filter { it.kind == MessageKind.Assistant }.map { it.text })
+        gate.complete(Unit)
+        sessions.historyGate = null
+        idle()
         assertEquals(listOf("First part", "Second part"), v.state.value.messages.filter { it.kind == MessageKind.Assistant }.map { it.text })
     }
 
@@ -866,7 +978,15 @@ class ChatViewModelTest {
         val v = vm().startWithRun()
         emit(ev(RunEvent.MessageDelta("Working on it")))
         emit(ev(RunEvent.ToolStarted("bash", null)))
+        val gate = CompletableDeferred<Unit>()
+        sessions.historyGate = gate
+        sessions.result = HermesResult.Ok(listOf(
+            row("u1", "user", "x"), row("a1", "assistant", "Working on it"), row("a2", "assistant", "All done")))
         emit(ev(RunEvent.Completed("All done")))
+        assertEquals(listOf("Working on it", "All done"), v.state.value.messages.filter { it.kind == MessageKind.Assistant }.map { it.text })
+        gate.complete(Unit)
+        sessions.historyGate = null
+        idle()
         assertEquals(listOf("Working on it", "All done"), v.state.value.messages.filter { it.kind == MessageKind.Assistant }.map { it.text })
     }
 
@@ -1131,6 +1251,8 @@ class ChatViewModelTest {
         idle()
         assertEquals(listOf("start hello session=sess-1"), fake.calls)
 
+        // The terminal event settles the turn; the post-event reload serves its persisted rows.
+        sessions.result = HermesResult.Ok(listOf(user("old question"), assistant("old answer"), user("hello"), assistant("answer")))
         emit(ev(RunEvent.Completed("answer")))
         assertEquals(listOf("old question", "old answer", "hello", "answer"), v.state.value.messages.map { it.text })
         v.retryHistory()
@@ -1300,7 +1422,6 @@ class ChatViewModelTest {
         assertNull(memory.active)
     }
 
-
     @Test fun aSecondViewModelsWriteAfterTheFirstIsClearedKeepsOrder() {
         val store = ViewModelStore()
         @Suppress("UNCHECKED_CAST")
@@ -1397,13 +1518,15 @@ class ChatViewModelTest {
         assertEquals(ChatFailure.Api(HermesError.Server(503)), v.state.value.historyFailure)
     }
 
-    @Test fun restoredCompletionKeepsAnswerAcrossStaleTranscript() {
+    @Test fun restoredCompletionReplacedByTheServedTranscript() {
         memory.active = "run_9"
         memory.storedAnchor = Anchor.Known(JsonPrimitive("a0").toString())
         sessions.result = HermesResult.Ok(listOf(row("q0", "user", "q0"), row("a0", "assistant", "a0"), row("q1", "user", "q₁")))
         val v = vm()
         emit(ev(RunEvent.Completed("A")))
-        display(v, "q0", "a0", "q₁", "A")
+        // The completed event settles the turn; the post-event reload is the truth even when the
+        // served transcript still lacks the run's output.
+        display(v, "q0", "a0", "q₁")
     }
 
     @Test fun responseRequestedBeforeCompletionCanProveAnswerSaved() {
@@ -1499,115 +1622,73 @@ class ChatViewModelTest {
         assertNull(memory.active)
     }
 
-    @Test fun missingHistoryKeepsCompletedAnswerAndBlocksNextSend() {
+    @Test fun missingSessionAfterCompletedStillSends() {
         sessions.result = HermesResult.Err(HermesError.ResourceNotFound)
         val v = vm()
         v.type("q")
         emit(ev(RunEvent.Completed("A")))
-        display(v, "q", "A")
+        // The completed run settled; the server says the session is gone, so the view shows that truth.
+        display(v)
         v.type("q2")
-        display(v, "q", "A")
-        assertEquals(1, fake.startN)
-        assertNull(v.state.value.run)
-        assertEquals("q2", v.state.value.draft)
-        assertEquals(ChatFailure.AnswerUnsaved, v.state.value.historyFailure)
-    }
-
-    @Test fun unsavedAnswerBlocksRepeatedSendUntilHistoryContainsIt() {
-        val v = vm()
-        v.type("qA")
-        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA")))
-        emit(ev(RunEvent.Completed("aA")))
-        val ids = v.state.value.messages.map { it.id }
-        val calls = sessions.calls.size
-        v.type("qB")
-        assertEquals(calls + 3, sessions.calls.size)
-        display(v, "qA", "aA")
-        assertEquals(ids, v.state.value.messages.map { it.id })
-        assertEquals(1, fake.startN)
-        assertNull(v.state.value.run)
-        assertEquals("qB", v.state.value.draft)
-        assertEquals(ChatFailure.AnswerUnsaved, v.state.value.historyFailure)
-        repeat(2) {
-            v.send()
-            idle()
-            display(v, "qA", "aA")
-            assertEquals(ids, v.state.value.messages.map { it.id })
-            assertEquals(1, fake.startN)
-            assertEquals("qB", v.state.value.draft)
-            assertEquals(ChatFailure.AnswerUnsaved, v.state.value.historyFailure)
-            assertTrue(errors(v).isEmpty())
-        }
-        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA"), row("aA", "assistant", "aA")))
-        v.send()
-        idle()
-        display(v, "qA", "aA", "qB")
+        display(v, "q2")
         assertEquals(2, fake.startN)
+        assertEquals("run_2", v.state.value.run?.runId)
         assertEquals("", v.state.value.draft)
         assertNull(v.state.value.historyFailure)
-        assertEquals(Anchor.Known(JsonPrimitive("aA").toString()), memory.storedAnchor)
     }
 
-    @Test fun answerSavedDuringFirstBackoffStartsNextTurnOnce() {
+    @Test fun sendAfterCompletedReloadsHistoryOnceAndStarts() {
         val v = vm()
         v.type("qA")
         sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA")))
         emit(ev(RunEvent.Completed("aA")))
         val calls = sessions.calls.size
-        val start = sched.currentTime
         v.onDraft("qB")
         v.send()
-        sched.runCurrent()
+        idle()
+        // One reload, no retries: the local "aA" row is replaced by what the server served.
         assertEquals(calls + 1, sessions.calls.size)
-        assertEquals(1, fake.startN)
-        sched.advanceTimeBy(999)
-        sched.runCurrent()
-        assertEquals(calls + 1, sessions.calls.size)
-        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA"), row("aA", "assistant", "aA")))
-        sched.advanceTimeBy(1)
-        sched.runCurrent()
-        assertEquals(start + 1_000, sched.currentTime)
-        assertEquals(calls + 2, sessions.calls.size)
         assertEquals(2, fake.startN)
-        display(v, "qA", "aA", "qB")
+        display(v, "qA", "qB")
+        assertEquals("", v.state.value.draft)
         assertNull(v.state.value.historyFailure)
-        assertEquals(Anchor.Known(JsonPrimitive("aA").toString()), memory.storedAnchor)
-        idle()
-        assertEquals(calls + 2, sessions.calls.size)
-    }
-
-    @Test fun nextTurnAnchorsAfterLateAnswerAndKeepsItsOwnCompletion() {
-        val v = vm()
-        v.type("qA")
-        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA")))
-        emit(ev(RunEvent.Completed("aA")))
-        val calls = sessions.calls.size
-        val start = sched.currentTime
-        v.onDraft("qB")
-        v.send()
-        sched.runCurrent()
-        sched.advanceTimeBy(1_000)
-        sched.runCurrent()
-        assertEquals(calls + 2, sessions.calls.size)
-        assertEquals(1, fake.startN)
-        display(v, "qA", "aA")
-        sched.advanceTimeBy(1_999)
-        sched.runCurrent()
-        assertEquals(calls + 2, sessions.calls.size)
-        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA"), row("aA", "assistant", "aA")))
-        sched.advanceTimeBy(1)
-        sched.runCurrent()
-        assertEquals(start + 3_000, sched.currentTime)
-        assertEquals(calls + 3, sessions.calls.size)
-        assertEquals(2, fake.startN)
-        assertEquals(Anchor.Known(JsonPrimitive("aA").toString()), memory.storedAnchor)
-        display(v, "qA", "aA", "qB")
-        v.retryHistory()
-        idle()
-        display(v, "qA", "aA", "qB")
-        sessions.result = HermesResult.Err(HermesError.Server(503))
+        assertEquals(Anchor.Known(JsonPrimitive("qA").toString()), memory.storedAnchor)
+        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA"), row("aA", "assistant", "aA"), row("qB", "user", "qB"), row("bB", "assistant", "bB")))
         emit(ev(RunEvent.Completed("bB")))
         display(v, "qA", "aA", "qB", "bB")
+    }
+
+    @Test fun sendAfterCompletedDoesNotWaitOrRetry() {
+        val v = vm()
+        v.type("qA")
+        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA")))
+        emit(ev(RunEvent.Completed("aA")))
+        val calls = sessions.calls.size
+        val start = sched.currentTime
+        v.onDraft("qB")
+        v.send()
+        idle()
+        assertEquals(start, sched.currentTime)
+        assertEquals(calls + 1, sessions.calls.size)
+        assertEquals(2, fake.startN)
+        display(v, "qA", "qB")
+    }
+
+    @Test fun nextTurnAnchorsOnTheLastServedRowAndKeepsItsOwnCompletion() {
+        val v = vm()
+        v.type("qA")
+        sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA")))
+        emit(ev(RunEvent.Completed("aA")))
+        v.onDraft("qB")
+        v.send()
+        idle()
+        assertEquals(2, fake.startN)
+        // The next turn anchors on the last row the server served, even though "aA" is not in it.
+        assertEquals(Anchor.Known(JsonPrimitive("qA").toString()), memory.storedAnchor)
+        display(v, "qA", "qB")
+        sessions.result = HermesResult.Err(HermesError.Server(503))
+        emit(ev(RunEvent.Completed("bB")))
+        display(v, "qA", "qB", "bB")
         assertEquals(ChatFailure.Api(HermesError.Server(503)), v.state.value.historyFailure)
         sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA"), row("aA", "assistant", "aA"), row("qB", "user", "qB"), row("bB", "assistant", "bB")))
         v.retryHistory()
@@ -1615,7 +1696,7 @@ class ChatViewModelTest {
         display(v, "qA", "aA", "qB", "bB")
     }
 
-    @Test fun answerSaveRetryCapturesDraftAndBlocksEditsAndRepeatedSendWhileSuspended() {
+    @Test fun sendHistoryReloadCapturesDraftAndBlocksEditsAndRepeatedSendWhileSuspended() {
         val v = vm()
         v.type("qA")
         sessions.result = HermesResult.Ok(listOf(row("qA", "user", "qA")))
@@ -1632,7 +1713,7 @@ class ChatViewModelTest {
         assertEquals(calls + 1, sessions.calls.size)
         assertEquals("qB", v.state.value.draft)
         assertEquals(1, fake.startN)
-        display(v, "qA", "aA")
+        display(v, "qA")
         held.complete(HermesResult.Ok(listOf(row("qA", "user", "qA"), row("aA", "assistant", "aA"))))
         idle()
         display(v, "qA", "aA", "qB")
@@ -1704,18 +1785,190 @@ class ChatViewModelTest {
         display(v, "q₁", "a₁")
     }
 
-    @Test fun missingAnchorKeepsFullHistoryAndAnswerAfterSend() {
+    @Test fun missingAnchorAfterCompletedTrustsTheServedTranscript() {
         memory.active = "run_9"
         memory.storedAnchor = Anchor.Known(JsonPrimitive("missing").toString())
         sessions.result = HermesResult.Ok(listOf(row("q0", "user", "q0"), row("a0", "assistant", "a0")))
         val v = vm()
         emit(ev(RunEvent.Completed("A")))
-        display(v, "q0", "a0", "A")
+        // The anchor row is gone (server rewrite); the reload replaces the local "A" bubble.
+        display(v, "q0", "a0")
         v.type("q2")
-        display(v, "q0", "a0", "A")
+        display(v, "q0", "a0", "q2")
+        assertEquals(1, fake.startN)
+        assertEquals("", v.state.value.draft)
+        assertNull(v.state.value.historyFailure)
+    }
+
+    @Test fun rewrittenTranscriptDropsTheAnchorRowButCompletedStillSends() {
+        sessions.result = HermesResult.Ok(listOf(row("u0", "user", "hi"), row("a0", "assistant", "older answer")))
+        val v = vm()
+        v.type("q")
+        // A mid-turn server rewrite (in-place compression) archives every old row id and re-inserts
+        // the transcript under new ids; the completed event itself settles the turn.
+        sessions.result = HermesResult.Ok(listOf(
+            row("u0r", "user", "hi"), row("a0r", "assistant", "older answer"),
+            row("q1", "user", "q"), row("a1", "assistant", "A"),
+        ))
+        emit(ev(RunEvent.Completed("A")))
+        display(v, "hi", "older answer", "q", "A")
+        v.type("next")
+        assertEquals(2, fake.startN)
+        assertEquals("run_2", v.state.value.run?.runId)
+        assertNull(v.state.value.historyFailure)
+    }
+
+    @Test fun identicalOldAndNewAnswersStillSendAfterRewrite() {
+        sessions.result = HermesResult.Ok(listOf(row("u0", "user", "hi"), row("a0", "assistant", "OK")))
+        val v = vm()
+        v.type("same")
+        // The rewrite re-ids every row; an older identical "OK" stays, the new turn's answer is absent.
+        sessions.result = HermesResult.Ok(listOf(
+            row("u0r", "user", "hi"), row("a0r", "assistant", "OK"), row("q1", "user", "same"),
+        ))
+        emit(ev(RunEvent.Completed("OK")))
+        display(v, "hi", "OK", "same")
+        v.type("next")
+        assertEquals(2, fake.startN)
+        assertEquals("run_2", v.state.value.run?.runId)
+        assertNull(v.state.value.historyFailure)
+    }
+
+    @Test fun completedOutputWithAnAdvisoryTailStillSends() {
+        sessions.result = HermesResult.Ok(listOf(row("u0", "user", "hi"), row("a0", "assistant", "older answer")))
+        val v = vm()
+        v.type("q")
+        // The server can append an advisory to run.completed's output after the transcript was
+        // persisted, so the stored assistant row keeps only "A".
+        sessions.result = HermesResult.Ok(listOf(
+            row("u0r", "user", "hi"), row("a0r", "assistant", "older answer"),
+            row("q1", "user", "q"), row("a1", "assistant", "A"),
+        ))
+        emit(ev(RunEvent.Completed("A\n\nNote: a file edit failed.")))
+        display(v, "hi", "older answer", "q", "A")
+        v.type("next")
+        assertEquals(2, fake.startN)
+        assertNull(v.state.value.historyFailure)
+    }
+
+    @Test fun notificationReplyAfterTranscriptRewriteStartsANewRun() {
+        sessions.result = HermesResult.Ok(listOf(row("u0", "user", "hi"), row("a0", "assistant", "older answer")))
+        val v = vm()
+        v.type("q")
+        sessions.result = HermesResult.Ok(listOf(
+            row("u0r", "user", "hi"), row("a0r", "assistant", "older answer"),
+            row("q1", "user", "q"), row("a1", "assistant", "A"),
+        ))
+        emit(ev(RunEvent.Completed("A")))
+        v.replyFromNotification("typed in the shade")
+        idle()
+        assertTrue(fake.calls.contains("start typed in the shade session=sess-1"))
+        assertEquals("", v.state.value.draft)
+        assertEquals(0, v.state.value.queuedReplies)
+        assertNull(v.state.value.historyFailure)
+    }
+
+    @Test fun notificationReplyThatCannotBeSentLandsInTheDraftOnce() {
+        memory.sessionFailure = true
+        val v = vm()
+        v.replyFromNotification("typed in the shade")
+        idle()
         assertEquals(0, fake.startN)
-        assertEquals("q2", v.state.value.draft)
-        assertEquals(ChatFailure.AnswerUnsaved, v.state.value.historyFailure)
+        assertEquals("typed in the shade", v.state.value.draft)
+        assertEquals(ChatFailure.ReplyKept, v.state.value.terminalFailure)
+        assertEquals(0, v.state.value.queuedReplies)
+        v.replyFromNotification("typed in the shade")
+        idle()
+        assertEquals("typed in the shade", v.state.value.draft)
+        assertEquals(0, fake.startN)
+    }
+
+    @Test fun notificationReplyThatFailsAtStartAlsoStaysInTheDraftOnce() {
+        fake.onStart = { HermesResult.Err(HermesError.Server(503)) }
+        val v = vm()
+        v.replyFromNotification("same reply")
+        idle()
+        assertEquals("same reply", v.state.value.draft)
+        v.replyFromNotification("same reply")
+        idle()
+        assertEquals("same reply", v.state.value.draft)
+        assertEquals(2, fake.startN)
+        assertEquals(ChatFailure.ReplyKept, v.state.value.terminalFailure)
+    }
+
+    @Test fun keptNotificationReplyLeavesTheDraftWhenTheRetryStarts() {
+        fake.onStart = { HermesResult.Err(HermesError.Server(503)) }
+        val v = vm()
+        v.replyFromNotification("same reply")
+        idle()
+        assertEquals("same reply", v.state.value.draft)
+        fake.onStart = { HermesResult.Ok(StartedRun("run_2")) }
+        v.replyFromNotification("same reply")
+        idle()
+        assertEquals(2, fake.startN)
+        assertEquals("", v.state.value.draft)
+        assertEquals("run_2", v.state.value.run?.runId)
+    }
+
+    @Test fun notificationReplyThatStartsKeepsAMatchingLineTheUserTyped() {
+        val v = vm()
+        v.onDraft("Plan:\nok\nthen deploy")
+        v.replyFromNotification("ok")
+        idle()
+        assertEquals(1, fake.startN)
+        assertEquals("Plan:\nok\nthen deploy", v.state.value.draft)
+    }
+
+    @Test fun keptReplyThenComposerSendDoesNotDeleteALaterTypedLine() {
+        fake.onStart = { HermesResult.Err(HermesError.Server(503)) }
+        val v = vm()
+        v.replyFromNotification("ok")
+        idle()
+        assertEquals("ok", v.state.value.draft)
+        fake.onStart = { HermesResult.Ok(StartedRun("run_2")) }
+        v.send()
+        idle()
+        assertEquals("run_2", v.state.value.run?.runId)
+        emit(ev(RunEvent.Completed("A")))
+        idle()
+        v.onDraft("Plan:\nok\nthen deploy")
+        v.replyFromNotification("ok")
+        idle()
+        assertEquals(3, fake.startN)
+        assertEquals("Plan:\nok\nthen deploy", v.state.value.draft)
+    }
+
+    @Test fun keptReplyDeletedByTheUserDoesNotDeleteALaterTypedLine() {
+        fake.onStart = { HermesResult.Err(HermesError.Server(503)) }
+        val v = vm()
+        v.replyFromNotification("ok")
+        idle()
+        assertEquals("ok", v.state.value.draft)
+        v.onDraft("")
+        v.onDraft("Plan:\nok\nthen deploy")
+        fake.onStart = { HermesResult.Ok(StartedRun("run_2")) }
+        v.replyFromNotification("ok")
+        idle()
+        assertEquals(2, fake.startN)
+        assertEquals("Plan:\nok\nthen deploy", v.state.value.draft)
+    }
+
+    @Test fun sendAfterCompletedRunKeepsTheDraftWhenTheReloadFails() {
+        sessions.result = HermesResult.Ok(listOf(row("q0", "user", "hi"), row("a0", "assistant", "older answer")))
+        val v = vm()
+        v.type("q")
+        sessions.result = HermesResult.Ok(listOf(
+            row("u0r", "user", "hi"), row("a0r", "assistant", "older answer"),
+            row("q1", "user", "q"), row("a1", "assistant", "A"),
+        ))
+        emit(ev(RunEvent.Completed("A")))
+        display(v, "hi", "older answer", "q", "A")
+        sessions.result = HermesResult.Err(HermesError.BridgeTimeout)
+        v.type("next")
+        idle()
+        assertEquals(1, fake.startN)
+        assertEquals("next", v.state.value.draft)
+        assertEquals(ChatFailure.Api(HermesError.BridgeTimeout), v.state.value.historyFailure)
     }
 
     @Test fun cancelledTurnWaitsForPostTerminalRequestBeforeRetiring() {
@@ -1772,5 +2025,265 @@ class ChatViewModelTest {
         sessions.result = HermesResult.Ok(listOf(row("q1", "user", "q₁"), row("a1", "assistant", "")))
         emit(ev(RunEvent.Completed("A")))
         display(v, "q₁")
+    }
+
+    // ---- attachments ----
+
+    private fun photo(byteCount: Int) = PendingAttachment.Photo(
+        PendingAttachment.newKey(), ByteArray(byteCount) { it.toByte() }, ByteArray(8) { it.toByte() },
+    )
+
+    @Test fun stagedTextFileSendsAsNamedTextPartAndClears() {
+        val v = vm()
+        v.addAttachments(listOf(PendingAttachment.TextFile(1, "notes.md", "hello file")))
+        v.onDraft("caption")
+        v.send()
+        idle()
+        assertEquals(1, fake.startN)
+        val part = lastContentPart()
+        assertEquals("text", (part["type"] as JsonPrimitive).content)
+        assertEquals("notes.md:\nhello file", (part["text"] as JsonPrimitive).content)
+        assertTrue(v.state.value.attachments.isEmpty())
+        val sent = v.state.value.messages.last { it.kind == MessageKind.User }
+        assertEquals("caption", sent.text)
+        assertEquals(listOf(SentAttachment.NamedFile("notes.md")), sent.attachments)
+    }
+
+    @Test fun stagedPhotoSendsImagePartAndBubbleGetsThumb() {
+        val v = vm()
+        v.addAttachments(listOf(photo(1024)))
+        v.send()
+        idle()
+        assertEquals(1, fake.startN)
+        val part = lastContentPart()
+        assertEquals("image_url", (part["type"] as JsonPrimitive).content)
+        val url = ((part["image_url"] as JsonObject)["url"] as JsonPrimitive).content
+        assertTrue(url.startsWith("data:image/jpeg;base64,"))
+        assertTrue(v.state.value.attachments.isEmpty())
+        val sent = v.state.value.messages.last { it.kind == MessageKind.User }
+        assertTrue(sent.attachments.single() is SentAttachment.LocalPhoto)
+    }
+
+    @Test fun oversizedAttachmentsRefuseAndKeepDraftAndChips() {
+        val v = vm()
+        v.addAttachments(listOf(photo(720 * 1024)))
+        v.onDraft("keep me")
+        v.send()
+        idle()
+        assertEquals(0, fake.startN)
+        assertEquals("keep me", v.state.value.draft)
+        assertEquals(1, v.state.value.attachments.size)
+        assertTrue(errors(v).any { it.error == ChatFailure.AttachmentTooLarge })
+    }
+
+    @Test fun attachmentsWhileRunActiveRefuseWithoutSending() {
+        val v = vm().startWithRun()
+        v.addAttachments(listOf(PendingAttachment.TextFile(1, "a.txt", "t")))
+        v.onDraft("with file")
+        v.send()
+        idle()
+        assertEquals(1, fake.startN)
+        assertTrue(fake.calls.none { it.startsWith("steer") })
+        assertEquals("with file", v.state.value.draft)
+        assertEquals(1, v.state.value.attachments.size)
+        assertTrue(errors(v).any { it.error == ChatFailure.AttachmentRunActive })
+    }
+
+    @Test fun fileAndPhotosMixedRefuseWithSpecificMessage() {
+        val v = vm()
+        v.addAttachments(listOf(PendingAttachment.TextFile(1, "a.txt", "t")))
+        v.addAttachments(listOf(photo(10)))
+        assertEquals(1, v.state.value.attachments.size)
+        assertTrue(errors(v).any { it.error == ChatFailure.AttachmentKindMixed })
+    }
+
+    @Test fun notificationReplyStaysTextOnlyAndKeepsStagedChips() {
+        val v = vm()
+        v.addAttachments(listOf(PendingAttachment.TextFile(1, "a.txt", "t")))
+        v.replyFromNotification("notif reply")
+        idle()
+        assertEquals(1, fake.startN)
+        assertEquals(listOf("start notif reply session=sess-1"), fake.calls.filter { it.startsWith("start") })
+        assertTrue(fake.startInputs.last() is JsonPrimitive)
+        assertEquals(1, v.state.value.attachments.size)
+    }
+
+    @Test fun pendingPhotoLoadKeepsSendOffUntilStaged() {
+        val v = vm()
+        fakeAttach.gate = CompletableDeferred()
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(10)))
+        v.loadPhotos(listOf(Uri.parse("content://x/1")))
+        idle()
+        assertEquals(1, v.state.value.pendingAttachments)
+        assertTrue(v.state.value.attachments.isEmpty())
+        v.onDraft("hi")
+        v.send()
+        idle()
+        assertEquals(0, fake.startN)
+        fakeAttach.gate!!.complete(Unit)
+        idle()
+        assertEquals(0, v.state.value.pendingAttachments)
+        assertEquals(1, v.state.value.attachments.size)
+        v.send()
+        idle()
+        assertEquals(1, fake.startN)
+        val part = lastContentPart()
+        assertEquals("image_url", (part["type"] as JsonPrimitive).content)
+        assertEquals(app.rasul.data.RunInputLimits.photoBudget(1), fakeAttach.photoBudgets.single())
+    }
+
+    private fun planOf(v: ChatViewModel): RunInputPlan =
+        planRunInput("cap", v.state.value.attachments)
+
+    @Test fun photosPickedOneByOneStillFitTheRequestCap() {
+        val v = vm()
+        val one = app.rasul.data.RunInputLimits.photoBudget(1)
+        val four = app.rasul.data.RunInputLimits.photoBudget(4)
+        v.addAttachments(listOf(photo(one)))
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(four), photo(four), photo(four)))
+        v.loadPhotos(listOf(Uri.parse("content://x/1"), Uri.parse("content://x/2"), Uri.parse("content://x/3")))
+        idle()
+        assertEquals(4, v.state.value.attachments.size)
+        assertTrue(planOf(v) is RunInputPlan.WithParts)
+        assertEquals(listOf(four), fakeAttach.fitBudgets)
+    }
+
+    @Test fun twoPlusTwoPhotosStillFitTheRequestCap() {
+        val v = vm()
+        val two = app.rasul.data.RunInputLimits.photoBudget(2)
+        val four = app.rasul.data.RunInputLimits.photoBudget(4)
+        v.addAttachments(listOf(photo(two), photo(two)))
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(four), photo(four)))
+        v.loadPhotos(listOf(Uri.parse("content://x/1"), Uri.parse("content://x/2")))
+        idle()
+        assertEquals(4, v.state.value.attachments.size)
+        assertTrue(planOf(v) is RunInputPlan.WithParts)
+    }
+
+    @Test fun inFlightPhotoLoadsCountInTheBudget() {
+        val v = vm()
+        val g1 = CompletableDeferred<Unit>()
+        val g2 = CompletableDeferred<Unit>()
+        fakeAttach.gateQueue += g1
+        fakeAttach.gateQueue += g2
+        v.loadPhotos(listOf(Uri.parse("content://x/1")))
+        v.loadPhotos(listOf(Uri.parse("content://x/2"), Uri.parse("content://x/3")))
+        idle()
+        assertEquals(
+            listOf(app.rasul.data.RunInputLimits.photoBudget(1), app.rasul.data.RunInputLimits.photoBudget(3)),
+            fakeAttach.photoBudgets,
+        )
+    }
+
+    @Test fun sessionSwitchDoesNotZeroAnotherLoadsPendingCount() {
+        val v = vm()
+        val gA = CompletableDeferred<Unit>()
+        val gB = CompletableDeferred<Unit>()
+        fakeAttach.gateQueue += gA
+        fakeAttach.gateQueue += gB
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(10)))
+        v.loadPhotos(listOf(Uri.parse("content://x/1")))
+        idle()
+        memory.storedSession = "sess-2"
+        v.retryHistory()
+        idle()
+        v.loadPhotos(listOf(Uri.parse("content://x/2")))
+        idle()
+        gA.complete(Unit)
+        idle()
+        assertEquals(1, v.state.value.pendingAttachments)
+        v.onDraft("hi")
+        v.send()
+        idle()
+        assertEquals(0, fake.startN)
+        gB.complete(Unit)
+        idle()
+        assertEquals(0, v.state.value.pendingAttachments)
+        assertEquals(1, v.state.value.attachments.size)
+    }
+
+    @Test fun sessionSwitchDuringFitDoesNotStageIntoTheNewChat() {
+        val v = vm()
+        val one = app.rasul.data.RunInputLimits.photoBudget(1)
+        val two = app.rasul.data.RunInputLimits.photoBudget(2)
+        v.addAttachments(listOf(photo(one)))
+        fakeAttach.fitGate = CompletableDeferred()
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(two)))
+        v.loadPhotos(listOf(Uri.parse("content://x/1")))
+        idle()
+        assertEquals(1, v.state.value.pendingAttachments)
+        assertEquals(1, fakeAttach.fitBudgets.size)
+        memory.storedSession = "sess-2"
+        v.retryHistory()
+        idle()
+        fakeAttach.fitGate!!.complete(Unit)
+        idle()
+        assertEquals(0, v.state.value.pendingAttachments)
+        assertTrue(v.state.value.attachments.isEmpty())
+    }
+
+    @Test fun photosLandingOutOfOrderStillFitTheRequestCap() {
+        val v = vm()
+        val one = app.rasul.data.RunInputLimits.photoBudget(1)
+        val two = app.rasul.data.RunInputLimits.photoBudget(2)
+        val gA = CompletableDeferred<Unit>()
+        val gB = CompletableDeferred<Unit>()
+        fakeAttach.gateQueue += gA
+        fakeAttach.gateQueue += gB
+        v.loadPhotos(listOf(Uri.parse("content://x/1")))
+        v.loadPhotos(listOf(Uri.parse("content://x/2")))
+        idle()
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(two)))
+        gB.complete(Unit)
+        idle()
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(one)))
+        gA.complete(Unit)
+        idle()
+        assertEquals(2, v.state.value.attachments.size)
+        assertEquals(0, v.state.value.pendingAttachments)
+        assertTrue(planOf(v) is RunInputPlan.WithParts)
+    }
+
+    @Test fun attachmentLoadOutlivesScreenScope() {
+        // The load runs on the ViewModel's scope: a recreated screen re-reads the same ChatState.
+        val v = vm()
+        fakeAttach.gate = CompletableDeferred()
+        fakeAttach.nextPhotos = AttachLoad.Ok(listOf(photo(10)))
+        v.loadPhotos(listOf(Uri.parse("content://x/1")))
+        idle()
+        assertEquals(1, v.state.value.pendingAttachments)
+        fakeAttach.gate!!.complete(Unit)
+        idle()
+        assertEquals(0, v.state.value.pendingAttachments)
+        assertEquals(1, v.state.value.attachments.size)
+    }
+
+    @Test fun attachmentsStagedWhileSendRunsAreKept() {
+        val v = vm()
+        sessions.historyGate = CompletableDeferred()
+        v.onDraft("hi")
+        v.send()
+        idle()
+        v.addAttachments(listOf(photo(10)))
+        sessions.historyGate!!.complete(Unit)
+        idle()
+        assertEquals(1, fake.startN)
+        assertEquals(1, v.state.value.attachments.size)
+    }
+
+    @Test fun historyRowWithImagePartShowsRemotePhoto() {
+        sessions.result = HermesResult.Ok(listOf(
+            SessionMessageDto(role = "user", content = buildJsonArray {
+                add(buildJsonObject { put("type", "text"); put("text", "cap") })
+                add(buildJsonObject {
+                    put("type", "image_url")
+                    put("image_url", buildJsonObject { put("url", "data:image/jpeg;base64,AA") })
+                })
+            }),
+        ))
+        val v = vm()
+        val sent = v.state.value.messages.last { it.kind == MessageKind.User }
+        assertEquals("cap", sent.text)
+        assertEquals(listOf(SentAttachment.RemotePhoto("data:image/jpeg;base64,AA")), sent.attachments)
     }
 }

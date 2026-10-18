@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -33,6 +34,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
@@ -48,7 +50,9 @@ import app.rasul.data.RelativeTimeLabels
 import app.rasul.data.formatRelativeTime
 import app.rasul.ui.LoadView
 import app.rasul.ui.text
+import app.rasul.ui.rateLimitMessage
 import app.rasul.data.Connection
+import app.rasul.data.SentAttachment
 import app.rasul.ui.PcPicker
 import app.rasul.ui.PcSwitcherHost
 import app.rasul.ui.components.BotAvatar
@@ -83,7 +87,7 @@ private data class PendingSession(val source: ActiveTarget.Ready, val session: S
 @Composable
 fun SessionsScreen(
     vm: SessionsViewModel,
-    onOpen: (id: String, source: ActiveTarget.Ready) -> Unit,
+    onOpen: (session: SessionDto, source: ActiveTarget.Ready) -> Unit,
     onPairPc: () -> Unit = {},
     onSearch: () -> Unit = {},
     onNewChat: () -> Unit = {},
@@ -109,7 +113,7 @@ fun SessionsScreen(
         ) { list ->
             SessionList(
                 list, source?.id.orEmpty(), System.currentTimeMillis(),
-                onOpen = { id -> source?.let { onOpen(id, it) } },
+                onOpen = { session -> source?.let { onOpen(session, it) } },
                 busy = busy != null,
                 onRename = { session -> source?.let { vm.clearRenameError(); rename = PendingSession(it, session) } },
                 onDelete = { session -> source?.let { confirmDelete = PendingSession(it, session) } },
@@ -157,7 +161,7 @@ internal fun SessionList(
     list: List<SessionDto>,
     avatarKey: String,
     nowMillis: Long,
-    onOpen: (String) -> Unit,
+    onOpen: (SessionDto) -> Unit,
     busy: Boolean = false,
     onRename: (SessionDto) -> Unit = {},
     onDelete: (SessionDto) -> Unit = {},
@@ -193,7 +197,7 @@ internal fun SessionList(
             var menuOpen by remember(s.id) { mutableStateOf(false) }
             Box {
                 RasulRow(
-                    onClick = { onOpen(s.id) },
+                    onClick = { onOpen(s) },
                     onLongClick = { menuOpen = true },
                     onLongClickLabel = stringResource(R.string.ux3c_chat_actions),
                     hairlineStart = if (isArabic) 78.dp else 82.dp, hairlineEnd = if (isArabic) 20.dp else 16.dp,
@@ -205,6 +209,15 @@ internal fun SessionList(
                 ) {
                     RowTitle(s.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.session_untitled))
                     s.preview?.takeIf { it.isNotBlank() }?.let { RowSub(it, maxLines = 1) }
+                    if (s.isCronRun) {
+                        Text(
+                            stringResource(R.string.session_job_run),
+                            modifier = Modifier.padding(top = 3.dp).background(Rasul.colors.selected, RasulShapes.filter)
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                            color = Rasul.colors.accent,
+                            style = RasulType.chip,
+                        )
+                    }
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     SessionMenuAction(stringResource(R.string.ux3c_chat_rename), enabled = !busy) {
@@ -303,11 +316,15 @@ internal fun SessionDeleteConfirmDialog(title: String, onCancel: () -> Unit, onC
 }
 
 internal fun sessionValidationText(error: HermesError.Server, context: Context): String =
-    if (error.serverCode == "invalid_title") {
+    rateLimitMessage(error, context) ?: if (error.serverCode == "invalid_title") {
         context.getString(R.string.ux3c_session_validation_invalid_title)
     } else {
         context.getString(R.string.ux3c_session_validation_fallback, error.message.orEmpty())
     }
+
+internal fun sessionMessageText(error: HermesError.Server, context: Context): String =
+    rateLimitMessage(error, context) ?: error.message?.takeIf { it.isNotBlank() }
+    ?: context.getString(R.string.err_server, error.code)
 
 @Composable
 private fun HermesError.sessionValidationMessage(): String = when (this) {
@@ -316,8 +333,10 @@ private fun HermesError.sessionValidationMessage(): String = when (this) {
 }
 
 @Composable
-private fun HermesError.sessionMessage(): String =
-    (this as? HermesError.Server)?.message?.takeIf { it.isNotBlank() } ?: text()
+private fun HermesError.sessionMessage(): String = when (this) {
+    is HermesError.Server -> sessionMessageText(this, LocalContext.current)
+    else -> text()
+}
 
 @Composable
 private fun relativeSessionTime(value: kotlinx.serialization.json.JsonElement?, nowMillis: Long): String? {
@@ -346,16 +365,34 @@ private fun relativeSessionTime(value: kotlinx.serialization.json.JsonElement?, 
 }
 
 @Composable
-fun TranscriptScreen(vm: TranscriptViewModel, onBack: () -> Unit) {
+fun TranscriptScreen(
+    vm: TranscriptViewModel,
+    onBack: () -> Unit,
+    connectionUnchanged: Boolean = true,
+    onContinue: () -> Unit = {},
+) {
     val state by vm.state.collectAsState()
+    val continuing by vm.continuing.collectAsState()
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg).padding(top = 16.dp)) {
         RasulNavBar(stringResource(R.string.transcript_title), stringResource(R.string.back), onBack, horizontalPadding = 40.dp, leadingAlignment = Alignment.Center)
-        LoadView(state, onRetry = vm::refresh) { msgs -> TranscriptMessages(msgs) }
+        if (vm.canContinue && connectionUnchanged && state is Load.Ready) ContinueInChatButton(enabled = !continuing, onClick = onContinue)
+        LoadView(state, onRetry = vm::refresh) { msgs -> TranscriptMessages(msgs, vm.isCronSession) }
     }
 }
 
 @Composable
-internal fun TranscriptMessages(msgs: List<SessionMessageDto>) {
+internal fun ContinueInChatButton(enabled: Boolean = true, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+    ) {
+        Text(stringResource(R.string.transcript_continue))
+    }
+}
+
+@Composable
+internal fun TranscriptMessages(msgs: List<SessionMessageDto>, isCronRun: Boolean = false) {
     if (msgs.isEmpty()) {
         Text(
             stringResource(R.string.transcript_empty), style = RasulType.body, color = Rasul.colors.muted,
@@ -366,15 +403,45 @@ internal fun TranscriptMessages(msgs: List<SessionMessageDto>) {
             Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp, top = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            items(msgs) { m ->
+            itemsIndexed(msgs) { index, m ->
                 Column(Modifier.fillMaxWidth()) {
-                    Text(
-                        listOfNotNull(m.role?.let { roleLabel(it) }, m.toolName).joinToString(" · "),
-                        style = RasulType.chip.copy(lineHeight = 15.sp),
-                        modifier = Modifier.heightIn(min = 18.dp),
-                        color = Rasul.colors.accent,
-                    )
-                    Text(m.text(), style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.heightIn(min = 21.dp))
+                    if (isCronRun && index == 0) {
+                        var expanded by remember(m.id) { mutableStateOf(false) }
+                        val stateDescription = stringResource(
+                            if (expanded) R.string.transcript_instructions_expanded else R.string.transcript_instructions_collapsed,
+                        )
+                        Text(
+                            stringResource(R.string.transcript_job_instructions),
+                            style = RasulType.chip.copy(lineHeight = 15.sp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                .clickable(role = Role.Button) { expanded = !expanded }
+                                .semantics { role = Role.Button; this.stateDescription = stateDescription }.padding(vertical = 8.dp),
+                            color = Rasul.colors.accent,
+                        )
+                        if (expanded) {
+                            Text(m.displayText(), style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.heightIn(min = 21.dp))
+                        }
+                    } else {
+                        Text(
+                            listOfNotNull(m.role?.let { roleLabel(it) }, m.toolName).joinToString(" · "),
+                            style = RasulType.chip.copy(lineHeight = 15.sp),
+                            modifier = Modifier.heightIn(min = 18.dp),
+                            color = Rasul.colors.accent,
+                        )
+                        val text = m.displayText()
+                        if (text.isNotEmpty() || m.attachments().isEmpty()) {
+                            Text(text, style = RasulType.body, color = Rasul.colors.ink, modifier = Modifier.heightIn(min = 21.dp))
+                        }
+                        m.attachments().forEach { a ->
+                            Text(
+                                when (a) {
+                                    is SentAttachment.NamedFile -> a.name
+                                    else -> stringResource(R.string.chat_photo_label)
+                                },
+                                style = RasulType.body, color = Rasul.colors.muted, modifier = Modifier.heightIn(min = 21.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -392,7 +459,7 @@ private fun roleLabel(role: String): String = when (role) {
 }
 
 private val sampleSessions = listOf(
-    SessionDto("1", "Nightly deploy summary", preview = "The report is ready to review.", startedAt = JsonPrimitive(1_759_999_700), messageCount = 12),
+    SessionDto("1", "Nightly deploy summary", source = "cron", preview = "The report is ready to review.", startedAt = JsonPrimitive(1_759_999_700), messageCount = 12),
     SessionDto(
         "2", "Fix flaky login test", preview = "I found the timing issue.", startedAt = JsonPrimitive(1_759_992_800),
         endedAt = JsonPrimitive(1_759_999_000), messageCount = 4,
@@ -411,6 +478,7 @@ private val sampleMessages = listOf(
 private fun TranscriptPreviewBody() = RasulTheme(false) {
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg).padding(top = 16.dp)) {
         RasulNavBar(stringResource(R.string.transcript_title), stringResource(R.string.back), {}, horizontalPadding = 40.dp, leadingAlignment = Alignment.Center)
+        ContinueInChatButton {}
         TranscriptMessages(sampleMessages)
     }
 }

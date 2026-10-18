@@ -177,6 +177,18 @@ class LargeFontControlsUiTest {
     @Test fun failedJobActionsFitAt390dpArabicFontScale1() = assertJobActionsFit(JobCase.FAILED, 390, "ar", 1f)
     @Test fun failedJobActionsFitAt390dpArabicFontScale2() = assertJobActionsFit(JobCase.FAILED, 390, "ar", 2f)
 
+    @Test fun scheduledJobActionsWithHistoryFitAt390dpEnglishFontScale1() =
+        assertJobActionsFit(JobCase.SCHEDULED, 390, "en", 1f, history = true)
+
+    @Test fun scheduledJobActionsWithHistoryFitAt390dpEnglishFontScale2() =
+        assertJobActionsFit(JobCase.SCHEDULED, 390, "en", 2f, history = true)
+
+    @Test fun scheduledJobActionsWithHistoryFitAt320dpEnglishFontScale2() =
+        assertJobActionsFit(JobCase.SCHEDULED, 320, "en", 2f, history = true)
+
+    @Test fun scheduledJobActionsWithHistoryFitAt390dpArabicFontScale1() =
+        assertJobActionsFit(JobCase.SCHEDULED, 390, "ar", 1f, history = true)
+
     @Test fun jobFormCancelFitsAtLargeFontEnglish() = assertCancelFitsAtLargeFont("en", true)
 
     @Test fun jobFormCancelFitsAtLargeFontArabic() = assertCancelFitsAtLargeFont("ar", true)
@@ -265,7 +277,7 @@ class LargeFontControlsUiTest {
 
     private enum class JobCase { SCHEDULED, PAUSED, COMPLETED, FAILED }
 
-    private fun assertJobActionsFit(state: JobCase, widthDp: Int, language: String, fontScale: Float) {
+    private fun assertJobActionsFit(state: JobCase, widthDp: Int, language: String, fontScale: Float, history: Boolean = false) {
         RuntimeEnvironment.setQualifiers("+%s-w%ddp-h700dp".format(language, widthDp))
         val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
         val job = when (state) {
@@ -278,6 +290,9 @@ class LargeFontControlsUiTest {
             context.getString(app.rasul.R.string.ux3c_job_edit),
             context.getString(app.rasul.R.string.ux3c_job_delete),
         )
+        if (history) {
+            actionLabels += context.getString(app.rasul.R.string.job_run_history)
+        }
         if (state == JobCase.SCHEDULED || state == JobCase.PAUSED) {
             actionLabels += context.getString(app.rasul.R.string.job_run_now)
         }
@@ -289,7 +304,8 @@ class LargeFontControlsUiTest {
                     val measurer = rememberTextMeasurer()
                     actionLabels.forEach { label -> refWidths[label] = measurer.measure(label, style = RasulType.buttonSmall).size.width.toFloat() }
                     Box(Modifier.width(widthDp.dp)) {
-                        JobList(listOf(job), busy = false, onToggle = {}, onRunNow = {})
+                        JobList(listOf(job), busy = false, onToggle = {}, onRunNow = {},
+                            historyAvailable = history, onHistory = {})
                     }
                 }
             }

@@ -21,16 +21,11 @@ sealed interface ActiveTarget {
     data class Ready(val id: String, val name: String, val target: HermesTarget) : ActiveTarget
 }
 
-internal fun readyOrNoKey(c: Connection, key: String?): ActiveTarget =
-    if (key.isNullOrEmpty()) ActiveTarget.NoKey(c.name) else ActiveTarget.Ready(c.id, c.name, HermesTarget(c.baseUrl, c.profile, key))
+internal fun readyOrNoKey(c: Connection, key: String?, revision: String = "0"): ActiveTarget =
+    if (key.isNullOrEmpty()) ActiveTarget.NoKey(c.name) else ActiveTarget.Ready(c.id, c.name, HermesTarget(c.baseUrl, c.profile, key, revision = revision))
 
 suspend fun ConnectionStore.activeTarget(): ActiveTarget = try {
-    val c = active()
-    if (c == null) {
-        ActiveTarget.None
-    } else {
-        readyOrNoKey(c, apiKey(c.id))
-    }
+    snapshots.first().target
 } catch (e: CancellationException) {
     throw e
 } catch (e: Exception) {

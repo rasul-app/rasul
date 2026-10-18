@@ -72,7 +72,7 @@ fun SearchScreen(
     sessions: Load<List<SessionDto>>,
     jobs: Load<List<JobDto>>,
     onBack: () -> Unit,
-    onOpenChat: (String, ActiveTarget.Ready) -> Unit,
+    onOpenChat: (String, ActiveTarget.Ready, String?) -> Unit,
     onOpenBot: (ChatBotChoice) -> Unit,
     onOpenJobs: () -> Unit,
     initialQuery: String = "",
@@ -109,7 +109,7 @@ fun SearchScreen(
                 SearchEntry("chat:${session.id}", SearchCategory.Chat, title, session.preview),
                 avatarKey = source?.id,
                 preview = session.preview?.takeIf { it.isNotBlank() },
-                action = source?.let { target -> ({ onOpenChat(session.id, target) }) },
+                action = source?.let { target -> ({ onOpenChat(session.id, target, session.source) }) },
             ))
         }
         (jobs as? Load.Ready)?.value?.forEach { job ->
@@ -284,7 +284,7 @@ private fun previewSessionState() = Load.Ready("Research", previewSessions, prev
 private fun SearchFilteredEn() = RasulTheme(false) {
     SearchScreen(
         ConnectionsState.Loaded(listOf(previewConnection)), previewBridges,
-        previewSessionState(), Load.Ready("Research", previewJobs, previewSource), {}, { _, _ -> }, {}, {},
+        previewSessionState(), Load.Ready("Research", previewJobs, previewSource), {}, { _, _, _ -> }, {}, {},
         initialQuery = "deploy", initialFilter = SearchFilter.Chats,
     )
 }
@@ -294,7 +294,7 @@ private fun SearchFilteredEn() = RasulTheme(false) {
 private fun SearchFilteredAr() = RasulTheme(false) {
     SearchScreen(
         ConnectionsState.Loaded(listOf(previewConnection)), previewBridges,
-        previewSessionState(), Load.Ready("Research", previewJobs, previewSource), {}, { _, _ -> }, {}, {},
+        previewSessionState(), Load.Ready("Research", previewJobs, previewSource), {}, { _, _, _ -> }, {}, {},
         initialQuery = "deploy", initialFilter = SearchFilter.Chats,
     )
 }
@@ -306,7 +306,7 @@ private fun SearchStatePreview(query: String = "", loading: Boolean = false, err
         BridgeBotsState(loaded = !loading),
         if (loading) Load.Loading else if (error) Load.Failed(HermesError.Server(503)) else previewSessionState().copy(value = emptyList()),
         if (loading) Load.Loading else if (error) Load.Failed(HermesError.Server(503)) else Load.Ready("Research", emptyList(), previewSource),
-        {}, { _, _ -> }, {}, {}, initialQuery = query,
+        {}, { _, _, _ -> }, {}, {}, initialQuery = query,
     )
 }
 

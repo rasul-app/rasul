@@ -1,5 +1,11 @@
 package app.rasul.settings
 
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -8,14 +14,17 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -25,11 +34,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.core.content.ContextCompat
 import app.rasul.R
 import app.rasul.data.ActiveTarget
 import app.rasul.data.CapabilitiesDto
@@ -83,6 +94,9 @@ internal fun pairedBridgeRows(state: BridgeBotsState): List<PairedBridgeRow> = s
 fun skillsToolsEntryVisible(capabilities: CapabilitiesDto?): Boolean =
     capabilities?.advertisesEndpoint("skills") == true && capabilities.advertisesEndpoint("toolsets")
 
+/** The approval-alerts toggle exists only once a bridge bot exists: without one there is nothing to watch. */
+internal fun approvalAlertsRowVisible(bots: BridgeBotsState): Boolean = bots.groups.any { it.profiles.isNotEmpty() }
+
 /** More screen and language picker. The PCs group lists saved connections and an add action. */
 @Composable
 fun MoreScreen(
@@ -100,11 +114,14 @@ fun MoreScreen(
     versionName: String = "",
     onAppearanceChanged: (AppearanceOption) -> Unit = {},
     onHapticsChanged: (Boolean) -> Unit = {},
+    approvalAlertsEnabled: Boolean = false,
+    onApprovalAlertsChanged: (Boolean) -> Unit = {},
     onHelp: () -> Unit = {},
     onPrivacy: () -> Unit = {},
     onFeedback: () -> Unit = {},
     client: HermesClient? = null,
     onSkillsTools: () -> Unit = {},
+    onUsage: () -> Unit = {},
 ) {
     var current by remember { mutableStateOf(LanguageOption.fromTags(AppCompatDelegate.getApplicationLocales().toLanguageTags())) }
     var sheet by rememberSaveable { mutableStateOf(false) }
@@ -133,6 +150,9 @@ fun MoreScreen(
             versionName = versionName,
             onAppearanceRow = { appearanceSheet = true },
             onHapticsChanged = onHapticsChanged,
+            showApprovalAlerts = approvalAlertsRowVisible(bridgeState),
+            approvalAlerts = approvalAlertsEnabled,
+            onApprovalAlertsChanged = onApprovalAlertsChanged,
             onHelp = onHelp,
             onPrivacy = onPrivacy,
             onFeedback = onFeedback,
@@ -140,6 +160,9 @@ fun MoreScreen(
             onBridgeOpen = onBridgeOpen,
             skillsToolsTargetName = (pcState.target as? ActiveTarget.Ready)?.name.takeIf { showSkillsTools },
             onSkillsTools = onSkillsTools,
+            usageTargetName = (pcState.target as? ActiveTarget.Ready)?.name,
+            usageNeedsBridge = (pcState.target as? ActiveTarget.Ready)?.target?.bridge == null,
+            onUsage = onUsage,
             showAppLockSetting = true,
             appLockEnabled = appLockEnabled,
             appLockAvailable = appLockAvailable,
@@ -180,11 +203,17 @@ fun MoreContent(
     versionName: String = "",
     onAppearanceRow: () -> Unit = {},
     onHapticsChanged: (Boolean) -> Unit = {},
+    showApprovalAlerts: Boolean = false,
+    approvalAlerts: Boolean = false,
+    onApprovalAlertsChanged: (Boolean) -> Unit = {},
     onHelp: () -> Unit = {},
     onPrivacy: () -> Unit = {},
     onFeedback: () -> Unit = {},
     skillsToolsTargetName: String? = null,
     onSkillsTools: () -> Unit = {},
+    usageTargetName: String? = null,
+    usageNeedsBridge: Boolean = false,
+    onUsage: () -> Unit = {},
 ) {
     val c = Rasul.colors
     val rowPad = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 14.dp)
@@ -235,10 +264,33 @@ fun MoreContent(
                 }
             }
         }
+        if (usageTargetName != null) {
+            SectionLabel(stringResource(R.string.desktop_section))
+            InsetGroup(contentPadding = PaddingValues(vertical = 16.dp)) {
+                if (usageNeedsBridge) {
+                    Text(
+                        stringResource(R.string.usage_needs_bridge), style = RasulType.bodySmall, color = c.muted,
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    )
+                } else {
+                    RasulRow(
+                        onClick = onUsage, last = true, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                        leading = { Icon(RasulIcons.Clock, null, tint = c.accent, modifier = Modifier.size(24.dp)) },
+                        trailing = { Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp)) },
+                    ) {
+                        RowTitle(stringResource(R.string.usage_title))
+                        RowSub(stringResource(R.string.usage_row_sub, usageTargetName), maxLines = 1)
+                    }
+                }
+            }
+        }
         SectionLabel(stringResource(R.string.more_settings))
         InsetGroup(contentPadding = PaddingValues(vertical = 16.dp)) {
             if (showAppLockSetting) {
                 AppLockSettingRow(appLockEnabled, appLockAvailable, onAppLockChanged, last = false)
+            }
+            if (showApprovalAlerts) {
+                ApprovalAlertsRow(approvalAlerts, onApprovalAlertsChanged)
             }
             RasulRow(
                 onClick = onAppearanceRow, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
@@ -350,6 +402,57 @@ private fun AppLockSettingRow(
     }
 }
 
+/**
+ * Opt-in approval alerts while Rasul is closed. Enabling asks for POST_NOTIFICATIONS on API 33+;
+ * a denial keeps the toggle off and shows where to allow it. Below-33 needs no permission.
+ */
+@Composable
+private fun ApprovalAlertsRow(enabled: Boolean, onChanged: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    var denied by rememberSaveable { mutableStateOf(false) }
+    val askNotifications = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) onChanged(true) else denied = true }
+    RasulRow(
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 6.dp),
+        gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+        leading = { Icon(RasulIcons.Bot, null, tint = Rasul.colors.ink, modifier = Modifier.size(24.dp)) },
+        trailing = {
+            app.rasul.ui.components.RasulToggle(
+                enabled,
+                label = stringResource(R.string.approval_alerts),
+            ) { checked ->
+                when {
+                    !checked -> onChanged(false)
+                    Build.VERSION.SDK_INT < 33 -> onChanged(true)
+                    ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) ==
+                        PackageManager.PERMISSION_GRANTED -> onChanged(true)
+                    else -> askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        },
+    ) {
+        // Plain Text on purpose: the single-line ellipsis path of RowTitle reports visual overflow for short Arabic titles.
+        Text(stringResource(R.string.approval_alerts), style = RasulType.rowTitle, color = Rasul.colors.ink, modifier = Modifier.fillMaxWidth())
+        Text(stringResource(R.string.approval_alerts_summary), style = RasulType.rowSub, color = Rasul.colors.muted, modifier = Modifier.fillMaxWidth())
+    }
+    if (denied) {
+        AlertDialog(
+            onDismissRequest = { denied = false },
+            title = { Text(stringResource(R.string.approval_alerts)) },
+            text = { Text(stringResource(R.string.approval_alerts_denied)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    denied = false
+                    context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+                }) { Text(stringResource(R.string.pair_open_settings)) }
+            },
+            dismissButton = { TextButton(onClick = { denied = false }) { Text(stringResource(R.string.cancel)) } },
+        )
+    }
+}
+
 @Composable
 private fun LockSettingPreview() {
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
@@ -422,11 +525,37 @@ private fun SettingsAr() = RasulTheme(false) {
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 900)
 @Composable
-private fun MoreBridgeEn() = RasulTheme(false) { MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}, bridges = sampleBridgeRows) }
+private fun MoreBridgeEn() = RasulTheme(false) {
+    MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}, bridges = sampleBridgeRows, usageTargetName = "My PC")
+}
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 900, locale = "ar")
 @Composable
-private fun MoreBridgeAr() = RasulTheme(false) { MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}, bridges = sampleBridgeRows) }
+private fun MoreBridgeAr() = RasulTheme(false) {
+    MoreContent(samplePcs, "a", LanguageOption.System, {}, {}, {}, bridges = sampleBridgeRows, usageTargetName = "My PC")
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900)
+@Composable
+private fun MoreAlertsEn() = RasulTheme(false) {
+    MoreContent(
+        samplePcs, "a", LanguageOption.System, {}, {}, {},
+        bridges = sampleBridgeRows, showApprovalAlerts = true, approvalAlerts = true,
+        showAppLockSetting = true, appearance = AppearanceOption.System,
+        hapticsEnabled = true, versionName = PREVIEW_VERSION,
+    )
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 900, locale = "ar")
+@Composable
+private fun MoreAlertsAr() = RasulTheme(false) {
+    MoreContent(
+        samplePcs, "a", LanguageOption.System, {}, {}, {},
+        bridges = sampleBridgeRows, showApprovalAlerts = true, approvalAlerts = true,
+        showAppLockSetting = true, appearance = AppearanceOption.System,
+        hapticsEnabled = true, versionName = PREVIEW_VERSION,
+    )
+}
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 700)
 @Composable

@@ -377,9 +377,16 @@ async def test_phone_authorization_dropped_route_allowlist_and_audit(tmp_path):
                            "/v1/profiles/default/hermes/health?secret=" + phone_secret):
                 await send(link, "GET", target)
                 assert (await read_response(reader))[0] == 404
+            await send(link, "POST", "/v1/profiles/default/hermes/api/sessions/one/fork", {"title": "one fork"})
+            assert (await read_response(reader))[0] == 200
+            assert upstream.requests[-1][0:2] == ("POST", "/api/sessions/one/fork")
+            await send(link, "POST", "/v1/profiles/default/hermes/api/sessions/one/model",
+                       {"model": "sample-model", "provider": "sample-provider", "require_model_lock": True})
+            assert (await read_response(reader))[0] == 200
+            assert upstream.requests[-1][0:2] == ("POST", "/api/sessions/one/model")
             await send(link, "DELETE", "/v1/devices/" + device)
             assert (await read_response(reader))[0] == 404
-            assert len(upstream.requests) == 1
+            assert len(upstream.requests) == 3
             assert link.ssl.version() == "TLSv1.3"
             assert not link.ssl.session_reused
             assert not link.ssl.session.has_ticket
@@ -389,6 +396,28 @@ async def test_phone_authorization_dropped_route_allowlist_and_audit(tmp_path):
             assert secret not in log
         values = [json.loads(line) for line in log.splitlines()]
         assert all(set(row) == {"time", "device_id", "method", "route", "profile_id", "status"} for row in values)
+        assert any(row["route"] == "/v1/profiles/{id}/hermes/api/sessions/{id}/fork" and row["status"] == 200 for row in values)
+        assert any(row["route"] == "/v1/profiles/{id}/hermes/api/sessions/{id}/model" and row["status"] == 200 for row in values)
+
+
+@asynchronous
+async def test_fork_and_model_route_limits_return_specific_codes(tmp_path):
+    async with running(tmp_path) as (bridge, _):
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            fork = "/v1/profiles/default/hermes/api/sessions/one/fork"
+            for _ in range(6):
+                await send(link, "POST", fork, {"title": "sample fork"})
+                assert (await read_response(reader))[0] == 200
+            await send(link, "POST", fork, {"title": "sample fork"})
+            assert await read_response(reader) == (429, {"error": "fork_rate_limited"})
+
+            model = "/v1/profiles/default/hermes/api/sessions/one/model"
+            for _ in range(20):
+                await send(link, "POST", model, {"model": "sample-model", "provider": "sample-provider"})
+                assert (await read_response(reader))[0] == 200
+            await send(link, "POST", model, {"model": "sample-model", "provider": "sample-provider"})
+            assert await read_response(reader) == (429, {"error": "model_rate_limited"})
 
 
 @asynchronous
@@ -465,6 +494,11 @@ async def test_session_patch_limits_fields_and_delete_replaces_authorization(tmp
             method, target, head, _ = upstream.requests[-1]
             assert (method, target) == ("DELETE", "/api/jobs/job")
             assert head["authorization"] == "Bearer " + bridge.profiles.key("default")
+            forwarded = len(upstream.requests)
+            await link.write((f"POST /v1/profiles/default/hermes/api/sessions/one/fork HTTP/1.1\r\n"
+                              f"Host: my-pc\r\nContent-Length: {MAX_BODY + 1}\r\n\r\n").encode())
+            assert (await read_response(reader)) == (413, {"error": "Request body too large"})
+            assert len(upstream.requests) == forwarded
         audit = bridge.audit.path.read_text()
         assert "renamed" not in audit and "end_reason" not in audit
         rows = [json.loads(line) for line in audit.splitlines()]
@@ -608,6 +642,22 @@ def test_connection_device_and_pair_limits():
     assert limits.pair()
 
 
+def test_fork_and_model_limits_are_scoped_by_device_and_profile():
+    now = [0]
+    limits = Limits(clock=lambda: now[0])
+    assert all(limits.fork("device-one", "profile-one") for _ in range(6))
+    assert not limits.fork("device-one", "profile-one")
+    assert limits.fork("device-one", "profile-two")
+    assert limits.fork("device-two", "profile-one")
+    assert all(limits.model("device-one", "profile-one") for _ in range(20))
+    assert not limits.model("device-one", "profile-one")
+    assert limits.model("device-one", "profile-two")
+    assert limits.model("device-two", "profile-one")
+    now[0] = 60
+    assert limits.fork("device-one", "profile-one")
+    assert limits.model("device-one", "profile-one")
+
+
 @asynchronous
 async def test_wrong_server_pin_rejected(tmp_path):
     async with running(tmp_path) as (bridge, _):
@@ -680,6 +730,8 @@ def test_new_routes_allow_only_their_methods_and_query_keys():
         ("GET", "/api/sessions/one", "/api/sessions/{id}"),
         ("PATCH", "/api/sessions/one", "/api/sessions/{id}"),
         ("DELETE", "/api/sessions/one", "/api/sessions/{id}"),
+        ("POST", "/api/sessions/one/fork", "/api/sessions/{id}/fork"),
+        ("POST", "/api/sessions/one/model", "/api/sessions/{id}/model"),
         ("POST", "/api/jobs", "/api/jobs"),
         ("GET", "/api/jobs/one", "/api/jobs/{id}"),
         ("PATCH", "/api/jobs/one", "/api/jobs/{id}"),
@@ -691,6 +743,20 @@ def test_new_routes_allow_only_their_methods_and_query_keys():
         assert allowed(method, target + "?unexpected=value") is None
     assert allowed("GET", "/api/model/options?refresh=true") == "/api/model/options"
     assert allowed("GET", "/api/model/options?refresh=true&unexpected=value") is None
+
+
+def test_fork_and_model_routes_allow_only_post_on_exactly_those_paths():
+    for suffix in ("fork", "model"):
+        base = f"/api/sessions/one/{suffix}"
+        assert allowed("POST", base) == f"/api/sessions/{{id}}/{suffix}"
+        for method in ("GET", "PUT", "PATCH", "DELETE", "HEAD"):
+            assert allowed(method, base) is None
+        for target in (base + "/", base + "/extra", base + "x", f"/api/sessions/{suffix}", f"/api/sessions/one/two/{suffix}",
+                       f"/api/sessions/%2e%2e/{suffix}", base + "?title=a", base + "#x"):
+            assert allowed("POST", target) is None
+    # The other session sub-routes stay blocked.
+    for target in ("/api/sessions/one/chat", "/api/sessions/one/chat/stream", "/api/sessions/one/messages/extra"):
+        assert allowed("POST", target) is None
 
 
 @asynchronous
@@ -2329,3 +2395,68 @@ async def test_instructions_directory_fsync_failure_is_committed(tmp_path, monke
         assert len(failed) == 1
         assert soul.read_bytes() == b"Saved"
         assert not list(soul.parent.glob(".instructions-*"))
+
+
+@asynchronous
+async def test_session_actions_reject_unlisted_fields_and_invalid_types(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            cases = [
+                ("fork", {"title": "sample", "id": "chosen"}),
+                ("fork", {"title": 1}),
+                ("fork", []),
+                ("model", {"model": "sample", "provider": "sample", "api_key": "sample"}),
+                ("model", {"model": "sample", "provider": "sample", "base_url": "https://example.invalid"}),
+                ("model", {"model": 1}),
+                ("model", {"provider": {}}),
+                ("model", {"require_model_lock": "true"}),
+                ("model", []),
+            ]
+            for action, body in cases:
+                await send(link, "POST", "/v1/profiles/default/hermes/api/sessions/one/" + action, body)
+                assert await read_response(reader) == (400, {"error": action + "_invalid_fields"}), (action, body)
+            assert upstream.requests == []
+
+
+@asynchronous
+async def test_session_actions_reserialize_allowed_bodies(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            for action, body in (
+                ("fork", {"title": "sample"}),
+                ("model", {"model": "sample", "provider": "sample", "require_model_lock": True}),
+            ):
+                await send(link, "POST", "/v1/profiles/default/hermes/api/sessions/one/" + action, body,
+                           extra="Content-Type: text/plain\r\n")
+                assert (await read_response(reader))[0] == 200
+                assert upstream.requests[-1][2]["content-type"] == "application/json"
+                assert json.loads(upstream.requests[-1][3]) == body
+
+
+@asynchronous
+async def test_session_action_audit_records_prefixed_route_and_device_limit(tmp_path):
+    async with running(tmp_path) as (bridge, _):
+        identity, device = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            for action, count in (("fork", 6), ("model", 20)):
+                for _ in range(count + 1):
+                    await send(link, "POST", "/v1/profiles/default/hermes/api/sessions/one/" + action, {})
+                    status, _ = await read_response(reader)
+                assert status == 429
+                rows = [json.loads(line) for line in bridge.audit.path.read_text().splitlines()]
+                assert any(row.get("route") == "/v1/profiles/{id}/hermes/api/sessions/{id}/" + action
+                           and row.get("device_id") == device and row.get("status") == 429 for row in rows)
+
+
+def test_session_action_global_cap_evicts_oldest_key():
+    now = [0]
+    limits = Limits(clock=lambda: now[0])
+    for i in range(256):
+        assert limits.fork(str(i), "default")
+        now[0] += 0.01
+    assert limits.fork("new", "default")
+    assert len(limits.session_requests) == 256
+    assert ("0", "default", "fork") not in limits.session_requests
+    assert ("1", "default", "fork") in limits.session_requests

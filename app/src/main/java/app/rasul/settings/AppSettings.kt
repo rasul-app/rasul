@@ -28,10 +28,12 @@ enum class AppearanceOption {
 data class AppPreferences(
     val appearance: AppearanceOption = AppearanceOption.System,
     val hapticsEnabled: Boolean = true,
+    val approvalAlerts: Boolean = false,
 )
 
 private val APPEARANCE = stringPreferencesKey("appearance_v1")
 private val HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled_v1")
+private val APPROVAL_ALERTS = booleanPreferencesKey("approval_alerts_v1")
 
 class AppSettings(private val dataStore: DataStore<Preferences>) {
     private val writes = MutableStateFlow(0L)
@@ -43,6 +45,7 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
                 appearance = AppearanceOption.entries.firstOrNull { it.name == preferences[APPEARANCE] }
                     ?: AppearanceOption.System,
                 hapticsEnabled = preferences[HAPTICS_ENABLED] ?: true,
+                approvalAlerts = preferences[APPROVAL_ALERTS] ?: false,
             )
         }.catch { error ->
             if (error is kotlinx.coroutines.CancellationException) throw error
@@ -57,6 +60,11 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
     suspend fun setHapticsEnabled(enabled: Boolean) {
         dataStore.edit { it[HAPTICS_ENABLED] = enabled }
+        writes.update { it + 1 }
+    }
+
+    suspend fun setApprovalAlerts(enabled: Boolean) {
+        dataStore.edit { it[APPROVAL_ALERTS] = enabled }
         writes.update { it + 1 }
     }
 }

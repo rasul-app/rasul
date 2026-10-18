@@ -3,6 +3,7 @@ package app.rasul
 import android.app.Notification
 import android.content.Context
 import androidx.core.app.NotificationCompat
+import androidx.datastore.preferences.core.edit
 import app.rasul.chat.ActiveRun
 import app.rasul.chat.ApprovalUi
 import app.rasul.chat.ChatFailure
@@ -49,6 +50,8 @@ import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.JsonPrimitive
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -69,6 +72,7 @@ class RunNotificationsTest {
     private val context: Context get() = RuntimeEnvironment.getApplication()
     private val frames = MutableSharedFlow<RunUpdate>(extraBufferCapacity = 32)
     private val starts = mutableListOf<Pair<String, String?>>()
+    private val requests = mutableListOf<Triple<String, String, String?>>()
     private val steers = mutableListOf<String>()
     private var followers = 0
     private var history = emptyList<SessionMessageDto>()
@@ -84,11 +88,15 @@ class RunNotificationsTest {
         override suspend fun setActiveRun(runId: String?, lastEventId: Long?, anchor: app.rasul.chat.Anchor) = Unit
     }
     private val api = object : RunsApi {
-        override suspend fun startRun(target: HermesTarget, input: String, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
-            starts += input to sessionId
+        override suspend fun startRun(target: HermesTarget, input: kotlinx.serialization.json.JsonElement, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
+            requests += Triple(target.baseUrl, (input as JsonPrimitive).content, sessionId)
+            starts += (input as JsonPrimitive).content to sessionId
             return HermesResult.Ok(StartedRun("run-${starts.size}"))
         }
-        override suspend fun status(target: HermesTarget, runId: String) = statusResult
+        override suspend fun status(target: HermesTarget, runId: String): HermesResult<RunStatus> {
+            requests += Triple(target.baseUrl, "status", runId)
+            return statusResult
+        }
         override suspend fun stop(target: HermesTarget, runId: String) = HermesResult.Ok(Unit)
         override suspend fun steer(target: HermesTarget, runId: String, text: String): HermesResult<Unit> {
             steers += text
@@ -99,6 +107,7 @@ class RunNotificationsTest {
     }
     private val sessions = object : SessionsApi {
         override suspend fun messages(target: HermesTarget, sessionId: String): HermesResult<List<SessionMessageDto>> {
+            requests += Triple(target.baseUrl, "history", sessionId)
             historyEntered?.complete(Unit)
             historyGate?.await()
             historyFailure?.let { return HermesResult.Err(it) }
@@ -113,6 +122,7 @@ class RunNotificationsTest {
     private fun emit(event: RunEvent) { assertTrue(frames.tryEmit(RunUpdate.Event(event))); idle() }
 
     private val container get() = (context.applicationContext as RasulApp).container
+    private lateinit var dataStore: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences>
     private lateinit var connectionStore: app.rasul.data.ConnectionStore
     private var persistedRun: String? = null
     private val persistedMemory = object : RunMemory by memory {
@@ -160,6 +170,7 @@ class RunNotificationsTest {
                 val next = transform(data.value); data.value = next; return next
             }
         }
+        dataStore = store
         connectionStore = app.rasul.data.ConnectionStore(store, object : app.rasul.data.SecretCipher {
             override fun encrypt(plain: String) = plain
             override fun decrypt(token: String) = token
@@ -345,11 +356,55 @@ class RunNotificationsTest {
         assertEquals(listOf("first" to "session-a", "queued" to "session-a"), starts)
     }
 
-    @Test fun historyFailureFromReplyShowsSpecificNotificationText() {
+    @Test fun failedReplyKeepsTheTextInTheChatBoxAndSaysSo() {
         val model = model(); idle()
         historyFailure = HermesError.BridgeTimeout
         model.replyFromNotification("message"); idle()
-        assertEquals(context.getString(R.string.bridge_timeout), runNotice(context, model.state.value).text)
+        assertTrue(starts.isEmpty())
+        assertEquals(context.getString(R.string.chat_err_reply_kept), runNotice(context, model.state.value).text)
+        assertEquals("message", model.state.value.draft)
+        model.replyFromNotification("message"); idle()
+        assertEquals("message", model.state.value.draft)
+    }
+
+    @Test fun rewrittenTranscriptReplyThroughServiceStartsANewRun() {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
+        history = listOf(
+            SessionMessageDto(id = JsonPrimitive("u0"), role = "user", content = JsonPrimitive("hi")),
+            SessionMessageDto(id = JsonPrimitive("a0"), role = "assistant", content = JsonPrimitive("older answer")))
+        val model = get(watcher); idle(); start(model)
+        // An in-place rewrite re-ids every served row: the finished turn's anchor row is gone.
+        history = listOf(
+            SessionMessageDto(id = JsonPrimitive("u0r"), role = "user", content = JsonPrimitive("hi")),
+            SessionMessageDto(id = JsonPrimitive("a0r"), role = "assistant", content = JsonPrimitive("older answer")),
+            SessionMessageDto(id = JsonPrimitive("q1"), role = "user", content = JsonPrimitive("first")),
+            SessionMessageDto(id = JsonPrimitive("a1"), role = "assistant", content = JsonPrimitive("answer")))
+        emit(RunEvent.Completed("answer"))
+        val controller = Robolectric.buildService(RunWatchService::class.java).create()
+        val service = controller.get()
+        service.onStartCommand(replyIntent(service, model), 0, 1); completeReply(service)
+        assertEquals(listOf("first" to "session-a", "second" to "session-a"), starts)
+        controller.destroy()
+    }
+
+    @Test fun keptReplyThroughServicePostsTheKeptNotice() {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
+        val model = get(watcher); idle()
+        historyFailure = HermesError.BridgeTimeout
+        val controller = Robolectric.buildService(RunWatchService::class.java).create()
+        val service = controller.get()
+        service.onStartCommand(replyIntent(service, model), 0, 1); completeReply(service)
+        assertTrue(starts.isEmpty())
+        assertEquals("second", model.state.value.draft)
+        val posted = context.getSystemService(android.app.NotificationManager::class.java)
+            .activeNotifications.single { it.id == 2 }.notification
+        assertEquals(context.getString(R.string.chat_err_reply_kept), posted.extras.getCharSequence(Notification.EXTRA_TEXT))
+        controller.destroy()
+    }
+
+    @Test fun keptReplyNoticeRendersItsOwnText() {
+        assertEquals(context.getString(R.string.chat_err_reply_kept),
+            runNotice(context, ChatState(terminalFailure = ChatFailure.ReplyKept)).text)
     }
 
     @Test fun otherRejectedSteerAlsoQueuesAfterRun() {
@@ -385,20 +440,22 @@ class RunNotificationsTest {
         assertTrue(model.state.value.canChooseModel)
     }
 
-    @Test fun activeDefaultChatKeepsOwnerWhenPersistentSessionChanges() {
+    @Test fun plainRouteDoesNotAdoptBusyChatAfterSessionMoved() {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
         val first = get(watcher); idle(); start(first)
         val changedMemory = object : RunMemory by memory {
             override suspend fun sessionId() = "session-b"
         }
-        assertSame(first, get(watcher, memory = changedMemory))
+        // The persisted pointer moved to session-b while "first" (session-a) is busy: a plain route must not pull back to it.
+        val moved = get(watcher, memory = changedMemory)
+        assertNotSame(first, moved)
         assertEquals(1, followers)
         val next = kotlinx.coroutines.runBlocking {
             watcher.get("chat/a?newSession=session-b", "Bot", loader, changedMemory)
         }
         idle()
-        assertNotSame(first, next)
-        assertSame(first, watcher.modelForRoute("chat/a"))
+        assertSame(moved, next)
+        assertSame(moved, watcher.modelForRoute("chat/a"))
     }
 
     @Test fun newSessionKeepsActiveChatAndPreviousRunProtection() = kotlinx.coroutines.test.runTest(dispatcher) {
@@ -416,8 +473,125 @@ class RunNotificationsTest {
         emit(RunEvent.Cancelled())
         next.send(); idle()
         assertEquals("second" to "session-b", starts.last())
+        // The new chat's first run write claims the pointer once: the plain route opens the new chat again.
         assertSame(next, watcher.resolve("chat/a"))
         assertEquals(1, frames.subscriptionCount.value)
+    }
+
+    @Test fun newChatClaimedPointerSurvivesProcessDeath() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val original = watcher.resolve("chat/a")!!; idle(); start(original)
+        val next = watcher.resolve("chat/a?newSession=session-b")!!; idle()
+        emit(RunEvent.Cancelled())
+        next.onDraft("second"); next.send(); idle()
+        assertEquals("second" to "session-b", starts.last())
+        // The claim landed inside the same store edit as the run write, so a cold watcher sees it too.
+        assertEquals("session-b", connectionStore.currentSessionId("a", null))
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val reopened = cold.resolve("chat/a")!!; idle()
+        assertEquals("session-b", reopened.resolvedSessionId)
+    }
+
+    @Test fun queuedReplyAfterOwnFinishedRunIsNotRefusedByOwnStaleKey() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        watcher.resolve("chat/a")!!; idle()
+        val next = watcher.resolve("chat/a?newSession=session-b")!!; awaitLoadSettled(next)
+        // B's own stored run key still waits for its background clear-write: it is not another session busy.
+        connectionStore.setActiveRun("a", null, "session-b", "stale-run")
+        next.replyFromNotification("second"); idle()
+        assertEquals("second" to "session-b", starts.lastOrNull())
+        // A real refusal (another session holding a run) keeps the reply text in the composer.
+        connectionStore.setActiveRun("a", null, "session-c", "run-c")
+        val third = watcher.resolve("chat/a?newSession=session-d")!!; awaitLoadSettled(third)
+        third.replyFromNotification("third"); idle()
+        assertEquals(ChatFailure.PreviousRunActive, third.state.value.messages.last().error)
+        assertEquals("third", third.state.value.draft)
+    }
+
+    @Test fun refusedReplyWithStaleHistoryFailureIsRestoredOnce() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        // B's earlier history read failed: a stale failure must not double the composer's restore.
+        historyFailure = HermesError.BridgeTimeout
+        val next = watcher.resolve("chat/a?newSession=session-b")!!; awaitLoadSettled(next)
+        assertEquals(ChatFailure.Api(HermesError.BridgeTimeout), next.state.value.historyFailure)
+        connectionStore.setActiveRun("a", null, "session-c", "run-c")
+        next.replyFromNotification("third"); idle()
+        assertEquals(ChatFailure.PreviousRunActive, next.state.value.messages.last().error)
+        assertEquals("third", next.state.value.draft)
+        assertTrue(starts.isEmpty())
+    }
+
+    @Test fun sessionReadFailureReplyIsRestoredOnce() {
+        val unreadable = object : RunMemory by memory {
+            override suspend fun sessionId(): String = throw java.io.IOException("gone")
+        }
+        val model = model(memory = unreadable); idle()
+        assertEquals(app.rasul.chat.ChatLoad.Ready, model.state.value.load)
+        model.replyFromNotification("second"); idle()
+        assertEquals(ChatFailure.SessionUnavailable, model.state.value.historyFailure)
+        assertEquals("second", model.state.value.draft)
+        assertTrue(starts.isEmpty())
+    }
+
+    @Test fun resolveFailsWhenSessionBindingIsUnreadable() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val broken = app.rasul.data.ConnectionStore(object : androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
+            override val data: kotlinx.coroutines.flow.Flow<androidx.datastore.preferences.core.Preferences> =
+                kotlinx.coroutines.flow.flow { throw java.io.IOException("gone") }
+            override suspend fun updateData(transform: suspend (androidx.datastore.preferences.core.Preferences) -> androidx.datastore.preferences.core.Preferences): androidx.datastore.preferences.core.Preferences =
+                throw java.io.IOException("gone")
+        }, object : app.rasul.data.SecretCipher {
+            override fun encrypt(plain: String) = plain
+            override fun decrypt(token: String) = token
+        })
+        container.javaClass.getDeclaredField("connections").apply { isAccessible = true }.set(container, broken)
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        assertNull(watcher.resolve("chat/a"))
+    }
+
+    @Test fun storeBackedSetActiveRunRequiresAnExplicitSession() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val raw = app.rasul.chat.chatRunMemory(container, "a")
+        assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { raw.setActiveRun("run-1") }
+        }
+        raw.setCurrentSessionRun("session-b", "run-1", null, app.rasul.chat.Anchor.Unknown)
+        assertEquals("run-1", connectionStore.activeRun("a", null, "session-b"))
+        raw.setSessionId("session-c")
+        raw.setActiveRun("run-2")
+        assertEquals("run-2", connectionStore.activeRun("a", null, "session-c"))
+    }
+
+    @Test fun continueRefusedByStoredRunShowsBusy() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = watcher.resolve("chat/a")!!; awaitLoadSettled(model)
+        val source = app.rasul.data.ActiveTarget.Ready("a", "Bot", model.resolvedTarget!!.copy(apiKey = "key-a"))
+        // Another session's stored run refuses Continue even with no live busy chat (e.g. before restore).
+        connectionStore.setActiveRun("a", null, "session-c", "run-c")
+        val refused = transcriptVm("session-b", source, watcher)
+        awaitTranscript(refused)
+        assertFalse(refused.continueSession())
+        assertEquals(app.rasul.data.Load.Failed(HermesError.ChatBusy), refused.state.value)
+    }
+
+    @Test fun continueWithWrongRevisionShowsConnectionChanged() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = watcher.resolve("chat/a")!!; awaitLoadSettled(model)
+        val source = app.rasul.data.ActiveTarget.Ready("a", "Bot", model.resolvedTarget!!.copy(apiKey = "key-a", revision = "stale"))
+        val refused = transcriptVm("session-b", source, watcher)
+        awaitTranscript(refused)
+        assertFalse(refused.continueSession())
+        assertEquals(app.rasul.data.Load.Failed(HermesError.ConnectionChanged), refused.state.value)
+    }
+
+    @Test fun upgradedInstallRestoresBridgeRunOnColdStart() = kotlinx.coroutines.test.runTest(dispatcher) {
+        installBridge("alias-1")
+        // A 0.2.3 install wrote no revision row; it is only stored lazily on the next BridgeStore.get.
+        dataStore.edit { it.remove(app.rasul.data.revisionKey("bridge:one:")) }
+        connectionStore.setActiveRun("bridge:one:default", "default", "session-b", "run-9")
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        cold.onForeground()
+        val restored = awaitRestoredChat(cold, "bridge-chat/one/default").model
+        awaitLoadSettled(restored)
+        assertEquals("session-b", restored.resolvedSessionId)
     }
 
     @Test fun newSessionAndRunProfileKeepOriginalProfileBinding() = kotlinx.coroutines.test.runTest(dispatcher) {
@@ -496,7 +670,6 @@ class RunNotificationsTest {
         assertEquals(2, starts.size)
         assertEquals(1, followers)
     }
-
 
     @Test fun staleReplyWithAppLockEnabledDoesNotSendAndShowsOpenNotice() {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
@@ -634,14 +807,15 @@ class RunNotificationsTest {
     }
 
     @Test fun activityStartRestoresPersistedActiveRunsWithoutOpeningChats() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val sessions = mutableMapOf<Pair<String, String?>, String>()
         kotlinx.coroutines.runBlocking {
-            connectionStore.sessionId("a", null)
-            connectionStore.setActiveRun("a", null, "run-1")
-            connectionStore.sessionId("a", "profile-a")
-            connectionStore.setActiveRun("a", "profile-a", "run-2")
+            sessions["a" to null] = connectionStore.sessionId("a", null)
+            connectionStore.setActiveRun("a", null, sessions["a" to null]!!, "run-1")
+            sessions["a" to "profile-a"] = connectionStore.sessionId("a", "profile-a")
+            connectionStore.setActiveRun("a", "profile-a", sessions["a" to "profile-a"]!!, "run-2")
             connectionStore.save(app.rasul.data.Connection("b", "Bot", "https://example.invalid"), "")
-            connectionStore.sessionId("b", null)
-            connectionStore.setActiveRun("b", null, "run-3")
+            sessions["b" to null] = connectionStore.sessionId("b", null)
+            connectionStore.setActiveRun("b", null, sessions["b" to null]!!, "run-3")
         }
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
         assertTrue(watcher.all().isEmpty())
@@ -650,11 +824,16 @@ class RunNotificationsTest {
         watcher.changes.first { watcher.all().count { it.model.state.value.run != null } == 3 }
         frames.subscriptionCount.first { it == 3 }
         assertEquals(setOf("run-1", "run-2", "run-3"), watcher.all().map { it.model.state.value.run?.runId }.toSet())
-        assertEquals(setOf("chat/a", "chat/a?run_profile=profile-a", "chat/b"), watcher.all().map { it.route }.toSet())
+        fun rev(id: String) = kotlinx.coroutines.runBlocking { connectionStore.revision(id) }
+        fun route(id: String, profile: String?) = "chat/$id" +
+            (if (profile == null) "" else "?run_profile=$profile") +
+            (if (profile == null) "?" else "&") +
+            "session=" + android.net.Uri.encode(sessions[id to profile]!!) +
+            "&rev=" + android.net.Uri.encode(rev(id))
+        assertEquals(setOf(route("a", null), route("a", "profile-a"), route("b", null)), watcher.all().map { it.route }.toSet())
         assertEquals(3, followers)
         controller.stop().destroy()
     }
-
 
     @Test fun sessionStorageFailureRemainsAChatFailureInsteadOfCrashingLookup() {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
@@ -665,23 +844,24 @@ class RunNotificationsTest {
 
     @Test fun persistedRunEnumerationKeepsEveryConnectionAndProfileAndSkipsEventKeys() = kotlinx.coroutines.test.runTest(dispatcher) {
         connectionStore.save(app.rasul.data.Connection("b", "Bot", "https://example.invalid", "profile-b"), "")
-        listOf("a" to null, "a" to "profile-a", "b" to "profile-b", "bridge:bridge-a:profile_a" to "profile_a").forEach { (id, profile) ->
-            connectionStore.sessionId(id, profile)
-            connectionStore.setActiveRun(id, profile, "run-1", 7, "anchor")
+        val expected = listOf("a" to null, "a" to "profile-a", "b" to "profile-b", "bridge:bridge-a:profile_a" to "profile_a").map { (id, profile) ->
+            val session = connectionStore.sessionId(id, profile)
+            connectionStore.setActiveRun(id, profile, session, "run-1", 7, "anchor")
+            app.rasul.data.ConnectionStore.PersistedRun(id, profile, session)
         }
-        assertEquals(setOf(app.rasul.data.ConnectionStore.PersistedRun("a", null), app.rasul.data.ConnectionStore.PersistedRun("a", "profile-a"),
-            app.rasul.data.ConnectionStore.PersistedRun("b", "profile-b"), app.rasul.data.ConnectionStore.PersistedRun("bridge:bridge-a:profile_a", "profile_a")), connectionStore.persistedRuns().toSet())
+        assertEquals(expected.toSet(), connectionStore.persistedRuns().toSet())
     }
 
-    @Test fun profileChangeRestoreKeepsOneFollowerAndOneCompletionNotice() = kotlinx.coroutines.test.runTest(dispatcher) {
+    @Test fun profileChangeClearsRestorePointerAndKeepsExistingFollower() = kotlinx.coroutines.test.runTest(dispatcher) {
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-a"), null)
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
         val model = watcher.resolve("chat/a")!!; idle(); start(model)
-        connectionStore.activeRun("a", "profile-a").let { assertEquals("run-1", it) }
+        val session = connectionStore.sessionId("a", "profile-a")
+        connectionStore.activeRun("a", "profile-a", session).let { assertEquals("run-1", it) }
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-b"), null)
         assertNotSame(model, watcher.resolve("chat/a")); idle()
         watcher.onBackground(); watcher.onForeground(); idle()
-        assertSame(model, watcher.resolve("chat/a?run_profile=profile-a")); idle()
+        assertNull(connectionStore.activeRun("a", "profile-a", session))
         assertEquals(2, watcher.all().size)
         assertEquals(1, followers)
         assertEquals(1, frames.subscriptionCount.value)
@@ -758,15 +938,18 @@ class RunNotificationsTest {
         assertEquals("still following", model.state.value.messages.last().text)
         assertEquals(1, followers)
     }
-    @Test fun restoredProfileWinsOverIdleRouteModel() = kotlinx.coroutines.test.runTest(dispatcher) {
+    @Test fun profileEditDoesNotReuseRestoredModel() = kotlinx.coroutines.test.runTest(dispatcher) {
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-b"), null)
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
         val idleModel = watcher.resolve("chat/a")!!; idle()
-        connectionStore.sessionId("a", "profile-a")
-        connectionStore.setActiveRun("a", "profile-a", "run-1")
+        val restoredSession = connectionStore.sessionId("a", "profile-a")
+        connectionStore.setActiveRun("a", "profile-a", restoredSession, "run-1")
         val restored = watcher.resolve("chat/a?run_profile=profile-a", "run-1")!!; idle()
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-a"), null)
-        assertSame(restored, watcher.resolve("chat/a")); idle()
+        val current = watcher.resolve("chat/a")!!; awaitLoadSettled(current)
+        assertNotSame(restored, current)
+        assertNull(current.state.value.run)
+        assertNull(connectionStore.activeRun("a", "profile-a", restoredSession))
         assertNotSame(idleModel, restored)
         assertEquals(1, followers)
         assertEquals(1, frames.subscriptionCount.value)
@@ -924,20 +1107,13 @@ class RunNotificationsTest {
             .getStringExtra(app.rasul.notifications.CHAT_ROUTE)!!
     }
 
-    private suspend fun installBridge() {
-        val snapshots = kotlinx.coroutines.flow.MutableStateFlow(androidx.datastore.preferences.core.emptyPreferences())
-        val dataStore = object : androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
-            override val data = snapshots
-            override suspend fun updateData(transform: suspend (androidx.datastore.preferences.core.Preferences) -> androidx.datastore.preferences.core.Preferences): androidx.datastore.preferences.core.Preferences {
-                snapshots.value = transform(snapshots.value)
-                return snapshots.value
-            }
-        }
+    private suspend fun installBridge(keyAlias: String = ""): app.rasul.bridge.BridgeBotsRepository {
         val store = app.rasul.bridge.BridgeStore(dataStore, object : app.rasul.data.SecretCipher {
             override fun encrypt(plain: String) = plain
             override fun decrypt(token: String) = token
         })
-        store.save(app.rasul.bridge.SavedBridge("one", "PC", listOf("wss://example.invalid"), "", "", ""))
+        store.save(app.rasul.bridge.SavedBridge("one", "PC", listOf("wss://example.invalid"), "", "", keyAlias))
+        container.javaClass.getDeclaredField("bridges").apply { isAccessible = true }.set(container, store)
         val clients = app.rasul.bridge.BridgeClients(store, scope, { _, urls, _ ->
             app.rasul.bridge.BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") })
         }, {})
@@ -948,6 +1124,7 @@ class RunNotificationsTest {
         state.value = app.rasul.bridge.BridgeBotsState(listOf(app.rasul.bridge.BridgeGroup("one", "PC",
             listOf(app.rasul.bridge.BridgeProfile("default", "default", "Default", true, true)), loading = false)), loaded = true)
         container.javaClass.getDeclaredField("bridgeBots").apply { isAccessible = true }.set(container, repository)
+        return repository
     }
 
     private suspend fun assertCompletedNotificationKeepsSession(route: String) {
@@ -999,9 +1176,25 @@ class RunNotificationsTest {
             override suspend fun delete(target: HermesTarget, sessionId: String) = HermesResult.Ok(Unit)
         }
         val vm = app.rasul.sessions.SessionsViewModel(connectionStore, holder, api, watcher::invalidateSession)
-        idle()
-        val ready = vm.state.value as app.rasul.data.Load.Ready
-        vm.delete(ready.source, ready.value.single()); idle()
+        val loaded = CompletableDeferred<app.rasul.data.Load.Ready<List<app.rasul.sessions.SessionDto>>>()
+        val observer = scope.launch {
+            vm.state.collect { if (it is app.rasul.data.Load.Ready) loaded.complete(it) }
+        }
+        val ready = kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (!loaded.isCompleted) { idle(); kotlinx.coroutines.delay(1) }
+                loaded.await()
+            }
+        }
+        observer.cancel()
+        val deleted = CompletableDeferred<Unit>()
+        vm.delete(ready.source, ready.value.single()) { deleted.complete(Unit) }
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (!deleted.isCompleted) { idle(); kotlinx.coroutines.delay(1) }
+                deleted.await()
+            }
+        }
         assertNull(watcher.resolve(notification))
         assertNull(watcher.resolve(route))
         assertNull(watcher.modelForRoute(route))
@@ -1024,16 +1217,13 @@ class RunNotificationsTest {
         var persisted: String? = "session-a"
         var suspendWrite = false
         val persistent = object : RunMemory by memory {
-            override suspend fun currentSessionId(): String? {
-                if (suspendWrite) { suspendWrite = false; entered.complete(Unit); gate.await() }
-                return persisted
-            }
             override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: app.rasul.chat.Anchor) {
+                if (suspendWrite) { suspendWrite = false; entered.complete(Unit); gate.await() }
                 persisted = sessionId
             }
         }
         val runs = object : RunsApi by api {
-            override suspend fun startRun(target: HermesTarget, input: String, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
+            override suspend fun startRun(target: HermesTarget, input: kotlinx.serialization.json.JsonElement, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
                 val result = api.startRun(target, input, sessionId, idempotencyKey)
                 suspendWrite = true
                 return result
@@ -1051,6 +1241,384 @@ class RunNotificationsTest {
         gate.complete(Unit); deletion.join(); idle()
         assertFalse(returnedEarly)
         assertNull(persisted)
+    }
+
+    private suspend fun continuedRoute(session: String = "session-a"): Pair<app.rasul.data.ActiveTarget.Ready, String> {
+        connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid"), "key-a")
+        val loaded = connectionStore.target("a") as HermesResult.Ok
+        val source = app.rasul.data.ActiveTarget.Ready("a", "Bot", loaded.value)
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, source.target.revision, session))
+        return source to app.rasul.ui.continueChatRoute(source)
+    }
+
+    private fun awaitRestoredChat(watcher: RunWatcher, prefix: String): RunWatcher.Chat = kotlinx.coroutines.runBlocking {
+        var found: RunWatcher.Chat? = null
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (found == null) {
+                idle()
+                found = watcher.all().firstOrNull { it.route.startsWith(prefix) }
+                if (found == null) kotlinx.coroutines.delay(1)
+            }
+        }
+        found!!
+    }
+
+    private fun awaitLoadSettled(model: ChatViewModel) = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (model.state.value.load == app.rasul.chat.ChatLoad.Loading || model.state.value.preparingSend) {
+                idle(); kotlinx.coroutines.delay(1)
+            }
+        }
+    }
+
+    private fun awaitRunStarted(model: ChatViewModel) = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (model.state.value.run?.runId == null) { idle(); kotlinx.coroutines.delay(1) }
+        }
+    }
+
+    @Test fun bridgeContinueKeepsBindingThroughRealWiring() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val repository = installBridge()
+        repository.setActiveSelection(app.rasul.bridge.BridgeSelection("one", "default"))
+        val holder = app.rasul.ui.ActivePcHolder(connectionStore, scope, repository)
+        val ready = holder.currentTarget() as app.rasul.data.ActiveTarget.Ready
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession(ready.id, "default", ready.target.revision, "session-a"))
+        val route = app.rasul.ui.continueChatRoute(ready)
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = watcher.resolve(route)!!
+        awaitLoadSettled(model)
+        assertEquals(app.rasul.chat.ChatLoad.Ready, model.state.value.load)
+        model.onDraft("hi"); model.send()
+        awaitRunStarted(model)
+        assertEquals(listOf("hi" to "session-a"), starts)
+    }
+
+    @Test fun finishedContinuationCannotReachEditedAddressWarmOrCold() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val (_, route) = continuedRoute()
+        val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val old = warm.resolve(route)!!; awaitLoadSettled(old)
+        start(old); awaitRunStarted(old); emit(RunEvent.Completed("answer"))
+        connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid/changed"), null)
+        requests.clear()
+        listOf(warm, RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })).forEach {
+            val next = it.resolve("chat/a")!!; awaitLoadSettled(next); start(next); awaitRunStarted(next)
+        }
+        assertTrue(requests.none { it.first.endsWith("/changed") && it.third == "session-a" })
+    }
+
+    @Test fun oldNotificationCannotRestoreSessionAfterConnectionEdit() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val old = warm.resolve("chat/a?newSession=session-a")!!; awaitLoadSettled(old)
+        start(old); awaitRunStarted(old); emit(RunEvent.Completed("answer"))
+        val route = notificationRoute()
+        assertEquals(old.resolvedTarget?.revision, android.net.Uri.parse(route).getQueryParameter("rev"))
+        connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid/changed"), null)
+        requests.clear()
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        assertNull(cold.resolve(route))
+        install(cold)
+        val intent = android.content.Intent(context, MainActivity::class.java).putExtra(app.rasul.notifications.CHAT_ROUTE, route)
+        val controller = Robolectric.buildActivity(MainActivity::class.java, intent).create()
+        try {
+            idle()
+            assertNull(container.pendingChat.value)
+            assertTrue(cold.all().isEmpty())
+            assertTrue(requests.isEmpty())
+        } finally { controller.destroy() }
+    }
+
+    @Test fun oldModelCannotWriteSessionAfterConnectionEdit() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val old = warm.resolve("chat/a?newSession=session-a")!!; awaitLoadSettled(old)
+        historyGate = CompletableDeferred(); historyEntered = CompletableDeferred()
+        old.onDraft("first"); old.send(); idle()
+        assertTrue(historyEntered!!.isCompleted)
+        connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid/changed"), null)
+        historyGate!!.complete(Unit); awaitRunStarted(old)
+        assertTrue(requests.none { it.first.endsWith("/changed") })
+        assertNull(connectionStore.currentSessionId("a", null))
+        assertNull(connectionStore.activeRun("a", null, "session-a"))
+    }
+
+    @Test fun unmarkedRunCannotRestoreAfterConnectionEdit() = kotlinx.coroutines.test.runTest(dispatcher) {
+        connectionStore.setCurrentSessionRun("a", null, "session-a", "run-1")
+        connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid/changed"), null)
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        cold.onForeground(); idle()
+        assertTrue(connectionStore.persistedRuns().isEmpty())
+        assertTrue(requests.none { it.first.endsWith("/changed") })
+    }
+
+    @Test fun unchangedContinuationRestoresAfterSourceLoss() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val (_, route) = continuedRoute()
+        val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val old = warm.resolve(route)!!; awaitLoadSettled(old); start(old); awaitRunStarted(old)
+        val field = container.transcriptSources.javaClass.getDeclaredField("byToken").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        (field.get(container.transcriptSources) as MutableMap<String, *>).clear()
+        old.close(); idle()
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        cold.onForeground()
+        val restored = awaitRestoredChat(cold, "chat/a").model; awaitLoadSettled(restored)
+        assertEquals(app.rasul.chat.ChatLoad.Ready, restored.state.value.load)
+        assertEquals("session-a", restored.resolvedSessionId)
+        assertEquals("run-1", restored.state.value.run?.runId)
+        assertEquals(1, frames.subscriptionCount.value)
+    }
+
+    @Test fun continueKeepsPreparingChatAndQueuedReplyOwner() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val old = watcher.resolve("chat/a")!!; awaitLoadSettled(old)
+        val session = old.resolvedSessionId!!
+        historyGate = CompletableDeferred(); historyEntered = CompletableDeferred()
+        old.onDraft("first"); old.send(); idle()
+        assertTrue(historyEntered!!.isCompleted)
+        val target = old.resolvedTarget!!
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, target.revision, session))
+        val continued = watcher.resolve(app.rasul.ui.continueChatRoute(app.rasul.data.ActiveTarget.Ready("a", "Bot", target)))!!
+        assertSame(old, continued)
+        assertTrue(continued.state.value.preparingSend)
+        historyGate!!.complete(Unit); awaitRunStarted(continued)
+        assertEquals(listOf("first" to session), starts)
+    }
+
+    private fun transcriptVm(session: String, source: app.rasul.data.ActiveTarget.Ready, watcher: RunWatcher): app.rasul.sessions.TranscriptViewModel {
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("ok")
+                .body("{\"data\":[]}".toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        return app.rasul.sessions.TranscriptViewModel(connectionStore,
+            app.rasul.sessions.SessionsClient(app.rasul.data.HermesClient(http)), session, source,
+            currentTarget = { source }, busySession = watcher::busySession)
+    }
+
+    private fun awaitTranscript(vm: app.rasul.sessions.TranscriptViewModel) = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (vm.state.value is app.rasul.data.Load.Loading) { idle(); kotlinx.coroutines.delay(1) }
+        }
+    }
+
+    @Test fun continueSameSessionDuringRunKeepsRestoreStateAfterProcessDeath() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = warm.resolve("chat/a")!!; awaitLoadSettled(model)
+        val session = model.resolvedSessionId!!
+        start(model); awaitRunStarted(model)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (connectionStore.activeRun("a", null, session) == null) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        val target = model.resolvedTarget!!
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, target.revision, session))
+        // Process death: a fresh store and watcher over the same DataStore.
+        val coldStore = app.rasul.data.ConnectionStore(dataStore, object : app.rasul.data.SecretCipher {
+            override fun encrypt(plain: String) = plain
+            override fun decrypt(token: String) = token
+        })
+        container.javaClass.getDeclaredField("connections").apply { isAccessible = true }.set(container, coldStore)
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        cold.onForeground()
+        val restored = awaitRestoredChat(cold, "chat/a").model; awaitLoadSettled(restored)
+        assertEquals(app.rasul.chat.ChatLoad.Ready, restored.state.value.load)
+        assertEquals(session, restored.resolvedSessionId)
+        assertEquals("run-1", restored.state.value.run?.runId)
+        emit(RunEvent.ApprovalRequest("approval-a", "action", null, listOf("once", "deny")))
+        assertEquals("approval-a", restored.state.value.approval?.requestId)
+    }
+
+    @Test fun continueOtherSessionIsRefusedWhileChatIsBusy() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = watcher.resolve("chat/a")!!; awaitLoadSettled(model)
+        val session = model.resolvedSessionId!!
+        historyGate = CompletableDeferred(); historyEntered = CompletableDeferred()
+        model.onDraft("first"); model.send(); idle()
+        assertTrue(historyEntered!!.isCompleted)
+        assertTrue(model.state.value.preparingSend)
+        val source = app.rasul.data.ActiveTarget.Ready("a", "Bot", model.resolvedTarget!!.copy(apiKey = "key-a"))
+        assertEquals(session, watcher.busySession("a", null))
+        val refused = transcriptVm("session-b", source, watcher)
+        awaitTranscript(refused)
+        assertFalse(refused.continueSession())
+        assertEquals(app.rasul.data.Load.Failed(HermesError.ChatBusy), refused.state.value)
+        assertEquals(session, connectionStore.currentSessionId("a", null))
+        assertNull(connectionStore.activeRun("a", null, session))
+        historyGate!!.complete(Unit); awaitRunStarted(model)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (connectionStore.activeRun("a", null, session) == null) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        assertEquals(session, connectionStore.currentSessionId("a", null))
+        assertEquals("run-1", connectionStore.activeRun("a", null, session))
+        val same = transcriptVm(session, source, watcher)
+        awaitTranscript(same)
+        assertTrue(same.continueSession())
+        val continued = watcher.resolve(app.rasul.ui.continueChatRoute(source))!!
+        assertSame(model, continued)
+        assertEquals("run-1", continued.state.value.run?.runId)
+    }
+
+    @Test fun continueWhileReplyIsInFlightOpensItsSessionAndKeepsThePointer() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = watcher.resolve("chat/a")!!; awaitLoadSettled(model)
+        val session = model.resolvedSessionId!!
+        val target = model.resolvedTarget!!
+        // Real notification replies pin the session and the revision (notificationRoute()).
+        val replyRoute = "chat/a?run_profile=&session=" + android.net.Uri.encode(session) +
+            "&rev=" + android.net.Uri.encode(target.revision)
+        val expected = watcher.replyTarget(replyRoute, model)!!
+        historyGate = CompletableDeferred(); historyEntered = CompletableDeferred()
+        // Queued on the scheduler but not yet run: a busy check still sees an idle A.
+        val reply = async { watcher.reply(replyRoute, expected, "second") { true } }
+        assertNull(watcher.busySession("a", null))
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, target.revision, "session-b"))
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (!historyEntered!!.isCompleted) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        assertEquals(session, watcher.busySession("a", null))
+        // Continue opened its plain route while A is busy: it must not adopt A's chat.
+        val opened = watcher.resolve(app.rasul.ui.continueChatRoute(app.rasul.data.ActiveTarget.Ready("a", "Bot", target)))!!
+        assertNotSame(model, opened)
+        awaitLoadSettled(opened)
+        assertEquals("session-b", opened.resolvedSessionId)
+        historyGate!!.complete(Unit)
+        assertTrue(reply.await())
+        awaitRunStarted(model)
+        // The store write is queued on the shared writer: wait until the follower proves it was drained.
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (frames.subscriptionCount.value == 0) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        idle()
+        assertEquals(listOf("second" to session), starts)
+        // The run keeps going in memory and persists under its own session; it must not reclaim the moved pointer.
+        assertEquals("run-1", model.state.value.run?.runId)
+        assertEquals("session-b", connectionStore.currentSessionId("a", null))
+        assertNull(connectionStore.activeRun("a", null, "session-b"))
+        assertEquals("run-1", connectionStore.activeRun("a", null, session))
+    }
+
+    @Test fun busyChatWithUnknownSessionDoesNotOwnThePlainRoute() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        var firstCall = true
+        val unborn = object : RunMemory by memory {
+            override suspend fun sessionId(): String {
+                if (firstCall) { firstCall = false; throw IllegalStateException("not created") }
+                gate.await()
+                return "session-new"
+            }
+        }
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        // get() saw sessionId() fail: the stored key has no session and the model's own read is gated.
+        val first = get(watcher, memory = unborn); idle()
+        first.replyFromNotification("held"); idle()
+        assertEquals("", watcher.busySession("a", null))
+        // Session-keyed matching: an unknown session cannot claim the plain route of "session-a".
+        assertNotSame(first, get(watcher))
+        gate.complete(Unit); idle()
+    }
+
+    @Test fun replyRunWriteStaysOnItsOwnSessionWhenContinueMovesPointer() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val session = connectionStore.sessionId("a", null)
+        val writeGate = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        val real = app.rasul.chat.chatRunMemory(container, "a")
+        val persistent = object : RunMemory by real {
+            override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: app.rasul.chat.Anchor) {
+                entered.complete(Unit)
+                writeGate.await()
+                real.setCurrentSessionRun(sessionId, runId, lastEventId, anchor)
+            }
+        }
+        val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = watcher.get("chat/a", "Bot", loader, app.rasul.chat.newChatRunMemory(persistent, session)); idle()
+        start(model)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (!entered.isCompleted) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        val target = model.resolvedTarget!!
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, target.revision, "session-b"))
+        writeGate.complete(Unit)
+        awaitRunStarted(model); idle()
+        // A's late write persists under A's own keys; it never lands under or re-claims the moved pointer.
+        assertEquals("session-b", connectionStore.currentSessionId("a", null))
+        assertNull(connectionStore.activeRun("a", null, "session-b"))
+        assertEquals("run-1", connectionStore.activeRun("a", null, session))
+    }
+
+    @Test fun coldReplyCannotClaimPointerOfAnotherSession() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val session = connectionStore.sessionId("a", null)
+        val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = warm.resolve("chat/a")!!; awaitLoadSettled(model)
+        val target = model.resolvedTarget!!
+        // The notification pins session + revision exactly like notificationRoute().
+        val route = "chat/a?run_profile=&session=" + android.net.Uri.encode(session) +
+            "&rev=" + android.net.Uri.encode(target.revision)
+        val expected = warm.replyTarget(route, model)!!
+        // The user has since continued another session; the reply arrives cold on a fresh watcher.
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, target.revision, "session-b"))
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        assertTrue(cold.reply(route, expected, "second") { true })
+        val replyModel = awaitRestoredChat(cold, "chat/a").model
+        awaitRunStarted(replyModel)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (connectionStore.activeRun("a", null, session) == null) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        assertEquals("second" to session, starts.last())
+        assertEquals("session-b", connectionStore.currentSessionId("a", null))
+        assertNull(connectionStore.activeRun("a", null, "session-b"))
+        assertEquals("run-1", connectionStore.activeRun("a", null, session))
+    }
+
+    @Test fun processDeathRestoresRunUnderItsOwnSessionForNotificationReply() = kotlinx.coroutines.test.runTest(dispatcher) {
+        val session = connectionStore.sessionId("a", null)
+        val writeGate = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        val real = app.rasul.chat.chatRunMemory(container, "a")
+        val persistent = object : RunMemory by real {
+            override suspend fun setCurrentSessionRun(sessionId: String, runId: String?, lastEventId: Long?, anchor: app.rasul.chat.Anchor) {
+                entered.complete(Unit)
+                writeGate.await()
+                real.setCurrentSessionRun(sessionId, runId, lastEventId, anchor)
+            }
+        }
+        val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        val model = warm.get("chat/a", "Bot", loader, app.rasul.chat.newChatRunMemory(persistent, session)); idle()
+        start(model); awaitRunStarted(model)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (!entered.isCompleted) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        // Continue lands while A's write is still suspended; afterwards the write completes under A.
+        assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, model.resolvedTarget!!.revision, "session-b"))
+        writeGate.complete(Unit)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (connectionStore.activeRun("a", null, session) == null) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        val coldStore = app.rasul.data.ConnectionStore(dataStore, object : app.rasul.data.SecretCipher {
+            override fun encrypt(plain: String) = plain
+            override fun decrypt(token: String) = token
+        })
+        container.javaClass.getDeclaredField("connections").apply { isAccessible = true }.set(container, coldStore)
+        val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
+        cold.onForeground()
+        val restored = awaitRestoredChat(cold, "chat/a").model; awaitLoadSettled(restored)
+        assertEquals(app.rasul.chat.ChatLoad.Ready, restored.state.value.load)
+        assertEquals(session, restored.resolvedSessionId)
+        assertEquals("run-1", restored.state.value.run?.runId)
+        assertEquals("session-b", coldStore.currentSessionId("a", null))
     }
 
 }

@@ -2,7 +2,9 @@
 
 This optional bridge feature mirrors approvals that are waiting in the local
 process. The computer's existing approval card stays active. The companion app
-can use the routes below; this slice does not add the phone screen.
+can use the routes below. The phone app ships the matching screen: pending
+requests appear as cards under each bridge bot, with a banner and per-bot
+badges while any wait.
 
 ## Setup
 
@@ -116,8 +118,13 @@ paired link. After an answer, remove or disable the card and refetch the list.
 
 ## Errors and display messages
 
-Errors are JSON `{"error":"<code>"}`. These messages are the contract for the
-later phone screen; this slice adds no client error display.
+Errors are JSON `{"error":"<code>"}`. The phone screen shows the matching
+message from this table inline on the card for a failed answer, or as the
+screen's error with a Retry for a list/stream failure. An answer that returns
+409, 410 or 404 is final: the card stays disabled and the list refetches.
+A list or stream 404 — or a profile that discovery reports missing or not
+ready — displays "This bot is no longer available on the PC." instead of the
+request-level 404 message.
 
 | HTTP | Code | English | العربية |
 |---|---|---|---|

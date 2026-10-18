@@ -82,6 +82,7 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         container = (application as RasulApp).container
         openNotificationChat(intent)
+        openNotificationApprovals(intent)
         authenticator = AppLockAuthenticator(this) { credentialIntent, onSuccess, onCancel ->
             credentialState.begin(onSuccess, onCancel)
             credentialLauncher.launch(credentialIntent)
@@ -133,6 +134,7 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         openNotificationChat(intent)
+        openNotificationApprovals(intent)
     }
 
     private fun openNotificationChat(intent: Intent?) {
@@ -140,10 +142,15 @@ class MainActivity : AppCompatActivity() {
         intent.removeExtra(app.rasul.notifications.CHAT_ROUTE)
         if (app.rasul.notifications.isChatRoute(route)) {
             container.appScope.launch(kotlinx.coroutines.Dispatchers.Main.immediate) {
-                container.runWatcher.resolve(route)
-                container.pendingChat.value = route
+                if (container.runWatcher.resolve(route) != null) container.pendingChat.value = route
             }
         }
+    }
+
+    private fun openNotificationApprovals(intent: Intent?) {
+        val route = intent?.getStringExtra(app.rasul.notifications.APPROVALS_ROUTE) ?: return
+        intent.removeExtra(app.rasul.notifications.APPROVALS_ROUTE)
+        if (app.rasul.notifications.isApprovalsRoute(route)) container.pendingChat.value = route
     }
 
     override fun onStart() {
@@ -152,6 +159,7 @@ class MainActivity : AppCompatActivity() {
         if (::container.isInitialized) {
             container.appLock.onForeground(SystemClock.elapsedRealtime())
             container.runWatcher.onForeground()
+            container.appScope.launch { container.approvalAlerts.sync() }
         }
     }
 

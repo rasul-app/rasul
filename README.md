@@ -15,6 +15,7 @@ English | [العربية](#العربية)
 ## What it does
 
 - **Chat with your agent.** Send a task, watch the reply and the tool progress stream in live.
+- **Photos and text files.** Attach up to 4 photos or one small text file to a message; photos are downscaled and stripped of location metadata before sending.
 - **Steer or stop a running task.** A message sent while the agent works is added to the running task. Stop ends it.
 - **Approvals.** When the agent asks before running something, approve once or deny from the phone.
 - **Sessions.** Browse past conversations and read their transcripts.
@@ -81,6 +82,10 @@ To use the bridge instead, run its pairing command on the computer and tap **Pai
 
 Found a security problem? Please open a private security advisory on this repository instead of a public issue.
 
+## Privacy
+
+Speech input is turned into text by your phone’s speech service. Depending on that service, your voice may be sent to its provider (for example Google). Rasul does not record or store audio.
+
 ## Build from source
 
 Requirements: JDK 21 and the Android SDK (API 35).
@@ -102,8 +107,6 @@ The debug APK is written to `app/build/outputs/apk/debug/`.
   - Check against the committed images: `./gradlew :app:verifyRoborazziDebug`
 
 Built with Kotlin, Jetpack Compose (Material 3), OkHttp, kotlinx.serialization and DataStore.
-
-**Fonts:** Readex Pro, IBM Plex Sans Arabic and IBM Plex Mono are licensed under the SIL Open Font License 1.1; see `third_party/fonts/`.
 
 ## Contributing
 
@@ -138,7 +141,6 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 - **المهام المجدولة:** اعرض المهام، أوقفها مؤقتًا، استأنفها أو شغّلها الآن.
 - **أكثر من حاسوب وملف تعريف:** احفظ كل حاسوب مرة واحدة وبدّل بينها، مع دعم ملفات تعريف Hermes.
 - **العربية والإنجليزية:** اختر اللغة من داخل التطبيق، والواجهة العربية من اليمين إلى اليسار بالكامل.
-- **الخطوط:** Readex Pro وIBM Plex Sans Arabic وIBM Plex Mono مرخّصة بموجب رخصة SIL Open Font License 1.1؛ راجع `third_party/fonts/`.
 - **سمة فاتحة وداكنة.**
 
 لا يوجد خادم لرسول. التطبيق يتصل بحاسوبك فقط، بلا حسابات ولا تتبّع ولا تحليلات ولا إعلانات.

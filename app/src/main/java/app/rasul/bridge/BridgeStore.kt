@@ -4,6 +4,8 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import app.rasul.data.clearConnectionState
+import app.rasul.data.revisionKey
 import app.rasul.data.SecretCipher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -42,7 +44,17 @@ class BridgeStore(private val ds: DataStore<Preferences>, private val cipher: Se
         val profileId = p[activeProfileKey]
         if (bridgeId.isNullOrBlank() || profileId.isNullOrBlank()) null else BridgeSelection(bridgeId, profileId)
     }.distinctUntilChanged()
-    suspend fun get(id: String) = bridges.first().firstOrNull { it.bridgeId == id }
+    suspend fun get(id: String): SavedBridge? = withContext(Dispatchers.IO) {
+        var saved: SavedBridge? = null
+        ds.edit { p ->
+            saved = p.read().firstOrNull { it.bridgeId == id }
+            saved?.let { bridge ->
+                val revision = revisionKey("bridge:${id}:")
+                if (p[revision] == null) p[revision] = bridge.keyAlias.ifEmpty { "0" }
+            }
+        }
+        saved
+    }
     suspend fun setActiveSelection(selection: BridgeSelection?) = withContext(Dispatchers.IO) {
         ds.edit { p ->
             val saved = selection?.takeIf { selected -> p.read().any { it.bridgeId == selected.bridgeId } }
@@ -58,6 +70,7 @@ class BridgeStore(private val ds: DataStore<Preferences>, private val cipher: Se
     suspend fun save(bridge: SavedBridge) = withContext(Dispatchers.IO) {
         ds.edit { p ->
             val all = p.read()
+            p[revisionKey("bridge:${bridge.bridgeId}:")] = bridge.keyAlias.ifEmpty { "0" }
             p[key] = cipher.encrypt(json.encodeToString(all.filterNot { it.bridgeId == bridge.bridgeId } + bridge))
         }
     }
@@ -70,6 +83,8 @@ class BridgeStore(private val ds: DataStore<Preferences>, private val cipher: Se
     }
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
         ds.edit { p ->
+            clearConnectionState(p, "bridge:${id}:")
+            p[revisionKey("bridge:${id}:")] = java.util.UUID.randomUUID().toString()
             p[key] = cipher.encrypt(json.encodeToString(p.read().filterNot { it.bridgeId == id }))
             if (p[activeBridgeKey] == id) {
                 p.remove(activeBridgeKey)

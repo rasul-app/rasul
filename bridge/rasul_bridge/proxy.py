@@ -24,6 +24,8 @@ RULES = [
     ("PATCH", rf"/api/sessions/{ID}", "/api/sessions/{id}", set()),
     ("DELETE", rf"/api/sessions/{ID}", "/api/sessions/{id}", set()),
     ("GET", rf"/api/sessions/{ID}/messages", "/api/sessions/{id}/messages", {"limit", "offset", "inline_images"}),
+    ("POST", rf"/api/sessions/{ID}/fork", "/api/sessions/{id}/fork", set()),
+    ("POST", rf"/api/sessions/{ID}/model", "/api/sessions/{id}/model", set()),
     ("GET", r"/api/jobs", "/api/jobs", {"include_disabled"}),
     ("POST", r"/api/jobs", "/api/jobs", set()),
     ("GET", rf"/api/jobs/{ID}", "/api/jobs/{id}", set()),

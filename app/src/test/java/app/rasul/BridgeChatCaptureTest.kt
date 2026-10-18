@@ -24,9 +24,9 @@ class BridgeChatCaptureTest {
             val reply = CompletableDeferred<HermesResult<StartedRun>>()
             var starts = 0
             val api = object : RunsApi {
-                override suspend fun startRun(target: HermesTarget, input: String, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
+                override suspend fun startRun(target: HermesTarget, input: kotlinx.serialization.json.JsonElement, sessionId: String?, idempotencyKey: String?): HermesResult<StartedRun> {
                     starts++
-                    entered.complete(target to input)
+                    entered.complete(target to (input as kotlinx.serialization.json.JsonPrimitive).content)
                     return reply.await()
                 }
                 override suspend fun status(target: HermesTarget, runId: String) = HermesResult.Ok(RunStatus("completed", null, null))
