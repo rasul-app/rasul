@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.rasul.data.ActiveTarget
 import app.rasul.data.ConnectionStore
+import app.rasul.data.DraftStore
+import app.rasul.data.PinStore
 import app.rasul.data.HermesError
 import app.rasul.data.Load
 import app.rasul.data.HermesResult
@@ -15,7 +17,13 @@ import app.rasul.ui.PcPicker
 import app.rasul.ui.pendingLoad
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
@@ -32,6 +40,8 @@ class SessionsViewModel(
     private val pcs: ActivePcHolder,
     private val client: SessionsManagementApi,
     private val onSessionDeleted: suspend (String) -> Unit = {},
+    private val drafts: DraftStore? = null,
+    private val pins: PinStore? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow<Load<List<SessionDto>>>(Load.Loading)
     val state: StateFlow<Load<List<SessionDto>>> = _state
@@ -43,6 +53,45 @@ class SessionsViewModel(
     val busy: StateFlow<String?> = _busy
     private val refreshes = MutableStateFlow(0)
     private var generation = 0
+
+    /** The bot and profile the shown list belongs to: the key of its pins and drafts. */
+    private val bot: Flow<Pair<String, String?>?> = _state.map { load ->
+        (load as? Load.Ready)?.source?.let { it.id to (it.target.profile ?: it.target.bridge?.profileId) }
+    }.distinctUntilChanged()
+
+    /** Pinned session ids of the shown bot, in pin order. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val pinned: StateFlow<List<String>> = bot.flatMapLatest { b ->
+        if (b == null || pins == null) flowOf(emptyList()) else pins.pinned(b.first, b.second)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** First line of the unsent draft of each chat of the shown bot, by session id. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val draftLines: StateFlow<Map<String, String>> = bot.flatMapLatest { b ->
+        if (b == null || drafts == null) flowOf(emptyMap()) else drafts.firstLines(b.first, b.second)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    private val _pinLimit = MutableStateFlow(false)
+    /** True after a pin was refused because the bot already has [PinStore.MAX_PER_BOT]. */
+    val pinLimit: StateFlow<Boolean> = _pinLimit
+    fun clearPinLimit() { _pinLimit.value = false }
+
+    /** Pins [session] of the list shown, or unpins it when it is pinned. */
+    fun togglePin(source: ActiveTarget.Ready, session: SessionDto) {
+        val store = pins ?: return
+        val profile = source.target.profile ?: source.target.bridge?.profileId
+        val shown = (_state.value as? Load.Ready)?.value?.map { it.id }?.toSet()
+        viewModelScope.launch {
+            try {
+                if (session.id in pinned.value) store.unpin(source.id, profile, session.id)
+                else if (!store.pin(source.id, profile, session.id, shown)) _pinLimit.value = true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // The pin list stays as it was.
+            }
+        }
+    }
 
     val picker: StateFlow<PcPicker> = pcs.state
     fun selectPc(id: String) = pcs.selectPc(id)
@@ -64,14 +113,35 @@ class SessionsViewModel(
                     _deleteError.value = null
                 }
                 _state.value = Load.Loading
-                _state.value = pending ?: try {
+                val loaded = pending ?: try {
                     target.load { client.list(it) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     Load.Failed(HermesError.Storage(e.message ?: e.javaClass.simpleName))
                 }
+                _state.value = loaded
+                // Pins of chats beyond the newest SESSIONS_LIST_LIMIT are not fetched by id: that read also returns rows the list hides, so a chat could show twice.
+                dropPinsOfMissingChats(loaded)
             }
+        }
+    }
+
+    /**
+     * A list shorter than the limit holds every chat of the bot, so a pin whose chat is not in it points at a chat that
+     * is gone (deleted elsewhere): drop it, or it would count toward the cap with no row to unpin. A full list may be
+     * cut, so nothing is dropped then; an empty one is not trusted either (a hiccup must not wipe the pins).
+     */
+    private suspend fun dropPinsOfMissingChats(load: Load<List<SessionDto>>) {
+        val store = pins ?: return
+        val ready = load as? Load.Ready ?: return
+        if (ready.value.isEmpty() || ready.value.size >= SESSIONS_LIST_LIMIT) return
+        try {
+            store.retain(ready.source.id, ready.source.target.profile ?: ready.source.target.bridge?.profileId, ready.value.map { it.id }.toSet())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // The pins stay as they were.
         }
     }
 
@@ -171,6 +241,8 @@ class SessionsViewModel(
                         val pointerError = try {
                             onSessionDeleted(capturedSessionId)
                             store.clearSessionPointers(capturedSessionId)
+                            drafts?.clearSession(capturedSessionId)
+                            pins?.removeSession(capturedSessionId)
                             null
                         } catch (e: CancellationException) {
                             throw e

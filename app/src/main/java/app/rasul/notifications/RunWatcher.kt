@@ -81,7 +81,13 @@ class RunWatcher(
         return path + query.joinToString("&", "?")
     }
 
-    private fun guardedMemory(memory: RunMemory, session: String?) = object : RunMemory by memory {
+    /** A deleted chat never gets a draft written back, e.g. by a screen that flushes while it closes. */
+    private fun guardedDrafts(drafts: app.rasul.chat.ChatDrafts) = object : app.rasul.chat.ChatDrafts by drafts {
+        override fun save(session: String, text: String) { if (!isDeleted(session)) drafts.save(session, text) }
+    }
+
+    private fun guardedMemory(memory: RunMemory, session: String?, drafts: app.rasul.chat.ChatDrafts? = null) = object : RunMemory by memory {
+        override val drafts = drafts?.let(::guardedDrafts)
         private var selectedSession = session
         override suspend fun sessionId(): String = memory.sessionId().also {
             check(!isDeleted(it))
@@ -167,7 +173,10 @@ class RunWatcher(
             }
             existing?.let(::remove)
             routes[route]?.takeIf { old -> old !== existing && old.model.state.value.let { it.run == null && it.queuedReplies == 0 && !it.preparingSend } }?.let(::remove)
-            val model = createModel(TargetLoader { loaded }, guardedMemory(memory, session))
+            val model = createModel(TargetLoader { loaded }, guardedMemory(memory, session, app.rasul.chat.StoredChatDrafts(
+                container.drafts, connectionId(route), target?.profile ?: target?.bridge?.profileId, container.draftWriter,
+                newSession = Uri.parse(route).getQueryParameter("newSession"),
+            )))
             val chat = Chat(route, title, model, target, session)
             chats[key] = chat
             routes[route] = chat

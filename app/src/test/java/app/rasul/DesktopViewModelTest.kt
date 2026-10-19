@@ -141,6 +141,18 @@ internal open class FakeDesktop : DesktopApi {
         mcpInstallError?.let { throw DesktopException(it) }
         mcpEntries = mcpEntries.map { if (it.id == id) it.copy(installed = true, installable = false) else it }
     }
+    var logLines = listOf<String>()
+    var logsError: DesktopError? = null
+    /** When set, each logs call waits for its own gate in [heldLogs]; completing a gate answers that call. */
+    var holdLogs = false
+    val heldLogs = mutableListOf<kotlinx.coroutines.CompletableDeferred<List<String>>>()
+    val logCalls = mutableListOf<Triple<app.rasul.bridge.LogFile, Int, app.rasul.bridge.LogLevel>>()
+    override suspend fun logs(file: app.rasul.bridge.LogFile, lines: Int, level: app.rasul.bridge.LogLevel): app.rasul.bridge.LogsDto {
+        logCalls += Triple(file, lines, level)
+        logsError?.let { throw DesktopException(it) }
+        if (holdLogs) return app.rasul.bridge.LogsDto(file.query, kotlinx.coroutines.CompletableDeferred<List<String>>().also { heldLogs += it }.await())
+        return app.rasul.bridge.LogsDto(file.query, logLines)
+    }
     override suspend fun usage(days: Int): UsageReportDto {
         daysCalls += days
         usageError?.let { throw DesktopException(it) }

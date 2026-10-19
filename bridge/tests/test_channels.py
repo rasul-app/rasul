@@ -5,12 +5,16 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from rasul_bridge import desktop as desktop_module
 from test_bridge import asynchronous
 from test_desktop import FakeDesktop, desktop
 
 SECRET = "FAKE-SECRET-VALUE-0123456789"
 BOT_TOKEN = "123456:FAKE-BOT-TOKEN-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 PAIRING = "pair_ABCDEF-12345"
+WA_PAIRING = "wa_pair_ABCDEF-12345"
+QR = "2@FAKE-QR-PAYLOAD,abc=/+0123456789"
+PHONE = "491234567890"
 LINK = "https://t.me/newbot/hermes_bot/Rasul?start=abc123"
 FORBIDDEN = ("value", "redacted_value", "env_path", "gateway_start_command", "ingress_url", "docs_url",
              "help", "url", "whatsapp_setup", "poll_token", "qr_payload", "updated_at", "bot_token")
@@ -45,6 +49,13 @@ class FakeChannels(FakeDesktop):
         self.apply_payload = {"ok": True, "platform": "telegram", "bot_username": "rasul_bot",
                               "needs_restart": False, "restart_started": True, "restart_pid": 9,
                               "restart_action": "gateway-restart", "token": BOT_TOKEN}
+        self.wa_payload = {"pairing_id": WA_PAIRING, "status": "waiting", "qr_payload": QR,
+                           "expires_at": "2026-10-18T12:00:00Z", "mode": "bot", "allowed_users": PHONE,
+                           "account_id": PHONE + ":12@s.whatsapp.net", "account_name": "Test\nPerson",
+                           "account_phone": PHONE, "error": None}
+        self.wa_apply_payload = {"ok": True, "platform": "whatsapp", "needs_restart": False,
+                                 "restart_started": True, "restart_pid": 9, "restart_action": "gateway-restart"}
+        self.hot_served, self.settled = False, None  # settings save: the live-serve flag and a state to force
 
     def result(self, method, path, value):
         if path == "/api/messaging/platforms":
@@ -52,14 +63,24 @@ class FakeChannels(FakeDesktop):
         if path.startswith("/api/messaging/platforms/") and method == "PUT":
             ident = path.rsplit("/", 1)[1]
             for row in self.platforms:
-                if row["id"] == ident:
+                if row["id"] == ident and "enabled" in value:
                     row["enabled"] = value["enabled"]
-                    row["state"] = "pending_restart" if value["enabled"] else "disabled"
-            return {"ok": True, "platform": ident, "hot_served": False}
+                    row["state"] = self.settled or ("pending_restart" if value["enabled"] else "disabled")
+                    return {"ok": True, "platform": ident, "hot_served": self.hot_served}
+                if row["id"] == ident and self.settled:
+                    row["state"] = self.settled
+            # like Hermes: a settings save leaves a running channel "connected" and only reports hot_served
+            return {"ok": True, "platform": ident, "hot_served": self.hot_served}
         if path.startswith("/api/messaging/platforms/") and path.endswith("/test"):
             return self.test_payload
         if path == "/api/gateway/restart":
             return {"ok": True, "pid": 7, "name": "gateway-restart"}
+        if path == "/api/messaging/whatsapp/onboarding/start":
+            return self.wa_payload
+        if path.startswith("/api/messaging/whatsapp/onboarding/") and path.endswith("/apply"):
+            return self.wa_apply_payload
+        if path.startswith("/api/messaging/whatsapp/onboarding/"):
+            return {"ok": True} if method == "DELETE" else self.wa_payload
         if path == "/api/messaging/telegram/onboarding/start":
             return self.start_payload
         if path.startswith("/api/messaging/telegram/onboarding/") and path.endswith("/apply"):
@@ -190,8 +211,20 @@ async def test_enabled_sends_only_enabled_and_profile(tmp_path, monkeypatch):
         assert value["id"] == "discord" and value["enabled"] is True and value["needs_restart"] is True
         no_forbidden(value, fake)
         status, value = await call("PUT", "/channels/discord/enabled", {"enabled": False})
-        assert status == 200 and value["needs_restart"] is False and value["state"] == "disabled"
+        assert status == 200 and value["needs_restart"] is True and value["state"] == "disabled"
         assert [r[3] for r in fake.sent("PUT", "/api/messaging/platforms/discord")][-1] == {"enabled": False, "profile": "default"}
+
+
+@pytest.mark.parametrize("enabled,hot,state,needed", [
+    (False, False, None, True), (False, True, None, False), (True, False, None, True),
+    (True, True, "connected", False), (True, True, None, True), (True, "yes", "connected", True)])
+@asynchronous
+async def test_enabled_needs_restart_unless_hermes_served_it_live(tmp_path, monkeypatch, enabled, hot, state, needed):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.hot_served, fake.settled = hot, state
+        status, value = await call("PUT", "/channels/telegram/enabled", {"enabled": enabled})
+        assert status == 200 and value["enabled"] is enabled and value["gateway_running"] is True
+        assert value["needs_restart"] is needed
 
 
 @asynchronous
@@ -200,13 +233,13 @@ async def test_enabled_conflict_and_unknown_are_mapped(tmp_path, monkeypatch):
         fake.status, fake.payload = 409, {"detail": "Cannot enable 'api_server'\non this profile. " + "x" * 400}
         status, value = await call("PUT", "/channels/telegram/enabled", {"enabled": True})
         assert status == 409 and value["error"] == "channel_conflict"
-        assert len(value["message"]) == 200 and "\n" not in value["message"] and value["message"].startswith("Cannot enable")
+        assert value["message"] == "The computer would not turn this channel on."
         fake.status, fake.payload = 404, {"detail": SECRET}
         assert await call("PUT", "/channels/nothing/enabled", {"enabled": True}) == (404, {"error": "channel_not_found"})
         fake.status, fake.payload = 500, {"detail": SECRET}
         assert await call("PUT", "/channels/telegram/enabled", {"enabled": True}) == (502, {"error": "desktop_error"})
         fake.status, fake.payload = 409, "not an object"
-        assert await call("PUT", "/channels/telegram/enabled", {"enabled": True}) == (409, {"error": "channel_conflict", "message": ""})
+        assert await call("PUT", "/channels/telegram/enabled", {"enabled": True}) == (409, {"error": "channel_conflict", "message": "The computer would not turn this channel on."})
 
 
 @asynchronous
@@ -428,7 +461,7 @@ async def test_apply_not_ready_missing_and_malformed(tmp_path, monkeypatch):
         body = {"allowed_user_ids": ["12345"], "force": True}
         fake.status, fake.payload = 409, {"detail": "Telegram setup is not ready yet."}
         assert await call("POST", APPLY, body) == (
-            409, {"error": "channel_setup_not_ready", "message": "Telegram setup is not ready yet."})
+            409, {"error": "channel_setup_not_ready", "message": "The setup is not finished yet."})
         fake.status, fake.payload = 404, {"detail": "gone"}
         assert await call("POST", APPLY, body) == (404, {"error": "channel_setup_not_found"})
 
@@ -443,6 +476,10 @@ async def test_apply_malformed_reply(tmp_path, monkeypatch, odd):
         assert await call("POST", APPLY, body) == (502, {"error": "desktop_error"})
 
 
+WA_STATUS = "/channels/whatsapp/setup/" + WA_PAIRING
+WA_APPLY = WA_STATUS + "/apply"
+WA_API = "/api/messaging/whatsapp/onboarding/"
+SETTINGS = "/channels/telegram/settings"
 RATES = [
     ("GET", "/channels", None, 12),
     ("PUT", "/channels/telegram/enabled", {"enabled": True}, 6),
@@ -452,6 +489,11 @@ RATES = [
     ("GET", "/channels/telegram/setup/" + PAIRING, None, 30),
     ("POST", APPLY, {"allowed_user_ids": ["12345"], "force": True}, 3),
     ("DELETE", "/channels/telegram/setup/" + PAIRING, None, 6),
+    ("POST", "/channels/whatsapp/setup", {"mode": "bot"}, 3),
+    ("GET", WA_STATUS, None, 30),
+    ("POST", WA_APPLY, {"force": True}, 3),
+    ("DELETE", WA_STATUS, None, 6),
+    ("PUT", "/channels/telegram/settings", {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}}, 6),
 ]
 
 
@@ -482,3 +524,440 @@ async def test_audit_lines_carry_no_ids_or_tokens(tmp_path, monkeypatch):
         marks = [r for r in rows if r.get("event") == "channels"]
         assert [(r["action"], r["force"]) for r in marks] == [("restart", True), ("telegram_apply", True)]
         assert all(set(r) == {"time", "event", "action", "force"} for r in marks)
+
+
+@asynchronous
+async def test_whatsapp_start_projection_and_request(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        status, value = await call("POST", "/channels/whatsapp/setup", {"mode": "self-chat", "allowed_users": "+4912,5678,+4912"})
+        assert status == 200
+        assert value == {"pairing_id": WA_PAIRING, "status": "waiting", "qr_payload": QR,
+                         "expires_at": "2026-10-18T12:00:00Z", "account_name": "Test Person",
+                         "account_phone_last4": "7890"}
+        text = json.dumps(value)
+        for hidden in (PHONE, "account_id", "s.whatsapp.net", "allowed_users", "account_phone\"", fake.token):
+            assert hidden not in text
+        sent = fake.sent("POST", WA_API + "start")
+        assert len(sent) == 1 and sent[0][3] == {"mode": "self-chat", "allowed_users": "+4912,5678", "profile": "default"}
+        assert (await call("POST", "/channels/whatsapp/setup", {"mode": "bot"}))[0] == 200
+        assert fake.sent("POST", WA_API + "start")[1][3] == {"mode": "bot", "profile": "default"}
+        assert (await call("POST", "/channels/whatsapp/setup", {"mode": "bot", "allowed_users": ""}))[0] == 200
+        assert fake.sent("POST", WA_API + "start")[2][3] == {"mode": "bot", "profile": "default"}
+
+
+@asynchronous
+async def test_whatsapp_qr_only_while_waiting_and_only_clean(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        for state in ("installing", "starting", "connected", "error", "cancelled"):
+            fake.wa_payload = {**fake.wa_payload, "status": state}
+            status, value = await call("GET", WA_STATUS)
+            assert status == 200 and value["status"] == state and "qr_payload" not in value
+        for odd in ("", "x" * 1025, "caf\u00e9", "a\nb", "a\tb", None, 5, ["a"]):
+            fake.wa_payload = {**fake.wa_payload, "status": "waiting", "qr_payload": odd}
+            status, value = await call("GET", WA_STATUS)
+            assert status == 200 and value["status"] == "waiting" and "qr_payload" not in value
+        fake.wa_payload = {**fake.wa_payload, "qr_payload": "x" * 1024}
+        assert (await call("GET", WA_STATUS))[1]["qr_payload"] == "x" * 1024
+
+
+@asynchronous
+async def test_whatsapp_phone_error_and_missing_fields(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.wa_payload = {"pairing_id": WA_PAIRING, "status": "connected", "account_phone": "+49 (12) 3-4567",
+                           "error": "boom\n" + "e" * 300}
+        status, value = await call("GET", WA_STATUS)
+        assert status == 200
+        assert value == {"pairing_id": WA_PAIRING, "status": "connected", "account_phone_last4": "4567",
+                         "error": "whatsapp_setup_failed"}
+        for phone in ("123", "", "abc", None, 49123, ["491234567890"]):
+            fake.wa_payload = {"pairing_id": WA_PAIRING, "status": "connected", "account_phone": phone}
+            assert (await call("GET", WA_STATUS)) == (200, {"pairing_id": WA_PAIRING, "status": "connected"})
+
+
+@pytest.mark.parametrize("odd", [
+    {"status": "waiting"}, {"pairing_id": "short", "status": "waiting"}, {"pairing_id": 5, "status": "waiting"},
+    {"pairing_id": WA_PAIRING}, {"pairing_id": WA_PAIRING, "status": "expired"},
+    {"pairing_id": WA_PAIRING, "status": 7}, {"pairing_id": "other_pair_ABCDEF", "status": "waiting"}, [], None])
+@asynchronous
+async def test_whatsapp_malformed_reply(tmp_path, monkeypatch, odd):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.wa_payload = odd
+        assert await call("GET", WA_STATUS) == (502, {"error": "desktop_error"})
+        if not (isinstance(odd, dict) and odd.get("pairing_id") == "other_pair_ABCDEF"):
+            assert await call("POST", "/channels/whatsapp/setup", {"mode": "bot"}) == (502, {"error": "desktop_error"})
+
+
+@pytest.mark.parametrize("body", [
+    None, {}, {"allowed_users": "123"}, {"mode": "other"}, {"mode": None}, {"mode": 1}, {"mode": "Bot"},
+    {"mode": "bot", "x": 1}, {"mode": "bot", "force": True}, {"mode": "bot", "allowed_users": 123},
+    {"mode": "bot", "allowed_users": ["123"]}, {"mode": "bot", "allowed_users": "12 3"},
+    {"mode": "bot", "allowed_users": "12,"}, {"mode": "bot", "allowed_users": ",12"}, {"mode": "bot", "allowed_users": "12,,3"},
+    {"mode": "bot", "allowed_users": "++12"}, {"mode": "bot", "allowed_users": "12+3"}, {"mode": "bot", "allowed_users": "abc"},
+    {"mode": "bot", "allowed_users": "\u0661\u0662"}, {"mode": "bot", "allowed_users": "1" * 21},
+    {"mode": "bot", "allowed_users": ",".join(["1"] * 21)}, {"mode": "bot", "allowed_users": "12\n"},
+    {"mode": "bot", "allowed_users": "+"}, {"mode": "bot", "allowed_users": "12@s.whatsapp.net"}])
+@asynchronous
+async def test_whatsapp_start_validates_body(tmp_path, monkeypatch, body):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert await call("POST", "/channels/whatsapp/setup", body) == (400, {"error": "desktop_invalid"})
+        assert not fake.sent("POST", WA_API + "start")
+
+
+@asynchronous
+async def test_whatsapp_allowed_users_limits(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        twenty = ",".join(["+" + "1" * 20] * 20)
+        assert (await call("POST", "/channels/whatsapp/setup", {"mode": "bot", "allowed_users": twenty}))[0] == 200
+
+
+@pytest.mark.parametrize("method,suffix,body", [
+    ("GET", WA_STATUS, {"x": 1}), ("DELETE", WA_STATUS, {"x": 1}),
+    ("POST", WA_APPLY, None), ("POST", WA_APPLY, {}), ("POST", WA_APPLY, {"force": "yes"}), ("POST", WA_APPLY, {"force": 1}),
+    ("POST", WA_APPLY, {"force": True, "mode": "x"}), ("POST", WA_APPLY, {"force": True, "mode": None}),
+    ("POST", WA_APPLY, {"force": True, "token": "x"}), ("POST", WA_APPLY, {"force": True, "allowed_users": "a"}),
+    ("POST", WA_APPLY, {"force": True, "allowed_users": None}), ("POST", WA_APPLY, {"force": True, "allowed_users": 1}),
+])
+@asynchronous
+async def test_whatsapp_strict_bodies(tmp_path, monkeypatch, method, suffix, body):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert await call(method, suffix, body) == (400, {"error": "desktop_invalid"})
+        assert not [r for r in fake.requests if "/api/messaging" in r[1] or "/api/gateway" in r[1]]
+
+
+@pytest.mark.parametrize("method,suffix,body", [
+    ("GET", "/channels/whatsapp/setup/short", None), ("GET", "/channels/whatsapp/setup/bad.pairing", None),
+    ("DELETE", "/channels/whatsapp/setup/short", None), ("POST", "/channels/whatsapp/setup/short/apply", {"force": True}),
+    ("GET", "/channels/whatsapp/setup/" + "a" * 129, None), ("PUT", "/channels/Bad-Id/settings", {"values": {"A": "v"}}),
+    ("PUT", "/channels/" + "a" * 33 + "/settings", {"values": {"A": "v"}}), ("PUT", "/channels//settings", {"values": {"A": "v"}}),
+    ("GET", "/channels/telegram/settings", None), ("POST", "/channels/telegram/settings", {"values": {"A": "v"}}),
+])
+@asynchronous
+async def test_whatsapp_and_settings_bad_ids_never_route(tmp_path, monkeypatch, method, suffix, body):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert (await call(method, suffix, body))[0] == 404
+        assert not [r for r in fake.requests if "/api/messaging" in r[1] or "/api/gateway" in r[1]]
+
+
+@asynchronous
+async def test_whatsapp_status_unknown_and_expired(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.status, fake.payload = 404, {"detail": "gone"}
+        assert await call("GET", WA_STATUS) == (404, {"error": "channel_setup_not_found"})
+        fake.status, fake.payload = 410, {"detail": "WhatsApp setup expired."}
+        assert await call("GET", WA_STATUS) == (410, {"error": "channel_setup_expired"})
+        fake.status, fake.payload = 500, {"detail": "boom"}
+        assert await call("GET", WA_STATUS) == (502, {"error": "desktop_error"})
+
+
+@pytest.mark.parametrize("agents", [2, None])
+@asynchronous
+async def test_whatsapp_apply_busy_guard(tmp_path, monkeypatch, agents):
+    async with channels(tmp_path, monkeypatch) as (bridge, fake, call):
+        if agents is None:
+            bridge.store.write("profile-keys.json", {})
+        else:
+            fake.gateway.active_agents = agents
+        assert await call("POST", WA_APPLY, {"force": False}) == (409, {"error": "gateway_busy", "active_agents": agents})
+        assert not fake.sent("POST", WA_API + WA_PAIRING + "/apply")
+        status, value = await call("POST", WA_APPLY, {"force": True})
+        assert (status, value) == (200, {"ok": True, "restart_started": True, "needs_restart": False})
+        assert len(fake.sent("POST", WA_API + WA_PAIRING + "/apply")) == 1
+
+
+@asynchronous
+async def test_whatsapp_apply_request_and_mapping(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.gateway.active_agents = 0
+        path = WA_API + WA_PAIRING + "/apply"
+        assert (await call("POST", WA_APPLY, {"force": False}))[0] == 200
+        assert fake.sent("POST", path)[0][3] == {"profile": "default"}
+        assert (await call("POST", WA_APPLY, {"force": False, "mode": "self-chat", "allowed_users": "+12,34,+12"}))[0] == 200
+        assert fake.sent("POST", path)[1][3] == {"profile": "default", "mode": "self-chat", "allowed_users": "+12,34"}
+        fake.wa_apply_payload = {**fake.wa_apply_payload, "restart_started": False, "needs_restart": True}
+        assert await call("POST", WA_APPLY, {"force": False}) == (200, {"ok": True, "restart_started": False, "needs_restart": True})
+
+
+@pytest.mark.parametrize("code,reply", [
+    (404, {"error": "channel_setup_not_found"}), (410, {"error": "channel_setup_expired"}),
+    (409, {"error": "channel_setup_not_ready", "message": "The setup is not finished yet."})])
+@asynchronous
+async def test_whatsapp_apply_refusals_are_mapped(tmp_path, monkeypatch, code, reply):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.status, fake.payload = code, {"detail": "WhatsApp setup is not connected yet."}
+        assert await call("POST", WA_APPLY, {"force": True}) == (code, reply)
+
+
+@pytest.mark.parametrize("status_code", [500, 502])
+@asynchronous
+async def test_whatsapp_apply_not_ready_survives_a_failing_status_check(tmp_path, monkeypatch, status_code):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.status, fake.payload = 409, None
+
+        def result(method, path, value):
+            fake.status = status_code  # the first call (apply) already used 409
+            return {"detail": "WhatsApp setup is not connected yet."}
+        fake.result = result
+        assert await call("POST", WA_APPLY, {"force": True}) == (
+            409, {"error": "channel_setup_not_ready", "message": "The setup is not finished yet."})
+
+
+@asynchronous
+async def test_whatsapp_apply_on_an_expired_setup_says_expired(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.status, fake.payload = 409, None  # like Hermes: apply on an expired setup is 409, its status is 410
+
+        def result(method, path, value):
+            fake.status = 410
+            return {"detail": "WhatsApp setup is not connected yet."}
+        fake.result = result
+        assert await call("POST", WA_APPLY, {"force": True}) == (410, {"error": "channel_setup_expired"})
+
+
+@pytest.mark.parametrize("odd", [{"ok": False}, {"ok": True, "restart_started": "yes", "needs_restart": False},
+                                 {"ok": True, "restart_started": True}, [], None])
+@asynchronous
+async def test_whatsapp_apply_malformed_reply(tmp_path, monkeypatch, odd):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.wa_apply_payload = odd
+        assert await call("POST", WA_APPLY, {"force": True}) == (502, {"error": "desktop_error"})
+
+
+@asynchronous
+async def test_whatsapp_cancel(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert await call("DELETE", WA_STATUS) == (200, {"ok": True})
+        assert len(fake.sent("DELETE", WA_API + WA_PAIRING)) == 1
+
+
+def whatsapp_row():
+    return platform("whatsapp", env_vars=[
+        env_var("WHATSAPP_ALLOWED_USERS", required=False, is_list=True), env_var("WHATSAPP_MODE", required=False)])
+
+
+@asynchronous
+async def test_settings_allow_list_comes_from_a_fresh_list(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        put = "/api/messaging/platforms/telegram"
+        assert await call("PUT", SETTINGS, {"values": {"WHATSAPP_MODE": "bot"}}) == (400, {"error": "channel_unknown_setting"})
+        assert await call("PUT", SETTINGS, {"clear": ["NOT_A_FIELD"]}) == (400, {"error": "channel_unknown_setting"})
+        assert (await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}, "clear": []}))[0] == 200
+        fake.platforms[0]["env_vars"].append(env_var("TELEGRAM_NEW_FIELD"))
+        assert (await call("PUT", SETTINGS, {"values": {"TELEGRAM_NEW_FIELD": "v"}}))[0] == 200
+        fake.platforms[0]["env_vars"].pop()
+        assert (await call("PUT", SETTINGS, {"values": {"TELEGRAM_NEW_FIELD": "v"}}))[0] == 400
+        assert len(fake.sent("PUT", put)) == 2
+
+
+@asynchronous
+async def test_settings_forwards_only_env_clear_and_profile(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        status, value = await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN},
+                                                      "clear": ["TELEGRAM_ALLOWED_USERS"]})
+        assert status == 200
+        sent = fake.sent("PUT", "/api/messaging/platforms/telegram")
+        assert len(sent) == 1
+        assert sent[0][3] == {"env": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}, "clear_env": ["TELEGRAM_ALLOWED_USERS"],
+                              "profile": "default"}
+        assert value["id"] == "telegram" and value["needs_restart"] is True and value["state"] == "connected"
+        text = json.dumps(value)
+        for hidden in (BOT_TOKEN, SECRET, fake.token):
+            assert hidden not in text
+        assert set(value) == {"id", "name", "description", "enabled", "configured", "gateway_running", "state",
+                              "error_code", "error_message", "home_channel_set", "fields", "needs_restart"}
+        assert (await call("PUT", SETTINGS, {"clear": ["TELEGRAM_BOT_TOKEN"]}))[0] == 200
+        assert fake.sent("PUT", "/api/messaging/platforms/telegram")[1][3] == {
+            "env": {}, "clear_env": ["TELEGRAM_BOT_TOKEN"], "profile": "default"}
+
+
+@pytest.mark.parametrize("secret", ["abcd\u2026wxyz", "\u00abredacted:abcd\u00bb", "ab****yz", "***", "abcd...wxyz", "a" * 4000 + "****"])
+@asynchronous
+async def test_settings_refuse_a_redacted_preview(tmp_path, monkeypatch, secret):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        status, value = await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": secret}})
+        assert (status, value) == (400, {"error": "channel_setting_redacted"})
+        assert not fake.sent("PUT", "/api/messaging/platforms/telegram")
+
+
+@pytest.mark.parametrize("body", [
+    None, {}, {"values": {}}, {"clear": []}, {"values": {}, "clear": []}, {"values": [], "clear": ["TELEGRAM_BOT_TOKEN"]},
+    {"values": {"TELEGRAM_BOT_TOKEN": 5}}, {"values": {"TELEGRAM_BOT_TOKEN": None}}, {"values": {"TELEGRAM_BOT_TOKEN": ""}},
+    {"values": {"TELEGRAM_BOT_TOKEN": "   "}}, {"values": {"TELEGRAM_BOT_TOKEN": "a\nb"}}, {"values": {"TELEGRAM_BOT_TOKEN": "a\x00b"}},
+    {"values": {"TELEGRAM_BOT_TOKEN": "a\x7fb"}}, {"values": {"TELEGRAM_BOT_TOKEN": "a" * 4097}},
+    {"values": {"lower": "v"}}, {"values": {"1BAD": "v"}}, {"values": {"A" * 65: "v"}}, {"clear": ["lower"]}, {"clear": [5]},
+    {"clear": "TELEGRAM_BOT_TOKEN"}, {"clear": ["TELEGRAM_BOT_TOKEN"] * 2},
+    {"values": {"TELEGRAM_BOT_TOKEN": "v"}, "clear": ["TELEGRAM_BOT_TOKEN"]},
+    {"values": {"TELEGRAM_BOT_TOKEN": "v"}, "extra": 1},
+    {"values": {f"K{i}": "v" for i in range(9)}}, {"clear": [f"K{i}" for i in range(9)]},
+    b'{"values":{"TELEGRAM_BOT_TOKEN":"a","TELEGRAM_BOT_TOKEN":"b"}}'])
+@asynchronous
+async def test_settings_strict_bodies(tmp_path, monkeypatch, body):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert await call("PUT", SETTINGS, body) == (400, {"error": "desktop_invalid"})
+        assert not [r for r in fake.requests if "/api/messaging" in r[1]]
+
+
+@asynchronous
+async def test_settings_size_limits(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert (await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": "a" * 4096}}))[0] == 200
+        assert (await call("PUT", SETTINGS, b" " * (256 * 1024 + 1)))[0] == 400
+        assert (await call("POST", "/channels/restart", b" " * 1025))[0] == 400
+
+
+@asynchronous
+async def test_settings_unknown_channel_and_hermes_refusals(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert await call("PUT", "/channels/nothing/settings", {"values": {"A": "v"}}) == (404, {"error": "channel_not_found"})
+        assert await call("PUT", "/channels/Bad-Id/settings", {"values": {"A": "v"}}) == (404, {"error": "Route not found"})
+        fake.platforms.append(whatsapp_row())
+        assert (await call("PUT", "/channels/whatsapp/settings", {"values": {"WHATSAPP_MODE": "bot"}}))[0] == 200
+        fake.status, fake.payload = 500, {"detail": "boom"}
+        assert await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}}) == (502, {"error": "desktop_error"})
+
+
+@asynchronous
+async def test_settings_hermes_validation_error_is_a_fixed_code(tmp_path, monkeypatch):
+    class Refusing(FakeChannels):
+        replies = iter([200, 400])  # the list read, then the write
+        status = property(lambda self: next(self.replies), lambda self, value: None)
+
+        def result(self, method, path, value):
+            if method == "PUT":
+                return {"detail": "invalid " + BOT_TOKEN}
+            return super().result(method, path, value)
+
+    async with desktop(tmp_path, monkeypatch, Refusing) as (_, fake, call):
+        reply = await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}})
+        assert reply == (400, {"error": "channel_setting_invalid"})
+        assert len(fake.sent("PUT", "/api/messaging/platforms/telegram")) == 1
+
+
+@asynchronous
+async def test_settings_row_vanishing_after_save_is_clean(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        original = fake.result
+
+        def result(method, path, value):
+            if method == "PUT":
+                fake.platforms = []
+            return original(method, path, value)
+
+        fake.result = result
+        assert await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}}) == (404, {"error": "channel_not_found"})
+
+
+@asynchronous
+async def test_audit_names_settings_keys_and_whatsapp_apply_only(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (bridge, fake, call):
+        fake.gateway.active_agents = 1
+        assert (await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}, "clear": ["TELEGRAM_ALLOWED_USERS"]}))[0] == 200
+        assert (await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": "abcd\u2026wxyz"}}))[0] == 400
+        assert (await call("POST", WA_APPLY, {"force": True, "allowed_users": "+49123"}))[0] == 200
+        assert (await call("POST", WA_APPLY, {"force": False}))[0] == 409
+        await call("POST", "/channels/whatsapp/setup", {"mode": "bot", "allowed_users": "+49123"})
+        await call("GET", WA_STATUS)
+        text = bridge.audit.path.read_text()
+        for secret in (BOT_TOKEN, SECRET, fake.token, WA_PAIRING, QR, PHONE, "+49123", "49123", "abcd"):
+            assert secret not in text
+        marks = [json.loads(line) for line in text.splitlines()]
+        marks = [r for r in marks if r.get("event") == "channels"]
+        assert [r["action"] for r in marks] == ["settings", "whatsapp_apply"]
+        assert marks[0]["set"] == ["TELEGRAM_BOT_TOKEN"] and marks[0]["cleared"] == ["TELEGRAM_ALLOWED_USERS"]
+        assert set(marks[0]) == {"time", "event", "action", "set", "cleared"}
+        assert marks[1]["force"] is True and set(marks[1]) == {"time", "event", "action", "force"}
+
+
+WA_ERRORS = [
+    ("500: WhatsApp bridge script was not found at C:\\Users\\someuser\\hermes\\bridge.js.", "whatsapp_bridge_missing"),
+    ("Failed to install WhatsApp bridge dependencies: [Errno 2] C:\\Users\\someuser\\npm", "whatsapp_install_failed"),
+    ("npm install failed for WhatsApp bridge: ENOENT /home/someuser/bridge", "whatsapp_install_failed"),
+    ("Node.js preparation failed: no binary for someuser", "whatsapp_install_failed"),
+    ("Installing WhatsApp bridge dependencies timed out.", "whatsapp_timeout"),
+    ("WhatsApp QR setup expired. Start a new setup.", "whatsapp_setup_failed"),
+    ("logged_out", "whatsapp_logged_out"),
+    ("WhatsApp pairing process exited with code 1.", "whatsapp_setup_failed"),
+    ("Stream errored for " + PHONE + ":12@s.whatsapp.net", "whatsapp_setup_failed"),
+    ("WhatsApp pairing failed.", "whatsapp_setup_failed"),
+    ("totally new text", "whatsapp_setup_failed")]
+
+
+@pytest.mark.parametrize("text,code", WA_ERRORS)
+@asynchronous
+async def test_whatsapp_error_is_a_fixed_code(tmp_path, monkeypatch, text, code):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.wa_payload = {"pairing_id": WA_PAIRING, "status": "error", "error": text}
+        status, value = await call("GET", WA_STATUS)
+        assert (status, value) == (200, {"pairing_id": WA_PAIRING, "status": "error", "error": code})
+        status, value = await call("POST", "/channels/whatsapp/setup", {"mode": "bot"})
+        assert status == 200 and value["error"] == code
+        body = json.dumps(value)
+        for leak in ("someuser", PHONE, "s.whatsapp.net", "npm", "C:"):
+            assert leak not in body
+
+
+@asynchronous
+async def test_whatsapp_account_name_that_is_a_phone_number_keeps_last_four(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        for name, shown in (("+49 1234567890", "7890"), ("0049-123 456", "3456"), ("  +4 9  ", "")):
+            fake.wa_payload = {"pairing_id": WA_PAIRING, "status": "connected", "account_name": name}
+            expected = {"pairing_id": WA_PAIRING, "status": "connected", **({"account_name": shown} if shown else {})}
+            assert await call("GET", WA_STATUS) == (200, expected)
+        arabic = "".join(chr(0x660 + int(digit)) for digit in "491234567890")
+        for name, shown in (("Ann 491234567890", "Ann 7890"), ("(049) 1234-567890", "(7890"),
+                            ("049.1234.567890", "7890"), (arabic, arabic[-4:]),
+                            ("491234567890:12@s.whatsapp.net", "7890:12@s.whatsapp.net"), ("Team 42", "Team 42"),
+                            ("Room 1234 and 5678", "Room 1234 and 5678"),
+                            ("+1 000/000_0000", "+0000"), ("1000" + chr(0x2013) + "000" + chr(0x2013) + "0000", "0000"),
+                            ("Ann 12" + chr(0x200B) + "345" + chr(0x2060) + "678" + chr(0xFEFF) + "90", "Ann 7890"),
+                            ("Ann 123,456,7890", "Ann 7890"), ("Year 2026", "Year 2026")):
+            fake.wa_payload = {"pairing_id": WA_PAIRING, "status": "connected", "account_name": name}
+            assert (await call("GET", WA_STATUS))[1]["account_name"] == shown
+        for name in ("Test Person", "Dev 2", "12 Monkeys", "x" * 80):
+            fake.wa_payload = {"pairing_id": WA_PAIRING, "status": "connected", "account_name": name}
+            assert (await call("GET", WA_STATUS))[1]["account_name"] == name[:64]
+
+
+@pytest.mark.parametrize("hot,state,needed", [
+    (False, "connected", True), (True, "connected", False), (True, "pending_restart", True),
+    (False, "pending_restart", True), ("yes", "connected", True), (None, "connected", True)])
+@asynchronous
+async def test_settings_need_restart_unless_hermes_served_it_live(tmp_path, monkeypatch, hot, state, needed):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.hot_served, fake.settled = hot, state
+        status, value = await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}})
+        assert status == 200 and value["state"] == state and value["needs_restart"] is needed
+
+
+@asynchronous
+async def test_settings_unparsable_save_reply_needs_restart(tmp_path, monkeypatch):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        fake.settled = "connected"
+        fake.hot_served = None
+        original = fake.result
+        fake.result = lambda method, path, value: [] if method == "PUT" else original(method, path, value)
+        status, value = await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": BOT_TOKEN}})
+        assert status == 200 and value["needs_restart"] is True
+
+
+@pytest.mark.parametrize("secret", ["abc\u2028WHATSAPP_MODE=x", "abc\x85PATH=x", "token \U0001f600", "caf\u00e9", "\u00a0\u00a0v"])
+@asynchronous
+async def test_settings_refuse_non_ascii_values(tmp_path, monkeypatch, secret):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        assert await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": secret}}) == (400, {"error": "channel_setting_invalid"})
+        assert not fake.sent("PUT", "/api/messaging/platforms/telegram")
+        assert (await call("PUT", SETTINGS, {"values": {"TELEGRAM_BOT_TOKEN": "plain-ascii~!"}}))[0] == 200
+
+
+@pytest.mark.parametrize("suffix,body", [
+    ("/channels/whatsapp/setup", {"mode": "bot", "allowed_users": "", "x": "a" * 500000}),
+    (WA_APPLY, {"force": True, "x": "a" * 500000})])
+@asynchronous
+async def test_big_whatsapp_bodies_are_refused_before_parsing(tmp_path, monkeypatch, suffix, body):
+    async with channels(tmp_path, monkeypatch) as (_, fake, call):
+        parsed = []
+        original = desktop_module.decode
+        monkeypatch.setattr(desktop_module, "decode", lambda data: parsed.append(len(data)) or original(data))
+        assert await call("POST", suffix, json.dumps(body).encode()) == (400, {"error": "desktop_invalid"})
+        assert not parsed and not [r for r in fake.requests if "/api/messaging" in r[1]]
+        assert (await call("POST", suffix, json.dumps({k: v for k, v in body.items() if k != "x"}).encode()))[0] == 200
+        assert parsed and max(parsed) < 1024  # the small body was parsed; the 500 KB one never was

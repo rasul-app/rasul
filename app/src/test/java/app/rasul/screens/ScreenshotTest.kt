@@ -135,6 +135,14 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
                 screen == "ChannelsBusy" -> 102
                 screen == "TelegramSetupWaiting" -> 103
                 screen == "TelegramSetupReady" -> 104
+                screen == "LogsLines" -> 140
+                screen == "LogsEmpty" -> 141
+                screen == "LogsError" -> 142
+                screen == "WhatsappWaiting" -> 150
+                screen == "WhatsappConnected" -> 151
+                screen == "WhatsappError" -> 152
+                screen == "ChannelSettings" -> 153
+                screen == "ChannelsSettingsRow" -> 154
                 else -> order.indexOf(screen).let { if (it < 0) order.size else it } + 1
             }
             val suffix = if (dark) "-dark" else ""

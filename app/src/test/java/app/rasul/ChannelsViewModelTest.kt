@@ -9,12 +9,16 @@ import app.rasul.bridge.ChannelsApi
 import app.rasul.bridge.TelegramApplyDto
 import app.rasul.bridge.TelegramSetupStartDto
 import app.rasul.bridge.TelegramSetupStatusDto
+import app.rasul.bridge.WhatsappApplyDto
+import app.rasul.bridge.WhatsappMode
+import app.rasul.bridge.WhatsappSetupDto
 import app.rasul.channels.BusyAction
 import app.rasul.channels.BusyState
 import app.rasul.channels.ChannelNotice
 import app.rasul.channels.ChannelsViewModel
 import app.rasul.channels.LinkProblem
 import app.rasul.channels.TelegramSetup
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -113,6 +117,52 @@ internal class FakeChannels : ChannelsApi {
 
     override suspend fun cancelTelegramSetup(pairingId: String) {
         cancels += pairingId
+    }
+
+    val waStarts = mutableListOf<Pair<WhatsappMode, List<String>>>()
+    var waStartError: ChannelException? = null
+    var waStart = WhatsappSetupDto("wa_pairing_0001", "installing")
+    val waStatusScript = ArrayDeque<Any>() // WhatsappSetupDto or ChannelException
+    var waStatusReads = 0
+    val waApplies = mutableListOf<Pair<String, Boolean>>()
+    var waApplyError: ChannelException? = null
+    var waApplyResult = WhatsappApplyDto(true, restartStarted = false, needsRestart = true)
+    val waCancels = mutableListOf<String>()
+    /** When set, a WhatsApp start waits for it before it answers (a slow computer). */
+    var waStartGate: CompletableDeferred<Unit>? = null
+    val saves = mutableListOf<Triple<String, Map<String, String>, List<String>>>()
+    var saveError: ChannelException? = null
+    var saveNeedsRestart = false
+
+    override suspend fun startWhatsappSetup(mode: WhatsappMode, allowedUsers: List<String>): WhatsappSetupDto {
+        waStarts += mode to allowedUsers
+        waStartGate?.await()
+        waStartError?.let { throw it }
+        return waStart
+    }
+
+    override suspend fun whatsappSetupStatus(pairingId: String): WhatsappSetupDto {
+        waStatusReads++
+        val next = waStatusScript.removeFirstOrNull() ?: WhatsappSetupDto(pairingId, "waiting", qrPayload = "fake-payload")
+        if (next is ChannelException) throw next
+        return next as WhatsappSetupDto
+    }
+
+    override suspend fun applyWhatsappSetup(pairingId: String, force: Boolean): WhatsappApplyDto {
+        waApplies += pairingId to force
+        waApplyError?.let { throw it }
+        if (busy && !force) throw ChannelException(ChannelError.Busy, activeAgents = busyAgents)
+        return waApplyResult
+    }
+
+    override suspend fun cancelWhatsappSetup(pairingId: String) {
+        waCancels += pairingId
+    }
+
+    override suspend fun saveSettings(id: String, values: Map<String, String>, clear: List<String>): ChannelDto {
+        saves += Triple(id, values, clear)
+        saveError?.let { throw it }
+        return list.first { it.id == id }.copy(needsRestart = saveNeedsRestart)
     }
 }
 

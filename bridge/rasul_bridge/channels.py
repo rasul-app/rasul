@@ -1,4 +1,5 @@
-"""Messaging channels from the phone: list, switch on or off, test, restart, Telegram setup.
+"""Messaging channels from the phone: list, switch on or off, test, restart, Telegram and WhatsApp
+setup, and channel settings.
 
 Every response is rebuilt from checked fields. Hermes payloads are never passed through, and
 no channel secret (token, allow-list, address, local path) is ever read into a response.
@@ -18,7 +19,23 @@ USER_ID = r"[0-9]{1,20}"
 PLATFORMS = "/api/messaging/platforms"
 TELEGRAM = "/api/messaging/telegram/onboarding"
 LINK_HOSTS = ("t.me", "telegram.me")
+WHATSAPP = "/api/messaging/whatsapp/onboarding"
+WHATSAPP_STATES = ("installing", "starting", "waiting", "connected", "error", "cancelled")
+WHATSAPP_MODES = ("bot", "self-chat")
+PHONES = r"\+?[0-9]{1,20}(,\+?[0-9]{1,20}){0,19}"
+SETTING = r"[A-Z][A-Z0-9_]{0,63}"
 MAX_CHANNELS, MAX_FIELDS = 64, 32
+MAX_VALUE, MAX_SETTINGS = 4096, 8
+MESSAGES = {"channel_conflict": "The computer would not turn this channel on.",
+            "channel_setup_not_ready": "The setup is not finished yet."}
+# Static first words of the setup errors Hermes can report; anything else is the generic code.
+WHATSAPP_ERRORS = (("whatsapp bridge script was not found", "whatsapp_bridge_missing"),
+                   ("failed to install whatsapp bridge", "whatsapp_install_failed"),
+                   ("npm install failed for whatsapp bridge", "whatsapp_install_failed"),
+                   ("node.js preparation failed", "whatsapp_install_failed"),
+                   ("installing whatsapp bridge dependencies timed out", "whatsapp_timeout"),
+                   ("logged_out", "whatsapp_logged_out"))
+BODY_LIMIT = {"chan_settings": 256 * 1024}  # every other body stays at 1024 bytes
 
 
 class Refused(ValueError):
@@ -32,8 +49,7 @@ class Refused(ValueError):
 def refusal(refused, codes):
     body = {"error": codes[refused.status]}
     if refused.status == 409:
-        detail = refused.body.get("detail") if isinstance(refused.body, dict) else None
-        body["message"] = clean(detail, 200)
+        body["message"] = MESSAGES[body["error"]]
     return refused.status, body
 
 
@@ -92,10 +108,150 @@ def deep_link(value):
     return "https://" + parts.netloc + parts.path + ("?" + parts.query if parts.query else "")
 
 
-def audit(desktop, name, force):
+def audit(desktop, name, force=None, **names):
+    """One line per change: the action and, for settings, key names only. Never ids, values or tokens."""
+    record = {"time": datetime.now(timezone.utc).isoformat(), "event": "channels", "action": name}
+    if force is not None:
+        record["force"] = force
     with suppress(Exception):
-        Audit(desktop.profiles.store).write({"time": datetime.now(timezone.utc).isoformat(),
-                                             "event": "channels", "action": name, "force": force})
+        Audit(desktop.profiles.store).write({**record, **names})
+
+
+def valid_body(name, value):
+    """Whole-body check for the routes that do not fit the generic key rules in desktop.py."""
+    if not isinstance(value, dict):
+        return False
+    if name == "chan_settings":
+        values, clear = value.get("values", {}), value.get("clear", [])
+        return (set(value) <= {"values", "clear"} and isinstance(values, dict) and isinstance(clear, list)
+                and 0 < len(values) + len(clear) and len(values) <= MAX_SETTINGS and len(clear) <= MAX_SETTINGS
+                and all(type(k) is str and re.fullmatch(SETTING, k) and type(v) is str and v.strip()
+                        and len(v) <= MAX_VALUE and not re.search(r"[\x00-\x1f\x7f]", v) for k, v in values.items())
+                and all(type(k) is str and re.fullmatch(SETTING, k) for k in clear)
+                and len(set(clear)) == len(clear) and not set(values) & set(clear))
+    users = value.get("allowed_users", "")
+    keys = {"chan_wa_setup": {"mode", "allowed_users"}, "chan_wa_apply": {"mode", "allowed_users", "force"}}[name]
+    return (set(value) <= keys and (value.get("mode") in WHATSAPP_MODES or (name == "chan_wa_apply" and "mode" not in value))
+            and type(users) is str and (users == "" or re.fullmatch(PHONES, users) is not None)
+            and (name == "chan_wa_setup" or type(value.get("force")) is bool))
+
+
+def whatsapp_error(text):
+    """A fixed code for a Hermes setup error. The text itself can hold paths, names or numbers."""
+    lowered = re.sub(r"^[0-9]{3}: ", "", clean(text, 200)).lower()  # the str() of an HTTP error starts with its status
+    return next((code for start, code in WHATSAPP_ERRORS if lowered.startswith(start)), "whatsapp_setup_failed")
+
+
+def account_name(value):
+    """The profile name, or its last 4 digits when it only looks like a phone number."""
+    name = clean(value, 64)
+    if re.fullmatch(r"[+\s-]*[0-9][0-9+\s-]*", name):
+        digits = re.sub(r"[^0-9]", "", name)
+        return digits[-4:] if len(digits) >= 4 else ""
+    # Any other run of 5 or more digits (also Arabic-Indic, with any separators except : and @, which end a run) keeps only its last 4.
+    return re.sub(r"\d(?:(?:[^\w:@]|_)*\d){4,}", lambda run: re.sub(r"\D", "", run.group())[-4:], name)
+
+
+def whatsapp(raw, wanted=None):
+    """A rebuilt WhatsApp setup state: the QR only while waiting for a scan, the phone as its last 4 digits."""
+    pairing = raw.get("pairing_id") if isinstance(raw, dict) else None
+    if (not isinstance(pairing, str) or not re.fullmatch(PAIRING, pairing) or pairing != (wanted or pairing)
+            or raw.get("status") not in WHATSAPP_STATES):
+        raise ValueError
+    result = {"pairing_id": pairing, "status": raw["status"]}
+    code = raw.get("qr_payload")
+    if raw["status"] == "waiting" and isinstance(code, str) and re.fullmatch(r"[\x20-\x7e]{1,1024}", code):
+        result["qr_payload"] = code
+    phone = re.sub(r"[^0-9]", "", raw["account_phone"]) if isinstance(raw.get("account_phone"), str) else ""
+    for key, text in (("expires_at", clean(raw.get("expires_at"), 64)), ("account_name", account_name(raw.get("account_name"))),
+                      ("account_phone_last4", phone[-4:] if len(phone) >= 4 else ""),
+                      ("error", whatsapp_error(raw["error"]) if clean(raw.get("error"), 200) else "")):
+        if text:
+            result[key] = text
+    return result
+
+
+def hides_secret(text):
+    """True for a value that is a masked preview rather than a real secret."""
+    return ("\u2026" in text or "****" in text or text.startswith("\u00abredacted") or text.strip() == "***"
+            or re.fullmatch(r".{4}\.\.\..{4}", text.strip()) is not None)
+
+
+def phones(value):
+    return ",".join(dict.fromkeys(value.split(",")))
+
+
+async def settings(desktop, profile, match, value, request):
+    values, clear = value.get("values", {}), value.get("clear", [])
+    if any(hides_secret(text) for text in values.values()):
+        return 400, {"error": "channel_setting_redacted"}
+    if any(not text.isascii() for text in values.values()):  # Hermes drops these silently
+        return 400, {"error": "channel_setting_invalid"}
+    row = next((c for c in await listing(request) if c["id"] == match[1]), None)
+    if row is None:
+        return 404, {"error": "channel_not_found"}
+    if not (set(values) | set(clear)) <= {f["key"] for f in row["fields"]}:
+        return 400, {"error": "channel_unknown_setting"}
+    audit(desktop, "settings", set=sorted(values), cleared=sorted(clear))
+    try:
+        saved = await request("PUT", f"{PLATFORMS}/{match[1]}", {"env": values, "clear_env": clear, "profile": profile},
+                              soft=(400, 404))
+    except Refused as refused:
+        return refusal(refused, {400: "channel_setting_invalid", 404: "channel_not_found"})
+    row = next((c for c in await listing(request) if c["id"] == match[1]), None)
+    if row is None:
+        return 404, {"error": "channel_not_found"}
+    return 200, {**row, "needs_restart": restart_needed(saved, row)}
+
+
+def restart_needed(saved, row):
+    """The Hermes channels page rule: a restart is needed unless Hermes served the change to the running gateway."""
+    hot = isinstance(saved, dict) and saved.get("hot_served") is True
+    return not hot or row["state"] == "pending_restart"
+
+
+async def whatsapp_handle(desktop, profile, name, match, value, request):
+    codes = {404: "channel_setup_not_found", 409: "channel_setup_not_ready", 410: "channel_setup_expired"}
+    if name == "chan_wa_setup":
+        body = {"mode": value["mode"], "profile": profile}
+        if value.get("allowed_users"):
+            body["allowed_users"] = phones(value["allowed_users"])
+        return 200, whatsapp(await request("POST", WHATSAPP + "/start", body))
+    if name == "chan_wa_status":
+        try:
+            raw = await request("GET", f"{WHATSAPP}/{match[1]}", soft=(404, 410))
+        except Refused as refused:
+            return refusal(refused, codes)
+        return 200, whatsapp(raw, match[1])
+    if name == "chan_wa_apply":
+        if reply := await busy(desktop, value["force"]):
+            return reply
+        audit(desktop, "whatsapp_apply", value["force"])
+        body = {"profile": profile}
+        if "mode" in value:
+            body["mode"] = value["mode"]
+        if value.get("allowed_users"):
+            body["allowed_users"] = phones(value["allowed_users"])
+        try:
+            raw = await request("POST", f"{WHATSAPP}/{match[1]}/apply", body, soft=(404, 409, 410))
+        except Refused as refused:
+            if refused.status == 409:  # Hermes answers "not connected" for an expired setup; the status route says 410
+                try:
+                    await request("GET", f"{WHATSAPP}/{match[1]}", soft=(404, 409, 410))
+                except Refused as expired:
+                    if expired.status == 410:
+                        return refusal(expired, codes)
+                except Exception:  # any other failure of the status check keeps the original refusal
+                    pass
+            return refusal(refused, codes)
+        if (not isinstance(raw, dict) or raw.get("ok") is not True
+                or type(raw.get("restart_started")) is not bool or type(raw.get("needs_restart")) is not bool):
+            raise ValueError
+        return 200, {"ok": True, "restart_started": raw["restart_started"], "needs_restart": raw["needs_restart"]}
+    receipt = await request("DELETE", f"{WHATSAPP}/{match[1]}")  # chan_wa_cancel
+    if not isinstance(receipt, dict) or receipt.get("ok") is not True:
+        raise ValueError
+    return 200, {"ok": True}
 
 
 async def busy(desktop, force):
@@ -110,18 +266,22 @@ async def busy(desktop, force):
 
 async def handle(desktop, profile, name, match, value, request):
     """Returns (status, body)."""
+    if name == "chan_settings":
+        return await settings(desktop, profile, match, value, request)
+    if name.startswith("chan_wa_"):
+        return await whatsapp_handle(desktop, profile, name, match, value, request)
     if name == "chan_list":
         return 200, {"channels": await listing(request)}
     if name == "chan_enabled":
         try:
-            await request("PUT", f"{PLATFORMS}/{match[1]}", {"enabled": value["enabled"], "profile": profile},
-                          soft=(404, 409))
+            saved = await request("PUT", f"{PLATFORMS}/{match[1]}", {"enabled": value["enabled"], "profile": profile},
+                                  soft=(404, 409))
         except Refused as refused:
             return refusal(refused, {404: "channel_not_found", 409: "channel_conflict"})
         row = next((c for c in await listing(request) if c["id"] == match[1]), None)
         if row is None:
             return 404, {"error": "channel_not_found"}
-        return 200, {**row, "needs_restart": row["state"] == "pending_restart"}
+        return 200, {**row, "needs_restart": restart_needed(saved, row)}
     if name == "chan_test":
         try:
             raw = await request("POST", f"{PLATFORMS}/{match[1]}/test", soft=(404,))

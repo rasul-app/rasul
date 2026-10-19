@@ -30,7 +30,7 @@ from rasul_bridge.http import HTTPError, Reader, headers
 from rasul_bridge.limits import Limits, MAX_BODY, MAX_CONNECTIONS, MAX_DEVICE_CONNECTIONS
 from rasul_bridge.pairing import Pairing
 from rasul_bridge.profiles import Profiles
-from rasul_bridge.proxy import HOP_HEADERS, allowed, end_to_end, response_body
+from rasul_bridge.proxy import HOP_HEADERS, MEDIA_NOTE, allowed, end_to_end, response_body, with_media_note
 from rasul_bridge.registry import Registry
 import rasul_bridge.server as server_module
 from rasul_bridge.server import (ANONYMOUS_MAX_BODY, ANONYMOUS_TIMEOUT,
@@ -2500,3 +2500,104 @@ def test_rejected_link_is_audited_once_a_minute_per_device_and_kind(tmp_path):
     now[0] = 60
     audit.rejected_link("device_limit", "my-pc")
     assert len(rows()) == 4
+
+
+async def _run_post(bridge, tmp_path, body, target="/v1/profiles/default/hermes/v1/runs", extra=""):
+    identity, _ = registered(bridge)
+    async with client(bridge, tmp_path, identity) as (link, reader, _):
+        await send(link, "POST", target, body, extra=extra)
+        return (await read_response(reader))[0]
+
+
+@asynchronous
+async def test_run_start_gets_media_note_first(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        assert await _run_post(bridge, tmp_path, {"input": "hi", "model": "m"}) == 200
+        method, target, head, body = upstream.requests[-1]
+        sent = json.loads(body)
+        assert (method, target) == ("POST", "/v1/runs")
+        assert list(sent) == ["input", "model", "instructions"]
+        assert sent["instructions"] == MEDIA_NOTE and "MEDIA:/absolute/path" in MEDIA_NOTE
+        assert len(MEDIA_NOTE) < 600 and head["content-type"] == "application/json"
+        assert await _run_post(bridge, tmp_path, {"instructions": "Be brief.", "input": "hi"}) == 200
+        sent = json.loads(upstream.requests[-1][3])
+        assert sent["instructions"] == MEDIA_NOTE + "\n\nBe brief."
+        assert list(sent) == ["instructions", "input"]
+
+
+@asynchronous
+async def test_run_start_with_idempotency_key_keeps_it(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        assert await _run_post(bridge, tmp_path, {"input": "hi"}, extra="Idempotency-Key: abc-123\r\n") == 200
+        assert upstream.requests[-1][2]["idempotency-key"] == "abc-123"
+        assert "instructions" in json.loads(upstream.requests[-1][3])
+
+
+@asynchronous
+@pytest.mark.parametrize("body", [{"instructions": 5, "input": "hi"}, {"instructions": None},
+                                  {"instructions": ["a"]}, b"{not json", [1, 2], b""])
+async def test_run_start_left_alone_when_not_a_plain_object(tmp_path, body):
+    async with running(tmp_path) as (bridge, upstream):
+        sent = body if isinstance(body, bytes) else json.dumps(body).encode()
+        assert await _run_post(bridge, tmp_path, sent if sent else b"") == 200
+        assert upstream.requests[-1][3] == sent
+
+
+@asynchronous
+async def test_media_note_only_on_run_start(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        for target in ("/v1/profiles/default/hermes/v1/runs/run-1/steer",
+                       "/v1/profiles/default/hermes/v1/runs/run-1/stop",
+                       "/v1/profiles/default/hermes/api/jobs"):
+            sent = json.dumps({"input": "hi"}).encode()
+            assert await _run_post(bridge, tmp_path, sent, target=target) == 200
+            assert upstream.requests[-1][3] == sent
+
+
+@asynchronous
+async def test_media_note_switch_off_forwards_identical_bytes(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        bridge.config.media_note = False
+        sent = b'{ "input":"hi",   "x": 1 }'
+        assert await _run_post(bridge, tmp_path, sent) == 200
+        assert upstream.requests[-1][3] == sent
+
+
+@asynchronous
+async def test_media_note_body_limit(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        sent = json.dumps({"input": "x" * (MAX_BODY - 40)}).encode()
+        assert MAX_BODY - len(MEDIA_NOTE) < len(sent) <= MAX_BODY
+        assert await _run_post(bridge, tmp_path, sent) == 200
+        assert upstream.requests[-1][3] == sent
+        count = len(upstream.requests)
+        too_big = b'{"input":"' + b"x" * MAX_BODY + b'"}'
+        identity, _ = registered(bridge)
+        with suppress(Exception):
+            async with client(bridge, tmp_path, identity) as (link, reader, _):
+                await send(link, "POST", "/v1/profiles/default/hermes/v1/runs", too_big)
+                assert (await read_response(reader))[0] != 200
+        assert len(upstream.requests) == count
+
+
+def test_media_note_skips_undecodable_bytes():
+    assert with_media_note(b"\xff\xfe") is None
+
+
+@asynchronous
+async def test_media_note_lone_surrogate_forwards_identical_bytes(tmp_path):
+    sent = rb'{"input":"\ud83d"}'
+    assert with_media_note(sent) is None
+    async with running(tmp_path) as (bridge, upstream):
+        assert await _run_post(bridge, tmp_path, sent) == 200
+        assert upstream.requests[-1][3] == sent
+
+
+def test_media_note_config_must_be_boolean(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('media_note = "no"\n')
+    with pytest.raises(ValueError):
+        Config.load(path)
+    path.write_text("media_note = false\n")
+    assert Config.load(path).media_note is False
+    assert Config().media_note is True

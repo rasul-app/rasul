@@ -441,6 +441,11 @@
     <string name="ux3c_chat_actions">Chat actions</string>
     <string name="ux3c_chat_rename">Rename</string>
     <string name="ux3c_chat_delete">Delete</string>
+    <string name="chat_pin">Pin</string>
+    <string name="chat_unpin">Unpin</string>
+    <string name="chat_pinned">Pinned</string>
+    <string name="chat_draft_label">Draft:</string>
+    <string name="chat_pin_limit">You can pin up to %1$d chats for each bot. Unpin one first.</string>
     <string name="ux3c_chat_title">Title</string>
     <string name="ux3c_chat_title_required">Enter a title.</string>
     <string name="ux3c_chat_rename_title">Rename chat</string>
@@ -613,6 +618,11 @@
     <string name="approval_watch_stop">Stop</string>
     <string name="approval_alert_title">%1$s · %2$s</string>
     <string name="approval_alert_waiting">Approval waiting</string>
+    <string name="approval_action_once">Approve once</string>
+    <string name="approval_action_deny">Deny</string>
+    <string name="approval_sending">Sending…</string>
+    <string name="approval_notice_answered">Already answered</string>
+    <string name="approval_notice_expired">This request expired</string>
     <string name="approval_paused">Approval alerts paused. Open Rasul to resume.</string>
     <string name="update_title">App updates</string>
     <string name="update_check_setting">Check for app updates</string>
@@ -776,6 +786,9 @@
     <string name="file_not_available_named">File not available: %1$s</string>
     <string name="file_saved">Saved</string>
     <string name="file_save_failed">The file couldn\'t be saved.</string>
+    <string name="file_save_err_write">Saving stopped before the end. Check the free space and try another place.</string>
+    <string name="file_more_named">More actions for %1$s</string>
+    <string name="file_picture_loading">Loading %1$s</string>
     <string name="file_no_viewer">No app on this phone can open this file. Try Save or Share.</string>
     <string name="file_gone">The downloaded copy was removed. Download it again.</string>
     <string name="file_err_not_found">This file is no longer available. If new files fail too, update the bridge on your PC.</string>
@@ -856,4 +869,47 @@
     <string name="chan_err_rate_limited">Too many requests. Wait a minute, then try again.</string>
     <string name="chan_test_for">Test %1$s</string>
     <string name="chan_tg_checking">Checking Telegram…</string>
+
+    <string name="share_title">Send to</string>
+    <string name="share_choose_bot">Choose a bot</string>
+    <string name="share_recent_chats">Recent chats</string>
+    <string name="share_new_chat">New chat</string>
+    <string name="share_new_chat_sub">Start a fresh chat with this bot</string>
+    <string name="share_reading">Reading what you shared…</string>
+    <string name="share_loading_bots">Loading bots…</string>
+    <string name="share_loading_chats">Loading chats…</string>
+    <string name="share_no_chats">No earlier chats with this bot.</string>
+    <string name="share_no_bots_title">No bot to send to</string>
+    <string name="share_no_bots_body">Add a bot in Rasul, then share again.</string>
+    <string name="share_nothing_title">Nothing to share</string>
+    <string name="share_nothing_body">Rasul can only take text, photos and text files that other apps send to it.</string>
+    <string name="share_open_failed">That chat could not be opened. Pick another one.</string>
+    <string name="share_close">Close</string>
+    <string name="share_summary_cd">Sharing to Rasul: %1$s</string>
+    <plurals name="share_photos">
+        <item quantity="one">%1$d photo</item>
+        <item quantity="other">%1$d photos</item>
+    </plurals>
+    <plurals name="share_dropped">
+        <item quantity="one">%1$d item was not added</item>
+        <item quantity="other">%1$d items were not added</item>
+    </plurals>
+    <string name="logs_title">Hermes logs</string>
+    <string name="logs_row_sub">Errors and activity on %1$s</string>
+    <string name="logs_needs_bridge">Hermes logs need Rasul Bridge on the PC.</string>
+    <string name="logs_loading">Loading logs…</string>
+    <string name="logs_empty">No lines yet</string>
+    <string name="logs_err_not_found">This log does not exist on your PC yet. It appears once Hermes writes to it.</string>
+    <string name="logs_file_label">Log file</string>
+    <string name="logs_file_errors">Errors</string>
+    <string name="logs_file_agent">Agent</string>
+    <string name="logs_file_gateway">Gateway</string>
+    <string name="logs_level_label">Level</string>
+    <string name="logs_level_all">All</string>
+    <string name="logs_level_error">Error</string>
+    <string name="logs_level_warning">Warning</string>
+    <string name="logs_level_info">Info</string>
+    <string name="logs_copy">Copy all</string>
+    <string name="logs_copied">Copied</string>
+    <string name="logs_lines_desc">Log lines, newest last</string>
 </resources>

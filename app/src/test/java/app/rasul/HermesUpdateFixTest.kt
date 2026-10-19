@@ -23,7 +23,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/** RASULHUPDAPPF1: fix-round tests (chip, strings, result sentences, poll errors). */
+/** Hermes update: chip, strings, result sentences, poll errors. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HermesUpdateFixTest {
     private val sched = TestCoroutineScheduler()

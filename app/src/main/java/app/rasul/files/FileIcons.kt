@@ -37,6 +37,8 @@ internal object FileIcons {
     private val audio = icon("file-audio", "M9 18V5L21 3V16", "M6 21C7.66 21 9 19.66 9 18C9 16.34 7.66 15 6 15C4.34 15 3 16.34 3 18C3 19.66 4.34 21 6 21Z", "M18 19C19.66 19 21 17.66 21 16C21 14.34 19.66 13 18 13C16.34 13 15 14.34 15 16C15 17.66 16.34 19 18 19Z")
     private val video = icon("file-video", "M23 7L16 12L23 17V7Z", "M14 5H3C1.9 5 1 5.9 1 7V17C1 18.1 1.9 19 3 19H14C15.1 19 16 18.1 16 17V7C16 5.9 15.1 5 14 5Z")
 
+    val more = icon("more", "M12 5H12.01", "M12 12H12.01", "M12 19H12.01")
+
     fun forKind(kind: FileKind): ImageVector = when (kind) {
         FileKind.Pdf -> pdf
         FileKind.Document -> document

@@ -6,8 +6,19 @@ import app.rasul.bridge.ChannelDto
 import app.rasul.bridge.ChannelError
 import app.rasul.bridge.ChannelException
 import app.rasul.bridge.ChannelFailure
+import app.rasul.bridge.ChannelFieldDto
 import app.rasul.bridge.ChannelsApi
+import app.rasul.bridge.NumbersProblem
+import app.rasul.bridge.SettingProblem
 import app.rasul.bridge.TelegramApplyDto
+import app.rasul.bridge.WhatsappApplyDto
+import app.rasul.bridge.WhatsappMode
+import app.rasul.bridge.WhatsappNumbers
+import app.rasul.bridge.WhatsappSetupDto
+import app.rasul.bridge.WhatsappStatus
+import app.rasul.bridge.parseWhatsappNumbers
+import app.rasul.bridge.settingsDiff
+import app.rasul.bridge.whatsappError
 import app.rasul.bridge.channelFailure
 import app.rasul.bridge.telegramOpenLink
 import kotlinx.coroutines.CancellationException
@@ -23,9 +34,12 @@ internal const val BUSY_RETRY_MS = 15_000L
 internal const val SETUP_POLL_MS = 3_000L
 internal const val MAX_USER_IDS = 20
 internal const val MAX_BOT_NAME = 64
+internal const val MAX_NUMBERS_TEXT = 20 * 24
+internal const val MAX_SETTING_INPUT = 4200
+private const val RATE_LIMIT_BACKOFF = 4
 
 /** What a restart asks for when Hermes is busy; "apply" also restarts, so it follows the same rule. */
-enum class BusyAction { Restart, Apply }
+enum class BusyAction { Restart, Apply, WhatsappApply }
 
 sealed interface BusyState {
     data object None : BusyState
@@ -40,6 +54,7 @@ sealed interface BusyState {
 sealed interface ChannelNotice {
     data class Test(val name: String, val ok: Boolean, val message: String?) : ChannelNotice
     data object Restarted : ChannelNotice
+    data class SettingsSaved(val name: String) : ChannelNotice
 }
 
 enum class LinkProblem { Rejected, NoApp }
@@ -70,6 +85,63 @@ sealed interface TelegramSetup {
     data class Failed(val failure: ChannelFailure) : TelegramSetup
 }
 
+sealed interface WhatsappSetup {
+    data class Options(
+        val mode: WhatsappMode = WhatsappMode.Bot,
+        val numbers: String = "",
+        val starting: Boolean = false,
+        val numbersProblem: NumbersProblem? = null,
+        val error: ChannelFailure? = null,
+    ) : WhatsappSetup
+
+    /** Installing, starting or waiting for the scan; [qrPayload] is only set while [status] is `waiting`. */
+    data class Active(
+        val pairingId: String,
+        val status: String,
+        val qrPayload: String?,
+        val expiresAtMs: Long?,
+        /** The last poll failed; polling goes on. */
+        val pollError: ChannelFailure? = null,
+    ) : WhatsappSetup
+
+    data class Connected(val pairingId: String, val accountName: String?, val phoneLast4: String?) : WhatsappSetup
+
+    data class Done(val restartStarted: Boolean, val needsRestart: Boolean) : WhatsappSetup
+
+    /** Error, cancelled or expired: only "Start again" is left. */
+    data class Failed(val failure: ChannelFailure) : WhatsappSetup
+}
+
+/**
+ * The settings form of one channel. [inputs] holds secret text the owner is typing: it lives only in this state, is
+ * never saved with the screen and is dropped when the form closes or a save works.
+ */
+class SettingsForm(
+    val channelId: String,
+    val channelName: String,
+    val fields: List<ChannelFieldDto>,
+    val inputs: Map<String, String> = emptyMap(),
+    val clearing: Set<String> = emptySet(),
+    val saving: Boolean = false,
+    val problems: Map<String, SettingProblem> = emptyMap(),
+    val tooMany: Boolean = false,
+    val error: ChannelFailure? = null,
+) {
+    fun copy(
+        inputs: Map<String, String> = this.inputs,
+        clearing: Set<String> = this.clearing,
+        saving: Boolean = this.saving,
+        problems: Map<String, SettingProblem> = this.problems,
+        tooMany: Boolean = this.tooMany,
+        error: ChannelFailure? = this.error,
+    ) = SettingsForm(channelId, channelName, fields, inputs, clearing, saving, problems, tooMany, error)
+
+    /** Whether a save would send anything. */
+    val changed: Boolean get() = inputs.values.any { it.isNotBlank() } || clearing.isNotEmpty()
+
+    override fun toString() = "SettingsForm($channelId, saving=$saving)"
+}
+
 data class ChannelsState(
     /** No Rasul Bridge on this bot: one explanatory line. */
     val direct: Boolean = false,
@@ -89,6 +161,8 @@ data class ChannelsState(
     val notice: ChannelNotice? = null,
     val actionError: ChannelFailure? = null,
     val setup: TelegramSetup? = null,
+    val whatsapp: WhatsappSetup? = null,
+    val settings: SettingsForm? = null,
 ) {
     /** Any request that changes state is running, so the controls wait. */
     val requestRunning: Boolean get() = switchingId != null || testingId != null || acting
@@ -99,6 +173,10 @@ data class ChannelsState(
 internal fun ChannelDto.canConnectTelegram(): Boolean = id == TELEGRAM_ID && !configured
 
 internal const val TELEGRAM_ID = "telegram"
+internal const val WHATSAPP_ID = "whatsapp"
+
+/** WhatsApp offers its setup flow on its own row, also to link again after a logout. */
+internal fun ChannelDto.canConnectWhatsapp(): Boolean = id == WHATSAPP_ID
 
 /**
  * User IDs the owner typed, as the bridge wants them (1 to 20 numeric strings, repeats dropped), or null when the text
@@ -129,11 +207,13 @@ class ChannelsViewModel(
     private var loadJob: Job? = null
     private var waitJob: Job? = null
     private var pollJob: Job? = null
+    private var waPollJob: Job? = null
     private var generation = 0
     private var visible = false
 
     /** The pairing and ids captured when Apply was tapped; every repeat sends exactly these. */
     private var pendingApply: Pair<String, List<String>>? = null
+    private var pendingWhatsappApply: String? = null
 
     init { refresh() }
 
@@ -254,7 +334,7 @@ class ChannelsViewModel(
             when (action) {
                 BusyAction.Restart -> {
                     source().restart(force)
-                    _state.update { it.copy(acting = false, busy = BusyState.None, restartFlag = false, notice = ChannelNotice.Restarted, setup = restartDone(it.setup)) }
+                    _state.update { it.copy(acting = false, busy = BusyState.None, restartFlag = false, notice = ChannelNotice.Restarted, setup = restartDone(it.setup), whatsapp = restartDoneWhatsapp(it.whatsapp)) }
                 }
                 BusyAction.Apply -> {
                     val (pairing, ids) = pendingApply ?: run {
@@ -264,6 +344,15 @@ class ChannelsViewModel(
                     val result = source().applyTelegramSetup(pairing, ids, force)
                     pendingApply = null
                     applied(result)
+                }
+                BusyAction.WhatsappApply -> {
+                    val pairing = pendingWhatsappApply ?: run {
+                        _state.update { it.copy(acting = false, busy = BusyState.None) }
+                        return Attempt.Failed
+                    }
+                    val result = source().applyWhatsappSetup(pairing, force)
+                    pendingWhatsappApply = null
+                    whatsappApplied(result)
                 }
             }
             reloadQuietly()
@@ -277,7 +366,13 @@ class ChannelsViewModel(
                 }
                 return Attempt.Busy
             }
-            _state.update { it.copy(acting = false, busy = BusyState.None, actionError = failure) }
+            val gone = action == BusyAction.WhatsappApply &&
+                (failure.error == ChannelError.SetupExpired || failure.error == ChannelError.SetupNotFound)
+            if (gone) pendingWhatsappApply = null
+            _state.update {
+                if (gone) it.copy(acting = false, busy = BusyState.None, whatsapp = WhatsappSetup.Failed(failure))
+                else it.copy(acting = false, busy = BusyState.None, actionError = failure)
+            }
             return Attempt.Failed
         }
     }
@@ -285,6 +380,19 @@ class ChannelsViewModel(
     /** A finished setup screen must not offer Restart again once the restart worked. */
     private fun restartDone(setup: TelegramSetup?): TelegramSetup? =
         if (setup is TelegramSetup.Done) setup.copy(restartStarted = true, needsRestart = false) else setup
+
+    private fun restartDoneWhatsapp(setup: WhatsappSetup?): WhatsappSetup? =
+        if (setup is WhatsappSetup.Done) setup.copy(restartStarted = true, needsRestart = false) else setup
+
+    private fun whatsappApplied(result: WhatsappApplyDto) {
+        _state.update {
+            it.copy(
+                acting = false, busy = BusyState.None,
+                restartFlag = it.restartFlag || result.needsRestart,
+                whatsapp = WhatsappSetup.Done(result.restartStarted, result.needsRestart),
+            )
+        }
+    }
 
     private fun applied(result: TelegramApplyDto) {
         _state.update {
@@ -316,6 +424,9 @@ class ChannelsViewModel(
         if (!needWait) { waitJob?.cancel(); waitJob = null }
         if (needPoll && pollJob?.isActive != true) pollJob = viewModelScope.launch { pollLoop() }
         if (!needPoll) { pollJob?.cancel(); pollJob = null }
+        val needWaPoll = visible && s.whatsapp is WhatsappSetup.Active
+        if (needWaPoll && waPollJob?.isActive != true) waPollJob = viewModelScope.launch { whatsappPollLoop() }
+        if (!needWaPoll) { waPollJob?.cancel(); waPollJob = null }
     }
 
     private suspend fun waitLoop() {
@@ -344,7 +455,7 @@ class ChannelsViewModel(
     // ---------- Telegram setup ----------
 
     fun startSetup() {
-        if (service == null || _state.value.setup != null) return
+        if (service == null || _state.value.let { it.setup != null || it.whatsapp != null || it.settings != null }) return
         _state.update { it.copy(setup = TelegramSetup.Name()) }
     }
 
@@ -474,5 +585,218 @@ class ChannelsViewModel(
     fun finishSetup() {
         if (_state.value.setup !is TelegramSetup.Done) return
         _state.update { it.copy(setup = null) }
+    }
+
+    // ---------- WhatsApp setup ----------
+
+    fun startWhatsapp() {
+        if (service == null || _state.value.let { it.setup != null || it.whatsapp != null || it.settings != null }) return
+        _state.update { it.copy(whatsapp = WhatsappSetup.Options()) }
+    }
+
+    fun setWhatsappMode(mode: WhatsappMode) = _state.update { s ->
+        val options = s.whatsapp as? WhatsappSetup.Options
+        if (options == null || options.starting) s else s.copy(whatsapp = options.copy(mode = mode))
+    }
+
+    fun setWhatsappNumbers(text: String) = _state.update { s ->
+        val options = s.whatsapp as? WhatsappSetup.Options
+        if (options == null || options.starting) s else s.copy(whatsapp = options.copy(numbers = text, numbersProblem = null, error = null))
+    }
+
+    fun beginWhatsapp() {
+        val api = service ?: return
+        val options = _state.value.whatsapp as? WhatsappSetup.Options ?: return
+        if (options.starting) return
+        val parsed = if (options.numbers.length > MAX_NUMBERS_TEXT) WhatsappNumbers.Invalid(NumbersProblem.TooLong) else parseWhatsappNumbers(options.numbers)
+        val numbers = when (parsed) {
+            is WhatsappNumbers.Ok -> parsed.numbers
+            is WhatsappNumbers.Invalid -> {
+                _state.update { it.copy(whatsapp = options.copy(numbersProblem = parsed.problem)) }
+                return
+            }
+        }
+        // This exact object marks this start: an answer that comes after Back and a new form belongs to nobody.
+        val starting = options.copy(starting = true, numbersProblem = null, error = null)
+        _state.update { it.copy(whatsapp = starting) }
+        viewModelScope.launch {
+            try {
+                val start = api().startWhatsappSetup(options.mode, numbers)
+                var mine = false
+                _state.update { s ->
+                    mine = s.whatsapp === starting
+                    if (mine) s.copy(whatsapp = whatsappFrom(start, null)) else s
+                }
+                // The PC may answer a repeated start with the same pairing: cancelling it would end the live one.
+                if (mine) syncJobs() else if (!isLivePairing(start.pairingId)) cancelOrphan(api, start.pairingId)
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                _state.update { s ->
+                    if (s.whatsapp === starting) s.copy(whatsapp = options.copy(starting = false, error = channelFailure(e))) else s
+                }
+            }
+        }
+    }
+
+    private fun isLivePairing(pairingId: String): Boolean = when (val setup = _state.value.whatsapp) {
+        is WhatsappSetup.Active -> setup.pairingId == pairingId
+        is WhatsappSetup.Connected -> setup.pairingId == pairingId
+        else -> false
+    }
+
+    /** A pairing the owner already left: the PC drops it too (a failure here changes nothing the owner sees). */
+    private suspend fun cancelOrphan(api: suspend () -> ChannelsApi, pairingId: String) {
+        try { api().cancelWhatsappSetup(pairingId) } catch (e: CancellationException) { throw e } catch (_: Exception) { }
+    }
+
+    /** The screen state for what the bridge reported; [expiresAtMs] from an earlier answer is kept when this one has none. */
+    private fun whatsappFrom(dto: WhatsappSetupDto, expiresAtMs: Long?): WhatsappSetup = when (dto.status) {
+        WhatsappStatus.CONNECTED -> WhatsappSetup.Connected(dto.pairingId, dto.accountName, dto.accountPhoneLast4)
+        WhatsappStatus.ERROR -> WhatsappSetup.Failed(ChannelFailure(whatsappError(dto.error)))
+        WhatsappStatus.CANCELLED -> WhatsappSetup.Failed(ChannelFailure(ChannelError.SetupCancelled))
+        else -> WhatsappSetup.Active(dto.pairingId, dto.status, dto.qrPayload, parseInstantMs(dto.expiresAt) ?: expiresAtMs)
+    }
+
+    private suspend fun whatsappPollLoop() {
+        var wait = pollMs
+        while (_state.value.whatsapp is WhatsappSetup.Active) {
+            delay(wait)
+            // A rate-limit answer slows the poll down; any other answer goes back to the normal pace.
+            wait = if (whatsappPollOnce()) pollMs * RATE_LIMIT_BACKOFF else pollMs
+        }
+    }
+
+    /** One status read; true when the bridge said it is rate limiting. */
+    private suspend fun whatsappPollOnce(): Boolean {
+        val active = _state.value.whatsapp as? WhatsappSetup.Active ?: return false
+        val api = service ?: return false
+        if (active.expiresAtMs != null && now() >= active.expiresAtMs) {
+            failWhatsapp(active.pairingId, ChannelFailure(ChannelError.SetupExpired))
+            return false
+        }
+        try {
+            val status = api().whatsappSetupStatus(active.pairingId)
+            _state.update { s ->
+                val current = s.whatsapp as? WhatsappSetup.Active
+                if (current == null || current.pairingId != active.pairingId) s else s.copy(whatsapp = whatsappFrom(status, current.expiresAtMs))
+            }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            val failure = channelFailure(e)
+            if (failure.error == ChannelError.SetupExpired || failure.error == ChannelError.SetupNotFound) {
+                failWhatsapp(active.pairingId, failure)
+            } else {
+                _state.update { s ->
+                    val current = s.whatsapp as? WhatsappSetup.Active
+                    if (current == null || current.pairingId != active.pairingId) s else s.copy(whatsapp = current.copy(pollError = failure))
+                }
+            }
+            return failure.error == ChannelError.RateLimited
+        }
+        return false
+    }
+
+    private fun failWhatsapp(pairingId: String, failure: ChannelFailure) = _state.update { s ->
+        val current = s.whatsapp as? WhatsappSetup.Active
+        if (current == null || current.pairingId != pairingId) s else s.copy(whatsapp = WhatsappSetup.Failed(failure))
+    }
+
+    fun applyWhatsapp() {
+        val current = _state.value
+        val connected = current.whatsapp as? WhatsappSetup.Connected ?: return
+        if (service == null || current.requestRunning || current.busy != BusyState.None) return
+        pendingWhatsappApply = connected.pairingId
+        launchAction(BusyAction.WhatsappApply, force = false)
+    }
+
+    /** Back or Cancel inside the setup: the pairing is dropped on the PC as well. */
+    fun cancelWhatsapp() {
+        val api = service
+        val s = _state.value
+        if (s.acting) return
+        val pairing = when (val setup = s.whatsapp) {
+            is WhatsappSetup.Active -> setup.pairingId
+            is WhatsappSetup.Connected -> setup.pairingId
+            else -> null
+        }
+        pendingWhatsappApply = null
+        if (s.busy != BusyState.None) { waitJob?.cancel(); waitJob = null }
+        _state.update { it.copy(whatsapp = null, busy = BusyState.None) }
+        syncJobs()
+        if (pairing != null && api != null) {
+            viewModelScope.launch {
+                try { api().cancelWhatsappSetup(pairing) } catch (e: CancellationException) { throw e } catch (_: Exception) { }
+            }
+        }
+    }
+
+    /** "Start again" after an error or an expired code. */
+    fun restartWhatsapp() = _state.update { s -> if (s.whatsapp is WhatsappSetup.Failed) s.copy(whatsapp = WhatsappSetup.Options()) else s }
+
+    fun finishWhatsapp() {
+        if (_state.value.whatsapp !is WhatsappSetup.Done) return
+        _state.update { it.copy(whatsapp = null) }
+    }
+
+    // ---------- channel settings ----------
+
+    fun openSettings(id: String) {
+        val s = _state.value
+        if (service == null || s.requestRunning || s.busy != BusyState.None || s.setup != null || s.whatsapp != null || s.settings != null) return
+        val channel = s.channels?.firstOrNull { it.id == id }?.takeIf { it.fields.isNotEmpty() } ?: return
+        _state.update { it.copy(settings = SettingsForm(channel.id, channel.name, channel.fields)) }
+    }
+
+    fun setSettingInput(key: String, text: String) = _state.update { s ->
+        val form = s.settings
+        if (form == null || form.saving || form.fields.none { it.key == key }) s
+        else s.copy(settings = form.copy(inputs = form.inputs + (key to text.take(MAX_SETTING_INPUT)), problems = form.problems - key, tooMany = false, error = null))
+    }
+
+    /** "Clear" on a field that is set; pressed again it takes the clear back. */
+    fun toggleSettingClear(key: String) = _state.update { s ->
+        val form = s.settings
+        if (form == null || form.saving || form.fields.none { it.key == key && it.isSet }) s
+        else s.copy(
+            settings = form.copy(
+                clearing = if (key in form.clearing) form.clearing - key else form.clearing + key,
+                inputs = form.inputs - key, problems = form.problems - key, tooMany = false, error = null,
+            ),
+        )
+    }
+
+    fun saveSettings() {
+        val api = service ?: return
+        val form = _state.value.settings ?: return
+        if (form.saving) return
+        val diff = settingsDiff(form.fields, form.inputs, form.clearing)
+        if (diff.isEmpty && diff.problems.isEmpty()) return
+        if (!diff.sendable) {
+            _state.update { it.copy(settings = form.copy(problems = diff.problems, tooMany = diff.tooMany)) }
+            return
+        }
+        _state.update { it.copy(settings = form.copy(saving = true, problems = emptyMap(), tooMany = false, error = null)) }
+        viewModelScope.launch {
+            try {
+                val row = api().saveSettings(form.channelId, diff.values, diff.clear)
+                _state.update { s ->
+                    s.copy(
+                        settings = null,
+                        channels = s.channels?.map { if (it.id == form.channelId) row.copy(needsRestart = false) else it },
+                        restartFlag = s.restartFlag || row.needsRestart,
+                        notice = ChannelNotice.SettingsSaved(form.channelName),
+                    )
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                _state.update { s -> s.settings?.let { cur -> s.copy(settings = cur.copy(saving = false, error = channelFailure(e))) } ?: s }
+            }
+        }
+    }
+
+    /** Back from the form: whatever was typed is dropped. */
+    fun closeSettings() {
+        if (_state.value.settings?.saving == true) return
+        _state.update { it.copy(settings = null) }
     }
 }

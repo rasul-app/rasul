@@ -3,34 +3,48 @@ package app.rasul.files
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.provider.DocumentsContract
 import android.text.format.Formatter
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -70,6 +84,36 @@ val LocalFileDownloads = staticCompositionLocalOf<FileDownloads?> { null }
 /** Largest image decoded for a thumbnail. Bigger ones keep the plain card. */
 internal const val THUMB_MAX_BYTES = 8L * 1024 * 1024
 private const val THUMB_EDGE = 640
+private const val PICTURE_EDGE = 1280
+private val PICTURE_MAX_HEIGHT = 360.dp
+private val PICTURE_MIN_EDGE = 48.dp
+
+/** A picture the card fetches by itself: an image link whose size is known and within [THUMB_MAX_BYTES]. */
+internal fun autoDownloadsPicture(link: FileLink): Boolean {
+    val size = FileLinks.sizeBytes(link.sizeText) ?: return false
+    return FileLinks.isInlineImage(link.name) && size <= THUMB_MAX_BYTES
+}
+
+/** Result of decoding a received picture; [bitmap] is null when the platform cannot decode it. */
+internal class Decoded(val bitmap: ImageBitmap?)
+
+/**
+ * The decoded picture or thumbnail of a finished download. It is null while a new file is being decoded (the key
+ * changed), so the card shows the loading placeholder first and never flashes the plain Done card.
+ */
+@Composable
+internal fun rememberDecoded(
+    done: FileState.Done?,
+    picture: Boolean,
+    decode: suspend (File, Int) -> ImageBitmap? = { file, edge -> decodeSampled(file.readBytes(), edge)?.asImageBitmap() },
+): State<Decoded?> = produceState<Decoded?>(null, done?.file) {
+    value = null
+    if (done == null) return@produceState
+    val edge = if (picture) PICTURE_EDGE else THUMB_EDGE
+    value = if ((picture || FileLinks.hasThumbnail(done.name)) && done.size <= THUMB_MAX_BYTES) {
+        withContext(Dispatchers.Default) { Decoded(runCatching { decode(done.file, edge) }.getOrNull()) }
+    } else Decoded(null)
+}
 
 /**
  * Assistant message text. With a bridge chat and a `rasul-file://` link in the text it becomes text plus file cards;
@@ -105,24 +149,28 @@ private fun FileCardHost(bridgeId: String, downloads: FileDownloads, link: FileL
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val states by downloads.states.collectAsState()
-    LaunchedEffect(link.token) { withContext(Dispatchers.IO) { downloads.probe(link.token) } }
+    LaunchedEffect(link.token) {
+        withContext(Dispatchers.IO) { downloads.probe(link.token) }
+        downloads.startAuto(bridgeId, link)
+    }
     val state = states[link.token] ?: FileState.Idle
     val done = state as? FileState.Done
     val saveMime = done?.mime ?: "application/octet-stream"
     val saveName = done?.name ?: link.name
     val saver = rememberLauncherForActivityResult(remember(saveMime) { ActivityResultContracts.CreateDocument(saveMime) }) { uri ->
         if (uri != null && done != null) scope.launch {
-            val ok = withContext(Dispatchers.IO) { copyTo(context, done.file, uri) }
-            Toast.makeText(context, if (ok) R.string.file_saved else R.string.file_save_failed, Toast.LENGTH_SHORT).show()
+            val result = withContext(Dispatchers.IO) {
+                saveCopy(
+                    done.file,
+                    discard = { DocumentsContract.deleteDocument(context.contentResolver, uri) },
+                ) { context.contentResolver.openOutputStream(uri) }
+            }
+            Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
         }
     }
-    val thumbnail by produceState<ImageBitmap?>(null, done?.file) {
-        value = if (done != null && FileLinks.hasThumbnail(done.name) && done.size <= THUMB_MAX_BYTES) {
-            withContext(Dispatchers.Default) {
-                runCatching { decodeSampled(done.file.readBytes(), THUMB_EDGE)?.asImageBitmap() }.getOrNull()
-            }
-        } else null
-    }
+    val picture = autoDownloadsPicture(link)
+    val decoded by rememberDecoded(done, picture)
+    val bitmap = decoded?.bitmap
     // The 24 h clean-up can remove a copy while the chat is still open: fall back to the Download button.
     fun withFile(action: (FileState.Done) -> Unit) {
         val current = done ?: return
@@ -131,16 +179,26 @@ private fun FileCardHost(bridgeId: String, downloads: FileDownloads, link: FileL
             Toast.makeText(context, R.string.file_gone, Toast.LENGTH_SHORT).show()
         } else action(current)
     }
-    FileCard(
-        link = link,
-        state = state,
-        thumbnail = thumbnail,
-        onDownload = { downloads.start(bridgeId, link) },
-        onCancel = { downloads.cancel(link.token) },
-        onOpen = { withFile { openFile(context, it) } },
-        onSave = { withFile { saver.launch(FileLinks.sanitiseName(saveName)) } },
-        onShare = { withFile { shareFile(context, it) } },
-    )
+    val onOpen = { withFile { openFile(context, it) } }
+    val onSave = { withFile { saver.launch(FileLinks.sanitiseName(saveName)) } }
+    val onShare = { withFile { shareFile(context, it) } }
+    // A picture that is still being decoded keeps its place; one the platform cannot decode falls back to the card.
+    if (picture && done != null && decoded == null) {
+        PicturePlaceholder(done.name)
+    } else if (picture && done != null && bitmap != null) {
+        PictureCard(done.name, bitmap, onOpen, onSave, onShare)
+    } else {
+        FileCard(
+            link = link,
+            state = state,
+            thumbnail = bitmap,
+            onDownload = { downloads.start(bridgeId, link) },
+            onCancel = { downloads.cancel(link.token) },
+            onOpen = onOpen,
+            onSave = onSave,
+            onShare = onShare,
+        )
+    }
 }
 
 private fun uriFor(context: Context, file: File) =
@@ -169,12 +227,6 @@ private fun shareFile(context: Context, done: FileState.Done) {
     } catch (_: ActivityNotFoundException) {
         Toast.makeText(context, R.string.file_no_viewer, Toast.LENGTH_LONG).show()
     }
-}
-
-private fun copyTo(context: Context, file: File, target: android.net.Uri): Boolean = try {
-    context.contentResolver.openOutputStream(target)?.use { out -> file.inputStream().use { it.copyTo(out) } } != null
-} catch (_: java.io.IOException) {
-    false
 }
 
 @Composable
@@ -299,5 +351,73 @@ private fun CardAction(label: String, description: String, onClick: () -> Unit) 
             label, style = RasulType.buttonSmall, color = accent, maxLines = 1,
             modifier = Modifier.border(1.dp, accent, RasulShapes.filter).padding(horizontal = 14.dp, vertical = 7.dp),
         )
+    }
+}
+
+/** Shown while a finished picture is being decoded, so the bubble does not jump. */
+@Composable
+internal fun PicturePlaceholder(name: String) {
+    val colors = Rasul.colors
+    val label = stringResource(R.string.file_picture_loading, name)
+    Box(
+        Modifier.fillMaxWidth().height(160.dp).clip(RasulShapes.card).background(colors.fill)
+            .border(1.dp, colors.cardBorder, RasulShapes.card).semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator(Modifier.size(28.dp), color = colors.accent, strokeWidth = 2.dp)
+    }
+}
+
+/**
+ * A received picture in the bubble: as wide as the bubble allows, at most [PICTURE_MAX_HEIGHT] high, aspect ratio kept.
+ * Tap opens it; the overflow button and a long press offer Save and Share.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun PictureCard(name: String, bitmap: ImageBitmap, onOpen: () -> Unit, onSave: () -> Unit, onShare: () -> Unit) {
+    val colors = Rasul.colors
+    var menu by remember { mutableStateOf(false) }
+    val moreLabel = stringResource(R.string.file_more_named, name)
+    val ratio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val fitWidth = minOf(maxWidth, PICTURE_MAX_HEIGHT * ratio)
+        // A very thin picture keeps a box that can be tapped; it is cropped to that box instead of shrunk to a line.
+        val width = fitWidth.coerceAtLeast(PICTURE_MIN_EDGE)
+        val height = (width / ratio).coerceIn(PICTURE_MIN_EDGE, PICTURE_MAX_HEIGHT)
+        val cropped = width != fitWidth || height != width / ratio
+        Box(Modifier.size(width, height).clip(RasulShapes.card)) {
+            Image(
+                bitmap,
+                contentDescription = stringResource(R.string.file_thumb_desc, name),
+                modifier = Modifier.fillMaxSize().combinedClickable(
+                    onClickLabel = stringResource(R.string.file_open_named, name),
+                    onClick = onOpen,
+                    onLongClickLabel = moreLabel,
+                    onLongClick = { menu = true },
+                ),
+                contentScale = if (cropped) ContentScale.Crop else ContentScale.Fit,
+            )
+            Box(Modifier.align(Alignment.TopEnd).padding(4.dp)) {
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable(role = Role.Button) { menu = true }
+                        .semantics { contentDescription = moreLabel },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(Modifier.size(32.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)), contentAlignment = Alignment.Center) {
+                        Icon(FileIcons.more, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.file_save), style = RasulType.rowTitle, color = colors.ink) },
+                        onClick = { menu = false; onSave() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.file_share), style = RasulType.rowTitle, color = colors.ink) },
+                        onClick = { menu = false; onShare() },
+                    )
+                }
+            }
+        }
     }
 }

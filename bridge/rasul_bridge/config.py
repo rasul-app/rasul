@@ -37,6 +37,7 @@ class Config:
     name: str = "my-pc"
     lan: bool = False
     tailscale: bool = False
+    media_note: bool = True
 
     @classmethod
     def load(cls, path):
@@ -54,6 +55,8 @@ class Config:
             raise ValueError("Invalid approvals listening port")
         if type(config.lan) is not bool or type(config.tailscale) is not bool:
             raise ValueError("lan and tailscale must be true or false")
+        if type(config.media_note) is not bool:
+            raise ValueError("media_note must be true or false")
         if not config.public_urls:
             raise ValueError("Set at least one public URL")
         for url in config.public_urls:

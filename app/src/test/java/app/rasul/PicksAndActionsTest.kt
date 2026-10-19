@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -49,6 +50,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -61,9 +63,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Final round of R1 (items 1-8): one holder snapshot, ordered picks, source-bound actions. */
+/** One holder snapshot, ordered picks, source-bound actions, and pinned chats. */
 @OptIn(ExperimentalCoroutinesApi::class)
-class FinalRoundTest {
+class PicksAndActionsTest {
     @get:Rule val tmp = TemporaryFolder()
     private lateinit var a: MockWebServer
     private lateinit var b: MockWebServer
@@ -406,6 +408,91 @@ class FinalRoundTest {
         assertNull(runBlocking { store.runAnchor(bridgeId, "profile-one", currentSession) })
     }
 
+    @Test fun pinningShowsInTheViewModelAndDeletingTheChatClearsItsDraftAndPin() {
+        val store = ConnectionStore(ds, cipher)
+        val drafts = app.rasul.data.DraftStore(ds, cipher)
+        val pins = app.rasul.data.PinStore(MemoryPrefs())
+        val id = runBlocking { store.save(Connection("", "A", url(a)), "kA") }
+        val holder = ActivePcHolder(store, scope())
+        val sessions = SessionsViewModel(store, holder, MutableSessionsApi("chat-one"), drafts = drafts, pins = pins)
+        waitFor { sessionsReady(sessions, "A") }
+        val ready = sessions.state.value as Load.Ready
+        val chat = ready.value.single()
+        runBlocking { drafts.save(id, null, chat.id, "unsent words\nsecond line") }
+        waitFor { sessions.draftLines.value == mapOf("chat-one" to "unsent words") }
+
+        sessions.togglePin(ready.source, chat)
+        waitFor { sessions.pinned.value == listOf("chat-one") }
+        sessions.togglePin(ready.source, chat)
+        waitFor { sessions.pinned.value.isEmpty() }
+        sessions.togglePin(ready.source, chat)
+        waitFor { sessions.pinned.value == listOf("chat-one") }
+
+        sessions.delete(ready.source, chat)
+        waitFor { (sessions.state.value as? Load.Ready)?.value?.isEmpty() == true && sessions.busy.value == null }
+        waitFor { sessions.pinned.value.isEmpty() && sessions.draftLines.value.isEmpty() }
+        assertNull(runBlocking { drafts.load(id, null, chat.id) })
+    }
+
+    @Test fun pinningPastTheLimitIsRefusedWithANoticeWhenTheTwentyPinnedChatsAreShown() {
+        val store = ConnectionStore(ds, cipher)
+        val pins = app.rasul.data.PinStore(MemoryPrefs())
+        val id = runBlocking { store.save(Connection("", "A", url(a)), "kA") }
+        // A full list (the newest 50), 20 of whose chats are pinned.
+        val api = MutableSessionsApi("chat-one", more = app.rasul.sessions.SESSIONS_LIST_LIMIT - 1)
+        runBlocking { repeat(app.rasul.data.PinStore.MAX_PER_BOT) { pins.pin(id, null, "row-$it") } }
+        val holder = ActivePcHolder(store, scope())
+        val sessions = SessionsViewModel(store, holder, api, pins = pins)
+        waitFor { sessionsReady(sessions, "A") }
+        val ready = sessions.state.value as Load.Ready
+        sessions.togglePin(ready.source, ready.value.first { it.id == "chat-one" })
+        waitFor { sessions.pinLimit.value }
+        assertTrue("chat-one" !in sessions.pinned.value)
+        assertEquals(app.rasul.data.PinStore.MAX_PER_BOT, sessions.pinned.value.size)
+        sessions.clearPinLimit()
+        assertFalse(sessions.pinLimit.value)
+    }
+
+    @Test fun pinsOfChatsMissingFromACompleteListAreDroppedSoANewPinIsAllowed() {
+        val store = ConnectionStore(ds, cipher)
+        val pins = app.rasul.data.PinStore(MemoryPrefs())
+        val id = runBlocking { store.save(Connection("", "A", url(a)), "kA") }
+        runBlocking { repeat(app.rasul.data.PinStore.MAX_PER_BOT) { pins.pin(id, null, "old-$it") } }
+        val holder = ActivePcHolder(store, scope())
+        val sessions = SessionsViewModel(store, holder, MutableSessionsApi("chat-one"), pins = pins)
+        waitFor { sessionsReady(sessions, "A") }
+        // The list holds 1 chat, fewer than the limit: it is complete, so the 20 stale pins are gone from the store.
+        // (The view model's own pin list starts empty, so only the store proves the prune ran.)
+        waitFor { runBlocking { pins.pinned(id, null).first() }.isEmpty() }
+        waitFor { sessionsReady(sessions, "A") }
+        val ready = sessions.state.value as Load.Ready
+        sessions.togglePin(ready.source, ready.value.single())
+        waitFor { sessions.pinned.value == listOf("chat-one") }
+        assertFalse(sessions.pinLimit.value)
+    }
+
+    @Test fun twentyPinsOutsideAnIncompleteListStayAndStillAllowANewPin() {
+        val store = ConnectionStore(ds, cipher)
+        val pins = app.rasul.data.PinStore(MemoryPrefs())
+        val id = runBlocking { store.save(Connection("", "A", url(a)), "kA") }
+        runBlocking { repeat(app.rasul.data.PinStore.MAX_PER_BOT) { pins.pin(id, null, "old-$it") } }
+        // 50 rows = the limit: the list may be cut, so older pinned chats are not assumed gone.
+        val api = MutableSessionsApi("chat-one", more = app.rasul.sessions.SESSIONS_LIST_LIMIT - 1)
+        val holder = ActivePcHolder(store, scope())
+        val sessions = SessionsViewModel(store, holder, api, pins = pins)
+        waitFor { sessionsReady(sessions, "A") }
+        waitFor { sessions.pinned.value.size == app.rasul.data.PinStore.MAX_PER_BOT }
+        val ready = sessions.state.value as Load.Ready
+        // Old pins are neither fetched nor shown: the list is exactly what the server returned.
+        assertEquals(app.rasul.sessions.SESSIONS_LIST_LIMIT, ready.value.size)
+        assertTrue(ready.value.none { it.id.startsWith("old-") })
+        sessions.togglePin(ready.source, ready.value.first { it.id == "chat-one" })
+        waitFor { sessions.pinned.value.lastOrNull() == "chat-one" }
+        assertFalse(sessions.pinLimit.value)
+        assertEquals(app.rasul.data.PinStore.MAX_PER_BOT + 1, sessions.pinned.value.size)
+        assertEquals("old-0", sessions.pinned.value.first())
+    }
+
     @Test fun deletingAnotherSessionLeavesTheCurrentSessionPointerUntouched() {
         val store = ConnectionStore(ds, cipher)
         val directId = runBlocking { store.save(Connection("", "A", url(a)), "kA") }
@@ -506,8 +593,17 @@ class FinalRoundTest {
         override suspend fun runNow(target: HermesTarget, id: String): HermesResult<JobDto> = HermesResult.Err(HermesError.NotFound)
     }
 
-    private class MutableSessionsApi(initialSessionId: String = "session-one") : SessionsManagementApi {
-        private val rows = mutableListOf(SessionDto(initialSessionId, "Current title"))
+    /** In-memory preferences: a file-backed store fails a write on Windows while a collector holds the file. */
+    private class MemoryPrefs : DataStore<Preferences> {
+        private val state = kotlinx.coroutines.flow.MutableStateFlow(androidx.datastore.preferences.core.emptyPreferences())
+        private val lock = kotlinx.coroutines.sync.Mutex()
+        override val data: Flow<Preferences> = state
+        override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences =
+            lock.withLock { transform(state.value).also { state.value = it } }
+    }
+
+    private class MutableSessionsApi(initialSessionId: String = "session-one", more: Int = 0) : SessionsManagementApi {
+        private val rows = (listOf(SessionDto(initialSessionId, "Current title")) + (0 until more).map { SessionDto("row-$it", "Row $it") }).toMutableList()
 
         override suspend fun list(target: HermesTarget, limit: Int): HermesResult<List<SessionDto>> =
             HermesResult.Ok(rows.toList())

@@ -708,7 +708,7 @@ class ChatViewModelTest {
         assertEquals(StatusLabel.Stopping, v.state.value.run?.label)
     }
 
-    // ---- final round ----
+    // ---- more run and refresh cases ----
 
     @Test fun overlappingRefreshIsSingleFlight() {
         val v = vm().startWithRun()
@@ -2130,6 +2130,114 @@ class ChatViewModelTest {
         val part = lastContentPart()
         assertEquals("image_url", (part["type"] as JsonPrimitive).content)
         assertEquals(app.rasul.data.RunInputLimits.photoBudget(1), fakeAttach.photoBudgets.single())
+    }
+
+    @Test fun sharedTextIsAppendedToTheExistingDraftAndNeverSent() {
+        val v = vm()
+        v.onDraft("mine")
+        v.acceptShare("shared link", emptyList(), null, 0)
+        idle()
+        assertEquals("mine\nshared link", v.state.value.draft)
+        assertEquals(0, fake.startN)
+        assertEquals(0, v.state.value.pendingAttachments)
+    }
+
+    @Test fun sharedTextBecomesTheDraftWhenThereIsNone() {
+        val v = vm()
+        v.acceptShare("Title\nbody", emptyList(), null, 0)
+        idle()
+        assertEquals("Title\nbody", v.state.value.draft)
+    }
+
+    @Test fun sharedItemsStageLikeAPickAndKeepSendOffUntilStaged() {
+        val v = vm()
+        v.acceptShare("", listOf(photo(10), photo(10)), null, 0)
+        assertEquals(1, v.state.value.pendingAttachments)
+        idle()
+        assertEquals(0, v.state.value.pendingAttachments)
+        assertEquals(2, v.state.value.attachments.size)
+        assertEquals(0, fake.startN)
+    }
+
+    @Test fun sharedPhotosOverTheSharedBudgetAreRefitLikeAPick() {
+        val v = vm()
+        val over = app.rasul.data.RunInputLimits.photoBudget(2) + 1
+        v.acceptShare("", listOf(photo(over), photo(10)), null, 0)
+        idle()
+        assertEquals(listOf(app.rasul.data.RunInputLimits.photoBudget(2)), fakeAttach.fitBudgets)
+        assertEquals(2, v.state.value.attachments.size)
+    }
+
+    @Test fun sharedItemsAddToThoseAlreadyStagedAndStopAtTheLimit() {
+        val v = vm()
+        v.addAttachments(listOf(photo(10), photo(10), photo(10)))
+        v.acceptShare("", listOf(photo(10), photo(10)), null, 0)
+        idle()
+        assertEquals(4, v.state.value.attachments.size)
+        assertEquals(ChatFailure.ShareItemsDropped(1), errors(v).last().error)
+    }
+
+    @Test fun sharedItemsWithNoRoomLeftAreAllReportedAndNothingIsRemoved() {
+        val v = vm()
+        v.addAttachments(listOf(photo(10), photo(10), photo(10), photo(10)))
+        val staged = v.state.value.attachments
+        v.acceptShare("", listOf(photo(10), photo(10)), null, 1)
+        idle()
+        assertEquals(staged, v.state.value.attachments)
+        assertEquals(ChatFailure.ShareItemsDropped(3), errors(v).last().error)
+        assertEquals(0, v.state.value.pendingAttachments)
+    }
+
+    @Test fun sharedTextWaitsOutASendBeingPreparedAndLandsInTheDraftAfterIt() {
+        val v = vm()
+        val gate = CompletableDeferred<Unit>()
+        sessions.historyGate = gate
+        v.onDraft("question")
+        v.send()
+        idle()
+        assertTrue(v.state.value.preparingSend)
+        v.acceptShare("shared link", emptyList(), null, 0)
+        idle()
+        assertTrue(v.state.value.preparingSend)
+        assertEquals(1, v.state.value.pendingAttachments)
+        sessions.historyGate = null
+        gate.complete(Unit)
+        idle()
+        assertEquals(1, fake.startN)
+        assertEquals("shared link", v.state.value.draft)
+        assertEquals(0, v.state.value.pendingAttachments)
+    }
+
+    @Test fun itemsLeftOutAreReportedWithTheirCount() {
+        val v = vm()
+        v.acceptShare("t", listOf(photo(10)), null, 3)
+        idle()
+        assertEquals(ChatFailure.ShareItemsDropped(3), errors(v).last().error)
+        assertEquals(1, v.state.value.attachments.size)
+    }
+
+    @Test fun aReadFailureShowsTheSameErrorTheAttachButtonShows() {
+        val v = vm()
+        v.acceptShare("t", emptyList(), ChatFailure.FileTooLarge, 0)
+        idle()
+        assertEquals(ChatFailure.FileTooLarge, errors(v).last().error)
+        assertEquals("t", v.state.value.draft)
+    }
+
+    @Test fun aReadFailureAndLeftOutItemsShareOneNotice() {
+        val v = vm()
+        v.acceptShare("", emptyList(), ChatFailure.FileUnreadable, 2)
+        idle()
+        assertEquals(listOf<ChatFailure?>(ChatFailure.ShareItemsDropped(2, ChatFailure.FileUnreadable)), errors(v).map { it.error })
+    }
+
+    @Test fun leftOutItemsAndARefusedMixShareOneNotice() {
+        val v = vm()
+        v.addAttachments(listOf(photo(10)))
+        v.acceptShare("", listOf(PendingAttachment.TextFile(1, "a.txt", "t")), null, 1)
+        idle()
+        assertEquals(listOf<ChatFailure?>(ChatFailure.ShareItemsDropped(1, ChatFailure.AttachmentKindMixed)), errors(v).map { it.error })
+        assertEquals(1, v.state.value.attachments.size)
     }
 
     private fun planOf(v: ChatViewModel): RunInputPlan =

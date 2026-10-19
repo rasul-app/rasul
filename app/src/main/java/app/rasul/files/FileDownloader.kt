@@ -127,10 +127,11 @@ object FileDownloader {
         source: FileSource,
         root: File,
         onProgress: (done: Long, total: Long?) -> Unit = { _, _ -> },
+        maxBytes: Long = FileLinks.MAX_BYTES,
     ): FileState {
         val dir = dirFor(root, token)
         return try {
-            source.fetch(token) { response -> receive(response, nameHint, dir, onProgress) }
+            source.fetch(token) { response -> receive(response, nameHint, dir, maxBytes, onProgress) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: IOException) {
@@ -138,10 +139,10 @@ object FileDownloader {
         }
     }
 
-    private suspend fun receive(response: FileResponse, nameHint: String, dir: File, onProgress: (Long, Long?) -> Unit): FileState {
+    private suspend fun receive(response: FileResponse, nameHint: String, dir: File, maxBytes: Long, onProgress: (Long, Long?) -> Unit): FileState {
         if (response.status != 200) return FileState.Failed(failureFor(response.status, response.errorBody))
         val total = response.contentLength?.takeIf { it >= 0 }
-        if (total != null && total > FileLinks.MAX_BYTES) return FileState.Failed(FileFailure.TooLarge)
+        if (total != null && total > maxBytes) return FileState.Failed(FileFailure.TooLarge)
         val name = FileLinks.sanitiseName(dispositionName(response.disposition)?.takeIf { it.isNotBlank() } ?: nameHint)
         // Per-attempt folder: a cancelled job cleans up only its own, never a newer job's files in [dir].
         if (!dir.mkdirs() && !dir.isDirectory) return FileState.Failed(FileFailure.Storage)
@@ -162,7 +163,7 @@ object FileDownloader {
                         val n = response.body.read(buffer)
                         if (n < 0) break
                         count += n
-                        if (count > FileLinks.MAX_BYTES) return FileState.Failed(FileFailure.TooLarge)
+                        if (count > maxBytes) return FileState.Failed(FileFailure.TooLarge)
                         if (total != null && count > total) return FileState.Failed(FileFailure.ShortBody)
                         writing = true
                         out.write(buffer, 0, n)
@@ -214,20 +215,45 @@ class FileDownloads(
 ) {
     val states = MutableStateFlow<Map<String, FileState>>(emptyMap())
     private val jobs = mutableMapOf<String, Job>()
+    private val autoTried = mutableSetOf<String>()
 
-    fun start(bridgeId: String, link: FileLink) {
+    fun start(bridgeId: String, link: FileLink) = start(bridgeId, link, FileLinks.MAX_BYTES)
+
+    /**
+     * [maxBytes] below the general limit marks an automatic download: a body longer than that (a link that lied about
+     * its size) stops and the token goes back to no state, so the card shows its normal Download button.
+     */
+    private fun start(bridgeId: String, link: FileLink, maxBytes: Long) {
         synchronized(this) {
             if (jobs[link.token]?.isActive == true) return
             states.update { it + (link.token to FileState.Downloading(0, null)) }
             jobs[link.token] = scope.launch {
                 val source = sourceFor(bridgeId)
                 val result = if (source == null) FileState.Failed(FileFailure.Transport(HermesError.ConnectionChanged))
-                else FileDownloader.download(link.token, link.name, source, root) { done, total ->
+                else FileDownloader.download(link.token, link.name, source, root, maxBytes = maxBytes, onProgress = { done, total ->
                     states.update { it + (link.token to FileState.Downloading(done, total)) }
+                })
+                if (maxBytes < FileLinks.MAX_BYTES && result is FileState.Failed && result.failure == FileFailure.TooLarge) {
+                    states.update { it - link.token }
+                } else {
+                    states.update { it + (link.token to result) }
                 }
-                states.update { it + (link.token to result) }
             }
         }
+    }
+
+    /**
+     * Starts the download of a picture the card may fetch by itself ([autoDownloadsPicture]). One automatic attempt per
+     * token per app run: a failed or cancelled picture stays a normal card with its own Retry or Download button.
+     */
+    fun startAuto(bridgeId: String, link: FileLink): Boolean {
+        if (!autoDownloadsPicture(link)) return false
+        synchronized(this) {
+            if (!autoTried.add(link.token)) return false
+            if (states.value.containsKey(link.token) || jobs[link.token]?.isActive == true) return false
+        }
+        start(bridgeId, link, THUMB_MAX_BYTES)
+        return true
     }
 
     fun cancel(token: String) {

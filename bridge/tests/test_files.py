@@ -638,7 +638,7 @@ def test_active_content_is_served_as_an_inert_download(tmp_path, name):
     assert "Content-Security-Policy: sandbox" in head and "X-Content-Type-Options: nosniff" in head
 
 
-# ---- fix round 2: strict reader, dot folders, odd tags, temp folder, device names ---------------
+# ---- strict reader, dot folders, odd tags, temp folder, device names ---------------
 
 def policy_of(tmp_path, text, write=True):
     files, work, _ = make(tmp_path, time.time)
@@ -784,7 +784,7 @@ def test_names_that_only_resemble_device_names_are_fine(tmp_path):
         assert files.validate(str(work / name)) is not None, name
 
 
-# ---- fix round 3: links into dot folders, network drives, strict spellings, names ----------------
+# ---- links into dot folders, network drives, strict spellings, names ----------------
 
 def make_dir_link(link, target):
     """A directory symlink, or a junction on Windows; skips the test when neither is allowed."""

@@ -111,5 +111,7 @@ fun failureText(context: Context, failure: ChatFailure): String {
         ChatFailure.ReplyKept -> text(R.string.chat_err_reply_kept)
         is ChatFailure.ForkFailed -> app.rasul.chat.sessionActionMessage(context, failure.error)
             ?: failureText(context, ChatFailure.Api(failure.error))
+        is ChatFailure.ShareItemsDropped -> context.resources.getQuantityString(R.plurals.share_dropped, failure.count, failure.count) +
+            failure.other?.let { " " + failureText(context, it) }.orEmpty()
     }
 }

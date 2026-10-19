@@ -18,14 +18,17 @@ English | [العربية](#العربية)
 - **Photos and text files.** Attach up to 4 photos or one small text file to a message; photos are downscaled and stripped of location metadata before sending.
 - **Steer or stop a running task.** A message sent while the agent works is added to the running task. Stop ends it.
 - **Approvals.** When the agent asks before running something, approve once or deny from the phone.
-- **Sessions.** Browse past conversations and read their transcripts.
+- **Answer from the notification.** Approve or deny straight from the alert; the phone must be unlocked first.
+- **Sessions.** Browse past conversations and read their transcripts. Pin up to 20 chats to the top. Unsent text is kept per chat, encrypted on the phone.
 - **Jobs.** See scheduled jobs, pause, resume or run one now.
 - **Several PCs and profiles.** Save each computer once and switch between them. Hermes profiles (`/p/<profile>/`) are supported.
 - **English and Arabic.** Pick the language in the app. Arabic is fully right-to-left.
-- **Files from the agent.** When the agent sends you a file from the computer, it appears as a card in the chat. Tap it to download, then open, save or share it. Web-type files and app installers are never opened inside the app.
+- **Files from the agent.** When the agent sends you a file from the computer, it appears as a card in the chat. Tap it to download, then open, save or share it. Pictures show inline in the chat. Web-type files and app installers are never opened inside the app.
+- **Share into Rasul.** Share photos or text from another app straight into a chat.
 - **Connection check.** See what works on the computer side and what to fix.
 - **MCP servers.** Switch servers on or off, test them and add new ones from the catalog.
-- **Messaging channels.** See Telegram and other channels per bot, switch them on or off, test them, and connect a new Telegram bot from the phone. The bot token stays on the computer, and Hermes restarts only when it is idle unless you choose to restart now.
+- **Hermes logs.** With Rasul Bridge, read the latest error, agent and gateway log lines on the phone. Keys and tokens are hidden by the bridge before the lines leave the computer.
+- **Messaging channels.** See Telegram and other channels per bot, switch them on or off, test them, and connect a new Telegram bot from the phone. The bot token stays on the computer, and Hermes restarts only when it is idle unless you choose to restart now. With Rasul Bridge you can also set up WhatsApp by scanning a code, and edit a channel’s settings.
 - **App updates.** The app checks this repository’s GitHub Releases for new versions and can update itself, verified against the release checksum and signing key. Switch it off in More.
 - **Light and dark theme.**
 - **App lock.** Protect the app with your phone’s screen lock or a strong biometric.
@@ -34,7 +37,7 @@ There is no Rasul server. The app talks to your own computer, plus (optional, ca
 
 ## Status
 
-Early development (version 0.2.7). Pre-release APKs are on the Releases page.
+Early development (version 0.2.8). Pre-release APKs are on the Releases page.
 
 ## Requirements
 
@@ -144,22 +147,25 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 - **المحادثة مع الوكيل:** أرسل مهمة وتابع الرد وتقدّم الأدوات لحظة بلحظة.
 - **توجيه المهمة الجارية أو إيقافها:** الرسالة التي ترسلها أثناء عمل الوكيل تُضاف إلى المهمة الجارية، وزر الإيقاف ينهيها.
 - **الموافقات:** عندما يطلب الوكيل الإذن قبل تنفيذ أمر، وافق مرة واحدة أو ارفض من الهاتف.
-- **الجلسات:** تصفّح المحادثات السابقة واقرأ نصوصها.
+- **الرد من الإشعار:** وافق أو ارفض مباشرة من التنبيه، بعد فتح قفل الهاتف.
+- **الجلسات:** تصفّح المحادثات السابقة واقرأ نصوصها. ثبّت حتى 20 محادثة في الأعلى، ويُحفظ النص غير المرسل لكل محادثة مشفّرًا على الهاتف.
 - **المهام المجدولة:** اعرض المهام، أوقفها مؤقتًا، استأنفها أو شغّلها الآن.
 - **أكثر من حاسوب وملف تعريف:** احفظ كل حاسوب مرة واحدة وبدّل بينها، مع دعم ملفات تعريف Hermes.
 - **العربية والإنجليزية:** اختر اللغة من داخل التطبيق، والواجهة العربية من اليمين إلى اليسار بالكامل.
 - **سمة فاتحة وداكنة.**
-- **ملفات من الوكيل:** عندما يرسل لك الوكيل ملفًا من الحاسوب يظهر كبطاقة في المحادثة. اضغط عليها لتنزيله ثم افتحه أو احفظه أو شاركه. الملفات من نوع الويب ومثبّتات التطبيقات لا تُفتح داخل التطبيق أبدًا.
+- **ملفات من الوكيل:** عندما يرسل لك الوكيل ملفًا من الحاسوب يظهر كبطاقة في المحادثة. اضغط عليها لتنزيله ثم افتحه أو احفظه أو شاركه. وتظهر الصور داخل المحادثة مباشرة. الملفات من نوع الويب ومثبّتات التطبيقات لا تُفتح داخل التطبيق أبدًا.
+- **المشاركة إلى رسول:** شارك الصور أو النصوص من أي تطبيق آخر إلى محادثة مباشرة.
 - **فحص الاتصال:** اعرف ما يعمل في جهة الحاسوب وما يجب إصلاحه.
 - **خوادم MCP:** شغّل الخوادم أو أوقفها، واختبرها، وأضف خوادم جديدة من الكتالوج.
-- **قنوات المراسلة:** اعرض تيليغرام وغيره من القنوات لكل بوت، وشغّلها أو أوقفها، واختبرها، واربط بوت تيليغرام جديدًا من الهاتف. يبقى رمز البوت على الحاسوب، ولا يُعاد تشغيل Hermes إلا عندما يكون خاملًا ما لم تختر إعادة التشغيل الآن.
+- **سجلات Hermes:** مع جسر رسول اقرأ آخر أسطر سجلات الأخطاء والوكيل والبوابة على الهاتف، ويُخفي الجسر المفاتيح والرموز قبل أن تغادر الأسطر الحاسوب.
+- **قنوات المراسلة:** اعرض تيليغرام وغيره من القنوات لكل بوت، وشغّلها أو أوقفها، واختبرها، واربط بوت تيليغرام جديدًا من الهاتف. يبقى رمز البوت على الحاسوب، ولا يُعاد تشغيل Hermes إلا عندما يكون خاملًا ما لم تختر إعادة التشغيل الآن. ومع جسر رسول يمكنك أيضًا إعداد واتساب بمسح رمز، وتعديل إعدادات القناة.
 - **تحديث التطبيق:** يتحقق التطبيق من إصدارات GitHub لهذا المستودع بحثًا عن نسخ جديدة ويستطيع تحديث نفسه، مع التحقق من مجموع التحقق الخاص بالإصدار ومن مفتاح التوقيع. يمكن إيقاف ذلك من «المزيد».
 
 لا يوجد خادم لرسول. التطبيق يتصل بحاسوبك، إضافةً إلى (اختياري ويمكن إيقافه من «المزيد») إصدارات GitHub لهذا المستودع للتحقق من تحديثات التطبيق، بلا حسابات ولا تتبّع ولا تحليلات ولا إعلانات. ولا يُفتح رابط إعداد تيليغرام إلا عندما تضغط عليه.
 
 ### الحالة
 
-قيد التطوير المبكر (الإصدار 0.2.7). ملفات APK التجريبية متاحة في صفحة الإصدارات.
+قيد التطوير المبكر (الإصدار 0.2.8). ملفات APK التجريبية متاحة في صفحة الإصدارات.
 
 ### جسر رسول (موصى به)
 

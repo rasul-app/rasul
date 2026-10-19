@@ -20,6 +20,9 @@ import kotlinx.coroutines.SupervisorJob
 
 private val Context.dataStore by preferencesDataStore(name = "rasul")
 
+/** Drafts and pins live in their own file: up to 200 drafts of 20 000 characters must never slow a run breadcrumb write. */
+private val Context.chatExtrasDataStore by preferencesDataStore(name = "rasul_chat_extras")
+
 /** Manual DI: one place that wires the app. */
 class AppContainer(
     context: Context,
@@ -31,9 +34,16 @@ class AppContainer(
     val sessions = SessionsClient(client)
     val sessionControl = app.rasul.sessions.SessionControlClient(client)
     val jobs = JobsClient(client)
-    val connections = ConnectionStore(context.dataStore, KeystoreSecretCipher())
+    val drafts = app.rasul.data.DraftStore(context.chatExtrasDataStore, KeystoreSecretCipher())
+    /** Draft writes queue apart from [runWriter], so a slow draft write never delays a run breadcrumb. */
+    val draftWriter = OrderedWriter(appScope)
+    val pins = app.rasul.data.PinStore(context.chatExtrasDataStore)
+    /** A deleted PC or bridge takes its drafts and pins with it; editing a PC keeps them. */
+    private val botRemoved: suspend (String) -> Unit = { prefix -> drafts.clearBot(prefix); pins.clearBot(prefix) }
 
-    val bridges = app.rasul.bridge.BridgeStore(context.dataStore, KeystoreSecretCipher())
+    val connections = ConnectionStore(context.dataStore, KeystoreSecretCipher(), botRemoved)
+
+    val bridges = app.rasul.bridge.BridgeStore(context.dataStore, KeystoreSecretCipher(), botRemoved)
     val bridgeClients = app.rasul.bridge.BridgeClients(bridges, appScope)
     val appLockSettings = AppLockSettings(context.dataStore)
     val appLock = AppLockController(appLockSettings, appScope)
@@ -49,6 +59,7 @@ class AppContainer(
     val activePc = ActivePcHolder(connections, appScope, bridgeBots)
     val transcriptSources = app.rasul.sessions.TranscriptSources()
     val pendingChat = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val shares = app.rasul.share.ShareInbox()
     val runs = RunsClient(usageStore = connections, scope = appScope)
     val runWatcher = app.rasul.notifications.RunWatcher(
         this, context.applicationContext, CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),

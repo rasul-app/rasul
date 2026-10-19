@@ -44,7 +44,12 @@ private data class StoredConnection(
 /** The Keystore could not encrypt the API key (as opposed to the storage write failing). */
 class SecretEncryptionException(cause: Throwable) : Exception("Could not encrypt the API key", cause)
 
-class ConnectionStore(private val ds: DataStore<Preferences>, private val cipher: SecretCipher) {
+class ConnectionStore(
+    private val ds: DataStore<Preferences>,
+    private val cipher: SecretCipher,
+    /** Called with `<id>_` after a PC is deleted, so state kept in other stores (drafts, pins) goes too. Editing a PC does not call it. */
+    private val onRemoved: suspend (String) -> Unit = {},
+) {
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = ListSerializer(StoredConnection.serializer())
     private val listKey = stringPreferencesKey("connections_v1")
@@ -440,5 +445,6 @@ class ConnectionStore(private val ds: DataStore<Preferences>, private val cipher
             p[revisionKey(id)] = UUID.randomUUID().toString()
             p[listKey] = json.encodeToString(serializer, p.stored().filterNot { it.id == id })
         }
+        onRemoved("${id}_")
     }
 }

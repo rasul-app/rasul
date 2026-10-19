@@ -30,7 +30,12 @@ data class SavedBridge(
 data class BridgeSelection(val bridgeId: String, val profileId: String)
 
 /** All bridge metadata is encrypted before it enters the backup-excluded preferences. */
-class BridgeStore(private val ds: DataStore<Preferences>, private val cipher: SecretCipher) {
+class BridgeStore(
+    private val ds: DataStore<Preferences>,
+    private val cipher: SecretCipher,
+    /** Called with `bridge:<id>:` after a bridge is removed, so state kept in other stores (drafts, pins) goes too. */
+    private val onRemoved: suspend (String) -> Unit = {},
+) {
     private val key = stringPreferencesKey("bridges_v1")
     private val activeBridgeKey = stringPreferencesKey("active_bridge_id")
     private val activeProfileKey = stringPreferencesKey("active_bridge_profile")
@@ -91,5 +96,6 @@ class BridgeStore(private val ds: DataStore<Preferences>, private val cipher: Se
                 p.remove(activeProfileKey)
             }
         }
+        onRemoved("bridge:${id}:")
     }
 }

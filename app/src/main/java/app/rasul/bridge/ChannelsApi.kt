@@ -96,6 +96,58 @@ data class TelegramApplyDto(
     @SerialName("needs_restart") val needsRestart: Boolean = false,
 )
 
+/** The WhatsApp setup states the bridge may report. */
+object WhatsappStatus {
+    const val INSTALLING = "installing"
+    const val STARTING = "starting"
+    const val WAITING = "waiting"
+    const val CONNECTED = "connected"
+    const val ERROR = "error"
+    const val CANCELLED = "cancelled"
+    val all = setOf(INSTALLING, STARTING, WAITING, CONNECTED, ERROR, CANCELLED)
+}
+
+/** Start and status share this shape. [qrPayload] is only ever set while [status] is `waiting`. */
+@Serializable
+data class WhatsappSetupDto(
+    @SerialName("pairing_id") val pairingId: String,
+    val status: String,
+    @SerialName("qr_payload") val qrPayload: String? = null,
+    @SerialName("expires_at") val expiresAt: String? = null,
+    @SerialName("account_name") val accountName: String? = null,
+    @SerialName("account_phone_last4") val accountPhoneLast4: String? = null,
+    /** One fixed code; see [whatsappError]. */
+    val error: String? = null,
+) {
+    val terminal: Boolean get() = status == WhatsappStatus.CONNECTED || status == WhatsappStatus.ERROR || status == WhatsappStatus.CANCELLED
+}
+
+@Serializable
+data class WhatsappApplyDto(
+    val ok: Boolean = false,
+    @SerialName("restart_started") val restartStarted: Boolean = false,
+    @SerialName("needs_restart") val needsRestart: Boolean = false,
+)
+
+private val QR_TEXT = Regex("[\\x20-\\x7e]{1,$MAX_QR_PAYLOAD}")
+private val LAST4 = Regex("[0-9]{4}")
+
+/** Drops what the contract does not allow: a QR outside `waiting` or with odd characters, a last-4 that is not 4 digits. */
+internal fun WhatsappSetupDto.checked(): WhatsappSetupDto = copy(
+    qrPayload = qrPayload?.takeIf { status == WhatsappStatus.WAITING && QR_TEXT.matches(it) },
+    accountPhoneLast4 = accountPhoneLast4?.takeIf { LAST4.matches(it) },
+    accountName = accountName?.trim()?.take(100)?.takeIf { it.isNotEmpty() },
+)
+
+/** The error a setup in `error` state stands for; an unknown code is the generic failure. */
+fun whatsappError(code: String?): ChannelError = when (code) {
+    "whatsapp_bridge_missing" -> ChannelError.WhatsappBridgeMissing
+    "whatsapp_install_failed" -> ChannelError.WhatsappInstallFailed
+    "whatsapp_timeout" -> ChannelError.WhatsappTimeout
+    "whatsapp_logged_out" -> ChannelError.WhatsappLoggedOut
+    else -> ChannelError.WhatsappSetupFailed
+}
+
 @Serializable
 private data class OkDto(val ok: Boolean = false)
 
@@ -106,9 +158,18 @@ enum class ChannelError(val message: Int) {
     Conflict(R.string.chan_err_conflict),
     Busy(R.string.chan_err_busy),
     SetupNotFound(R.string.chan_err_setup_not_found),
+    SetupCancelled(R.string.chan_wa_err_cancelled),
     SetupNotReady(R.string.chan_err_setup_not_ready),
     SetupExpired(R.string.chan_setup_expired),
     BadLink(R.string.chan_err_bad_link),
+    WhatsappBridgeMissing(R.string.chan_wa_err_bridge_missing),
+    WhatsappInstallFailed(R.string.chan_wa_err_install_failed),
+    WhatsappTimeout(R.string.chan_wa_err_timeout),
+    WhatsappLoggedOut(R.string.chan_wa_err_logged_out),
+    WhatsappSetupFailed(R.string.chan_wa_err_failed),
+    SettingUnknown(R.string.chan_set_err_unknown),
+    SettingInvalid(R.string.chan_set_err_invalid),
+    SettingRedacted(R.string.chan_set_err_redacted),
     RateLimited(R.string.chan_err_rate_limited),
     Forbidden(R.string.bridge_revoked),
     Invalid(R.string.desktop_invalid),
@@ -159,6 +220,11 @@ internal fun channelException(status: Int, body: String): ChannelException {
         "channel_setup_not_ready" -> ChannelException(ChannelError.SetupNotReady, detail)
         "channel_setup_expired" -> ChannelException(ChannelError.SetupExpired)
         "channel_setup_bad_link" -> ChannelException(ChannelError.BadLink)
+        "channel_unknown_setting" -> ChannelException(ChannelError.SettingUnknown)
+        "channel_setting_invalid" -> ChannelException(ChannelError.SettingInvalid)
+        "channel_setting_redacted" -> ChannelException(ChannelError.SettingRedacted)
+        "whatsapp_bridge_missing", "whatsapp_install_failed", "whatsapp_timeout", "whatsapp_logged_out",
+        "whatsapp_setup_failed" -> ChannelException(whatsappError(token))
         "desktop_unavailable" -> ChannelException(ChannelError.Unavailable)
         "desktop_error" -> ChannelException(ChannelError.DesktopFailed)
         "desktop_invalid" -> ChannelException(ChannelError.Invalid)
@@ -199,6 +265,17 @@ interface ChannelsApi {
     suspend fun telegramSetupStatus(pairingId: String): TelegramSetupStatusDto
     suspend fun applyTelegramSetup(pairingId: String, allowedUserIds: List<String>, force: Boolean): TelegramApplyDto
     suspend fun cancelTelegramSetup(pairingId: String)
+
+    /** [allowedUsers] is already checked by [parseWhatsappNumbers]; empty means none. */
+    suspend fun startWhatsappSetup(mode: WhatsappMode, allowedUsers: List<String>): WhatsappSetupDto
+    suspend fun whatsappSetupStatus(pairingId: String): WhatsappSetupDto
+
+    /** Throws [ChannelError.Busy] while agents work, unless [force]. */
+    suspend fun applyWhatsappSetup(pairingId: String, force: Boolean): WhatsappApplyDto
+    suspend fun cancelWhatsappSetup(pairingId: String)
+
+    /** Writes [values] and removes the [clear] keys; the row comes back with [ChannelDto.needsRestart]. Values are never logged. */
+    suspend fun saveSettings(id: String, values: Map<String, String>, clear: List<String>): ChannelDto
 }
 
 /** The channels api for one bridge target, or null when the bot is a direct connection. */
@@ -303,7 +380,68 @@ class BridgeChannelsApi(private val endpoint: BridgeEndpoint) : ChannelsApi {
         send("channels/telegram/setup/$pairingId", method = "DELETE") { }
     }
 
+    override suspend fun startWhatsappSetup(mode: WhatsappMode, allowedUsers: List<String>): WhatsappSetupDto {
+        val users = allowedUsers.distinct()
+        if (users.size > MAX_WHATSAPP_NUMBERS || !users.all { PHONE_NUMBER.matches(it) }) throw ChannelException(ChannelError.Invalid)
+        val body = buildJsonObject {
+            put("mode", mode.wire)
+            if (users.isNotEmpty()) put("allowed_users", users.joinToString(","))
+        }.toString()
+        return send("channels/whatsapp/setup", method = "POST", body = body) { whatsappState(it, null) }
+    }
+
+    override suspend fun whatsappSetupStatus(pairingId: String): WhatsappSetupDto {
+        checkedPairing(pairingId)
+        return send("channels/whatsapp/setup/$pairingId") { whatsappState(it, pairingId) }
+    }
+
+    private fun whatsappState(text: String, wanted: String?): WhatsappSetupDto {
+        val state = json.decodeFromString<WhatsappSetupDto>(text).checked()
+        if (!PAIRING_ID.matches(state.pairingId) || (wanted != null && state.pairingId != wanted) || state.status !in WhatsappStatus.all) {
+            throw ChannelException(ChannelError.InvalidResponse)
+        }
+        return state
+    }
+
+    override suspend fun applyWhatsappSetup(pairingId: String, force: Boolean): WhatsappApplyDto {
+        checkedPairing(pairingId)
+        val body = buildJsonObject { put("force", force) }.toString()
+        return send("channels/whatsapp/setup/$pairingId/apply", method = "POST", body = body) {
+            json.decodeFromString<WhatsappApplyDto>(it).also { r -> if (!r.ok) throw ChannelException(ChannelError.InvalidResponse) }
+        }
+    }
+
+    override suspend fun cancelWhatsappSetup(pairingId: String) {
+        checkedPairing(pairingId)
+        send("channels/whatsapp/setup/$pairingId", method = "DELETE") { }
+    }
+
+    override suspend fun saveSettings(id: String, values: Map<String, String>, clear: List<String>): ChannelDto {
+        checkedId(id)
+        if (values.isEmpty() && clear.isEmpty()) throw ChannelException(ChannelError.Invalid)
+        if (values.size > MAX_SETTING_CHANGES || clear.size > MAX_SETTING_CHANGES || values.keys.any { it in clear }) {
+            throw ChannelException(ChannelError.Invalid)
+        }
+        for ((key, value) in values) {
+            when (settingValueProblem(key, value)) {
+                null -> {}
+                SettingProblem.Masked -> throw ChannelException(ChannelError.SettingRedacted)
+                SettingProblem.BadKey -> throw ChannelException(ChannelError.SettingUnknown)
+                else -> throw ChannelException(ChannelError.SettingInvalid)
+            }
+        }
+        if (!clear.all(::isSettingKey)) throw ChannelException(ChannelError.SettingUnknown)
+        val body = buildJsonObject {
+            if (values.isNotEmpty()) put("values", buildJsonObject { values.forEach { (k, v) -> put(k, v) } })
+            if (clear.isNotEmpty()) put("clear", JsonArray(clear.map(::JsonPrimitive)))
+        }.toString()
+        return send("channels/$id/settings", method = "PUT", body = body) {
+            json.decodeFromString<ChannelDto>(it).also { row -> if (row.id != id) throw ChannelException(ChannelError.InvalidResponse) }
+        }
+    }
+
     private companion object {
+        val PHONE_NUMBER = Regex("\\+?[0-9]{1,20}")
         val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
         val CHANNEL_ID = Regex("[a-z0-9_]{1,32}")
         val PAIRING_ID = Regex("[A-Za-z0-9_-]{8,128}")

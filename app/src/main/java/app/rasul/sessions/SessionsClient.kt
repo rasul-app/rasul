@@ -130,8 +130,11 @@ interface SessionsApi {
     suspend fun messages(target: HermesTarget, sessionId: String): HermesResult<List<SessionMessageDto>>
 }
 
+/** How many chats the list asks for. A reply shorter than this holds every chat; a full one may be cut. */
+const val SESSIONS_LIST_LIMIT = 50
+
 interface SessionsManagementApi {
-    suspend fun list(target: HermesTarget, limit: Int = 50): HermesResult<List<SessionDto>>
+    suspend fun list(target: HermesTarget, limit: Int = SESSIONS_LIST_LIMIT): HermesResult<List<SessionDto>>
     suspend fun rename(target: HermesTarget, sessionId: String, title: String): HermesResult<SessionDto>
     suspend fun delete(target: HermesTarget, sessionId: String): HermesResult<Unit>
 }

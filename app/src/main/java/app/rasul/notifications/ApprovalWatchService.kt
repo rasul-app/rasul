@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -19,6 +20,7 @@ import app.rasul.MainActivity
 import app.rasul.R
 import app.rasul.RasulApp
 import app.rasul.bridge.ApprovalItemDto
+import app.rasul.bridge.ApprovalsError
 import app.rasul.bridge.ApprovalsRepository
 import app.rasul.bridge.BridgeBotsState
 import app.rasul.bridge.bridgeBotId
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Intent extra carrying the validated `approvals/{bridge}/{profile}` route for the tap target. */
 const val APPROVALS_ROUTE = "approvals_route"
@@ -47,6 +50,7 @@ internal const val PAUSED_ID = 6
 internal const val PAUSED_TAG = "approval_paused"
 private const val EXPIRY_SWEEP_MS = 30_000L
 private const val FOLLOW_RETRY_MS = 5_000L
+private const val LOCK_STATE_WAIT_MS = 5_000L
 
 internal fun approvalAlertTag(botKey: String, requestId: String) = "$botKey/$requestId"
 
@@ -138,6 +142,18 @@ class ApprovalWatchService : Service() {
     private val container get() = (application as RasulApp).container
     private val manager get() = getSystemService(NotificationManager::class.java)
     private val decider = ApprovalAlertDecider()
+
+    /** What each live alert needs to be posted again, e.g. after a failed answer. */
+    private val posted = HashMap<String, Pair<ApprovalAlert, String>>()
+    private val answerer = ApprovalAnswerer(
+        { bridgeId, profileId -> container.approvals.api(bridgeId, profileId) },
+        object : ApprovalAnswerUi {
+            override fun sending(tag: String) = showSending(tag)
+            override fun finished(tag: String) = manager.cancel(tag, APPROVAL_ALERT_ID)
+            override fun settledElsewhere(tag: String, textRes: Int) { manager.cancel(tag, APPROVAL_ALERT_ID); showNotice(tag, textRes) }
+            override fun failed(tag: String, error: ApprovalsError) = repost(tag, getString(error.message))
+        },
+    )
     private var lastStartId = 0
     private var stopping = false
     private var watchedPcs = -1
@@ -186,6 +202,11 @@ class ApprovalWatchService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         lastStartId = startId
+        if (intent?.action == ACTION_APPROVAL_ANSWER) {
+            val request = parseApprovalAnswer(intent)
+            if (request != null) scope.launch { answerIfAllowed(request) }
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             scope.launch {
                 try { container.settings.setApprovalAlerts(false) }
@@ -197,6 +218,19 @@ class ApprovalWatchService : Service() {
         }
         publish()
         return START_NOT_STICKY
+    }
+
+    /**
+     * Sends the answer only with the app lock off and the phone unlocked. The lock state may still be
+     * loading right after process death, so wait for it. Another app or a watch can fire the button's
+     * PendingIntent with the phone locked: then nothing is sent and the alert is left as it is.
+     */
+    private suspend fun answerIfAllowed(request: ApprovalAnswerRequest) {
+        val lock = withTimeoutOrNull(LOCK_STATE_WAIT_MS) { container.appLock.state.first { it.loaded } }
+        if (stopping || lock == null || lock.publicOnly()) return
+        // Nothing was changed on the alert yet: it is still in the shade, so leave it alone.
+        if (getSystemService(KeyguardManager::class.java).isDeviceLocked) return
+        answerer.handle(request)
     }
 
     /** A follower that returned (storage error) or threw restarts after a pause. */
@@ -223,14 +257,43 @@ class ApprovalWatchService : Service() {
             container.approvals.state.value, container.approvalsVisible.value,
             System.currentTimeMillis() / 1000,
         )
-        gone.forEach { manager.cancel(it, APPROVAL_ALERT_ID) }
+        gone.forEach { manager.cancel(it, APPROVAL_ALERT_ID); posted.remove(it) }
         if (alerts.isEmpty()) return
         val names = botNames()
         val publicOnly = container.appLock.state.value.publicOnly()
         alerts.forEach { alert ->
-            manager.notify(alert.tag, APPROVAL_ALERT_ID,
-                buildApprovalNotification(this, alert, names[bridgeBotId(alert.bridgeId, alert.profileId)] ?: alert.profileId, publicOnly))
+            val name = names[bridgeBotId(alert.bridgeId, alert.profileId)] ?: alert.profileId
+            posted[alert.tag] = alert to name
+            manager.notify(alert.tag, APPROVAL_ALERT_ID, buildApprovalNotification(this, alert, name, publicOnly, withActions = !publicOnly))
         }
+    }
+
+    private fun showSending(tag: String) {
+        manager.notify(tag, APPROVAL_ALERT_ID, buildApprovalSendingNotification(this))
+    }
+
+    /**
+     * Puts a failed alert back with its buttons. A request this run knows has left the list is dropped.
+     * One this run never alerted (fresh process, feed not loaded yet) gets a plain alert with the reason.
+     */
+    private fun repost(tag: String, errorText: String) {
+        val entry = posted[tag]
+        if (entry == null) {
+            val bot = tag.substringBeforeLast('/')
+            manager.notify(tag, APPROVAL_ALERT_ID,
+                buildApprovalFailedNotification(this, approvalBotBridge(bot), approvalBotProfile(bot), errorText))
+            return
+        }
+        if (tag !in decider.liveTags()) { manager.cancel(tag, APPROVAL_ALERT_ID); return }
+        val (alert, name) = entry
+        val publicOnly = container.appLock.state.value.publicOnly()
+        manager.notify(tag, APPROVAL_ALERT_ID, buildApprovalNotification(this, alert, name, publicOnly,
+            withActions = !publicOnly, errorText = errorText.takeUnless { publicOnly }, onlyAlertOnce = true))
+    }
+
+    private fun showNotice(tag: String, textRes: Int) {
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) return
+        manager.notify(tag, APPROVAL_NOTICE_ID, buildApprovalNotice(this, getString(textRes)))
     }
 
     private fun botNames(): Map<String, String> {
@@ -307,24 +370,28 @@ internal fun noBotRemains(bots: BridgeBotsState): Boolean =
  * One alert notification: bot + surface in the title, redacted description as the text. With
  * [publicOnly] (app lock on, or its state not yet read) only "Approval waiting" is shown.
  */
-internal fun buildApprovalNotification(context: Context, alert: ApprovalAlert, botName: String, publicOnly: Boolean = false): Notification {
-    val route = "approvals/" + Uri.encode(alert.bridgeId) + "/" + Uri.encode(alert.profileId)
-    val open = PendingIntent.getActivity(context, 0,
-        Intent(context, MainActivity::class.java)
-            .setData(Uri.parse("rasul:$route"))
-            .putExtra(APPROVALS_ROUTE, route)
-            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+internal fun buildApprovalNotification(
+    context: Context,
+    alert: ApprovalAlert,
+    botName: String,
+    publicOnly: Boolean = false,
+    withActions: Boolean = false,
+    errorText: String? = null,
+    onlyAlertOnce: Boolean = false,
+): Notification {
+    val open = approvalOpenIntent(context, alert.bridgeId, alert.profileId)
     val public = NotificationCompat.Builder(context, APPROVALS_CHANNEL)
         .setSmallIcon(R.drawable.rasul_signal_monochrome)
         .setContentTitle(context.getString(R.string.approval_alert_waiting))
         .setContentIntent(open)
         .setAutoCancel(true)
+        .setOnlyAlertOnce(onlyAlertOnce)
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         .build()
     if (publicOnly) return public
-    val text = alert.item.description.ifBlank { context.getString(R.string.approval_alert_waiting) }.take(600)
-    return NotificationCompat.Builder(context, APPROVALS_CHANNEL)
+    val described = alert.item.description.ifBlank { context.getString(R.string.approval_alert_waiting) }.take(600)
+    val text = if (errorText == null) described else "$errorText\n$described"
+    val builder = NotificationCompat.Builder(context, APPROVALS_CHANNEL)
         .setSmallIcon(R.drawable.rasul_signal_monochrome)
         .setContentTitle(context.getString(R.string.approval_alert_title, botName, alert.item.surface))
         .setContentText(text)
@@ -334,8 +401,78 @@ internal fun buildApprovalNotification(context: Context, alert: ApprovalAlert, b
         .setCategory(NotificationCompat.CATEGORY_EVENT)
         .setContentIntent(open)
         .setAutoCancel(true)
-        .build()
+        .setOnlyAlertOnce(onlyAlertOnce)
+    // setAuthenticationRequired only takes effect on Android 12+; below that the alert is tap-to-open only.
+    // The buttons stay on the phone (a watch could not unlock it); without them the alert is as before.
+    if (withActions && Build.VERSION.SDK_INT >= 31) {
+        builder.setLocalOnly(true)
+        builder.addAction(answerAction(context, alert, "once", R.string.approval_action_once))
+        builder.addAction(answerAction(context, alert, "deny", R.string.approval_action_deny))
+    }
+    return builder.build()
 }
+
+private fun approvalOpenIntent(context: Context, bridgeId: String, profileId: String): PendingIntent {
+    val route = "approvals/" + Uri.encode(bridgeId) + "/" + Uri.encode(profileId)
+    return PendingIntent.getActivity(context, 0,
+        Intent(context, MainActivity::class.java)
+            .setData(Uri.parse("rasul:$route"))
+            .putExtra(APPROVALS_ROUTE, route)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+}
+
+/** A failed answer for an alert this run never posted: the reason, tap to open the approvals, no buttons. */
+internal fun buildApprovalFailedNotification(context: Context, bridgeId: String, profileId: String, errorText: String): Notification =
+    NotificationCompat.Builder(context, APPROVALS_CHANNEL)
+        .setSmallIcon(R.drawable.rasul_signal_monochrome)
+        .setContentTitle(context.getString(R.string.approval_alert_waiting))
+        .setContentText(errorText)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(errorText))
+        .setContentIntent(approvalOpenIntent(context, bridgeId, profileId))
+        .setAutoCancel(true)
+        .setOnlyAlertOnce(true)
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+        .setTimeoutAfter(APPROVAL_NOTICE_TIMEOUT_MS)
+        .build()
+
+/** An explicit, immutable intent to the watcher service; the unlock requirement applies to every button. */
+private fun answerAction(context: Context, alert: ApprovalAlert, choice: String, label: Int): NotificationCompat.Action {
+    val request = alert.item.requestId
+    val intent = Intent(context, ApprovalWatchService::class.java)
+        .setAction(ACTION_APPROVAL_ANSWER)
+        .setData(Uri.parse("rasul:approval-answer/" + Uri.encode(choice) + "/" + Uri.encode(alert.bridgeId) + "/" +
+            Uri.encode(alert.profileId) + "/" + Uri.encode(request)))
+        .putExtra(EXTRA_APPROVAL_BRIDGE, alert.bridgeId)
+        .putExtra(EXTRA_APPROVAL_PROFILE, alert.profileId)
+        .putExtra(EXTRA_APPROVAL_REQUEST, request)
+        .putExtra(EXTRA_APPROVAL_CHOICE, choice)
+    val pending = PendingIntent.getService(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    return NotificationCompat.Action.Builder(0, context.getString(label), pending)
+        .setAuthenticationRequired(true).build()
+}
+
+/** The alert while its answer is on the wire: no buttons, no command text. */
+internal fun buildApprovalSendingNotification(context: Context): Notification =
+    NotificationCompat.Builder(context, APPROVALS_CHANNEL)
+        .setSmallIcon(R.drawable.rasul_signal_monochrome)
+        .setContentTitle(context.getString(R.string.approval_sending))
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+        .setOnlyAlertOnce(true)
+        .setSilent(true)
+        .setTimeoutAfter(APPROVAL_SENDING_TIMEOUT_MS)
+        .build()
+
+/** A short silent notice that removes itself after [APPROVAL_NOTICE_TIMEOUT_MS]. */
+internal fun buildApprovalNotice(context: Context, text: String): Notification =
+    NotificationCompat.Builder(context, APPROVALS_CHANNEL)
+        .setSmallIcon(R.drawable.rasul_signal_monochrome)
+        .setContentTitle(text)
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+        .setSilent(true)
+        .setAutoCancel(true)
+        .setTimeoutAfter(APPROVAL_NOTICE_TIMEOUT_MS)
+        .build()
 
 internal fun createApprovalChannels(context: Context) {
     val manager = context.getSystemService(NotificationManager::class.java)

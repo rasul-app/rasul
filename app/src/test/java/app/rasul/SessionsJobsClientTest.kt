@@ -561,8 +561,14 @@ class SessionsJobsUiTest {
             vm.state.collect { if (it !is app.rasul.data.Load.Loading) settled.complete(Unit) }
         }
         try {
-            compose.waitUntil(10_000) { settled.isCompleted }
-            runBlocking { settled.await() }
+            // The load resumes on the main looper, which a first test does not drain by itself: idle it while waiting.
+            val deadline = System.nanoTime() + 10_000_000_000L
+            while (!settled.isCompleted && System.nanoTime() < deadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                compose.waitForIdle()
+                Thread.sleep(10)
+            }
+            assertTrue("the transcript never left Loading", settled.isCompleted)
         } finally { collector.cancel() }
     }
 

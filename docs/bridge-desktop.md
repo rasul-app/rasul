@@ -161,19 +161,28 @@ bounded by the 10-second upstream deadline.
 | Method and suffix | Request | Response | Per minute |
 | --- | --- | --- | --- |
 | GET `/channels` | none | `{channels:[{id,name,description,enabled,configured,gateway_running,state,error_code,error_message,home_channel_set,fields:[{key,required,is_set,is_list,prompt}]}]}` | 12 |
-| PUT `/channels/{id}/enabled` | `{enabled}` | the channel row above plus `needs_restart` (true when `state` is `pending_restart`), read again after the change | 6 |
+| PUT `/channels/{id}/enabled` | `{enabled}` | the channel row above plus `needs_restart` (true unless the desktop says it served the change to the running gateway at once; always true when `state` is `pending_restart`), read again after the change | 6 |
 | POST `/channels/{id}/test` | none | `{ok, state, message, auth_posture?}` | 3 |
 | POST `/channels/restart` | `{force}` | `{ok:true}` | 2 |
 | POST `/channels/telegram/setup` | optional `{bot_name}`, at most 64 characters | `{pairing_id, deep_link, suggested_username, expires_at}` | 3 |
 | GET `/channels/telegram/setup/{pairing_id}` | none | `{status:"waiting"\|"ready", bot_username?, owner_user_id?, expires_at?}` | 30 |
 | POST `/channels/telegram/setup/{pairing_id}/apply` | `{allowed_user_ids, force}` | `{ok, bot_username, restart_started, needs_restart}` | 3 |
 | DELETE `/channels/telegram/setup/{pairing_id}` | none | `{ok:true}` | 6 |
+| POST `/channels/whatsapp/setup` | `{mode, allowed_users?}` | `{pairing_id, status, qr_payload?, expires_at?, account_name?, account_phone_last4?, error?}` | 3 |
+| GET `/channels/whatsapp/setup/{pairing_id}` | none | the same shape | 30 |
+| POST `/channels/whatsapp/setup/{pairing_id}/apply` | `{force, mode?, allowed_users?}` | `{ok, restart_started, needs_restart}` | 3 |
+| DELETE `/channels/whatsapp/setup/{pairing_id}` | none | `{ok:true}` | 6 |
+| PUT `/channels/{id}/settings` | `{values?:{KEY:string}, clear?:[KEY]}` | the channel row above plus `needs_restart` | 6 |
 
 `{id}` matches `[a-z0-9_]{1,32}` and `{pairing_id}` matches `[A-Za-z0-9_-]{8,128}`; anything else is
 404 before any backend call. Bodies are strict: unknown keys, wrong types or a missing key are 400
 `desktop_invalid`. `allowed_user_ids` is 1 to 20 strings of decimal digits (at most 20 digits each);
 repeats are dropped. Switching a channel on or off sends only `enabled` and the profile, never
 any setting or secret.
+
+WhatsApp setup (0.2.8): `mode` is `bot` or `self-chat`. `allowed_users` is a comma list of at most 20 phone numbers, each decimal digits with an optional leading `+`, no spaces; repeats are dropped, an empty string means none. `status` is one of `installing`, `starting`, `waiting`, `connected`, `error`, `cancelled`. `qr_payload` is returned only while `status` is `waiting`, and only when it is 1 to 1024 printable ASCII characters. The account phone number is reduced to its last 4 digits (`account_phone_last4`), the account id and the allow-list are never returned, and `account_name` that only looks like a phone number (digits, `+`, spaces, dashes) is reduced to its last 4 digits. `error` is never the desktop's text, which can hold local paths, names or numbers; it is one fixed code: `whatsapp_bridge_missing`, `whatsapp_install_failed`, `whatsapp_timeout`, `whatsapp_logged_out`, or `whatsapp_setup_failed` for anything else (the app translates the code). The bodies of the setup and apply calls are at most 1024 bytes, checked before they are parsed. Apply is refused with 409 `gateway_busy` while any agent works or the count is unknown, unless `force` is true. Unknown pairing 404 `channel_setup_not_found`, not connected yet 409 `channel_setup_not_ready` (with a fixed `message`). The strict digit check on `allowed_users` applies to this setup route only; the same list written through the channel settings route is checked by the desktop alone.
+
+Channel settings (0.2.8): every key must be one of the `fields` of that channel in a fresh read of the channel list made by the bridge (otherwise 400 `channel_unknown_setting`; an unknown channel is 404 `channel_not_found`). A key is 1 to 64 capital letters, digits or underscores. A value is 1 to 4096 ASCII characters without control characters (any other character is refused with 400 `channel_setting_invalid`, because the desktop would drop it silently); a value that looks like a masked preview (contains `****` or the ellipsis character, is `***`, starts with the redaction marker, or has the shape of four characters, three dots, four characters) is refused with 400 `channel_setting_redacted`. At most 8 values and 8 keys to clear per call, none in both lists, and at least one in total; the body may be up to 256 KiB. Only `env`, `clear_env` and the profile are forwarded. A refusal by the desktop is the fixed code 400 `channel_setting_invalid`. The reply adds `needs_restart`, true unless the desktop says it served the new value to the running gateway at once (or the channel is waiting for a restart). Values are write-only: they never appear in a response or in the audit file, which records the action and key names only.
 
 Responses are rebuilt from checked fields. Channel rows are dropped when their id, flags or name are
 malformed. Tokens, allow-list values, redacted previews, local paths, documentation and callback
@@ -189,8 +198,88 @@ A restart and an apply refuse while agents are working: 409 `{error:"gateway_bus
 where `active_agents` is the count, or null when it cannot be read (unknown counts as busy). Sending
 `force: true` skips that check. Both write an audit line with only the action and the force flag.
 
-Errors: 409 `channel_conflict` (Hermes refused to enable the channel, with a cleaned `message`),
+Errors: 409 `channel_conflict` (Hermes refused to enable the channel, with a fixed `message`),
 404 `channel_not_found`, 409 `gateway_busy`, 502 `channel_setup_bad_link`, 410
 `channel_setup_expired` (start a new setup), 404 `channel_setup_not_found`, 409
-`channel_setup_not_ready` (the phone has not finished in Telegram yet; with a cleaned `message`), 400
+`channel_setup_not_ready` (the phone has not finished in Telegram yet; with a fixed `message`), 400
 `desktop_invalid`, 429 `desktop_rate_limited`, 502 `desktop_error`.
+
+## Logs (0.2.8)
+
+| Method and suffix | Request | Response | Per minute |
+| --- | --- | --- | --- |
+| GET `/logs` | Optional `file` = `errors` (default), `agent` or `gateway`; `lines`, integer 1-200, default 100; `level` = `ERROR`, `WARNING`, `INFO` or `ALL` (default) | `{file, lines:[string]}` | 10 |
+
+Any other query key, a repeated key, an unknown value or a value that is not plain letters and digits is 400
+`desktop_invalid` before any backend call. Each name maps to one fixed upstream log of the selected profile.
+The newest lines are returned, oldest first. Every line is redacted on the computer, then cut to 1000
+characters; the whole body stays within 256 KiB, dropping the oldest lines first. An upstream 404 is 404
+`logs_not_found`; any other upstream failure or malformed answer is 502 `desktop_error`.
+
+Redaction replaces the secret with `[hidden]` (a home folder becomes `~`). Timestamps, levels and component names stay.
+Each line is first cut to 4000 characters (a word cut in half at the cut is dropped; in a line with no space, the whole run of
+letters, digits and `+/=_.~%-` that the cut lands in is dropped, unless it is the whole line). Every rule starts only at a
+boundary, so a long run of one character is scanned once, not once per character. Measured with 200 lines of the worst
+shapes found (long runs of slashes, backslashes, dashes, dots, quotes, brackets, `@` and `=`, with and without `Users` or
+`home` words), one request takes under 2 seconds (the slowest case measured was 1.3 s on a busy computer). All lines are
+redacted in a worker thread, off the bridge's event loop, one line per call, so the loop keeps ticking (the longest gap
+measured was 0.05 s); each result is cut to 1000 characters.
+Rules, in the order the bridge applies them:
+
+- control characters (tab, line breaks, the escape character, the C0 and C1 ranges) and text-direction controls (U+061C,
+  U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) are replaced by a space. The rest of a colour sequence such as
+  `[31m` stays as plain text
+- the real home folder of the account running the bridge becomes `~` (either slash style, any letter case, doubled
+  backslashes); `HOST\name` or `DOMAIN\name` with the real account name becomes `~` as well
+- any other `Users\<name>` folder becomes `~`, in the forms `C:\Users\name`, `\\?\C:\Users\name`,
+  `\\?\UNC\HOST\Users\name`, `/c/Users/name`, `/mnt/c/Users/name`, `/cygdrive/c/Users/name`, `\\HOST\Users\name` and
+  `\\HOST\C$\Users\name` (the host is hidden too), `file:///C:/Users/Zed%20Q` and `file:///C%3A/Users/Zed` (percent-encoded), 8.3 short names such
+  as `ZEDQ~1`, and `/Users/name`. A name may contain spaces when a slash follows it directly; without a following slash only
+  the first word is the name
+- `/home/<name>` and `\\wsl$\<distro>\home\<name>` (also `wsl.localhost`) become `~`
+- URL user information (everything up to the last `@` before the path, also for a scheme-relative `//user:pass@host`),
+  the `;jsessionid=` path parameter, every query value and the fragment (the keys stay); the path of a Slack or Discord
+  webhook (the host stays)
+- Telegram bot tokens (digits, a colon, then 30 or more letters, digits, `_` or `-`)
+- the whole value of an `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Cookie` or `Set-Cookie` header, quoted
+  (`'Authorization': 'Basic ...'`, any scheme, an optional `b` prefix) or not (then up to the end of the line or the next
+  closing bracket); a header written as a pair (`('Authorization', 'Basic ...')`, `(b'authorization', b'...')`); a header
+  inside a quoted block after a literal backslash-r or backslash-n; the value after `Bearer`; and the rest of an `Authentication: Basic ...` line (also Digest, Negotiate, NTLM,
+  Bearer, Token), while `Authentication: failed` stays
+- keys with a known prefix: `sk-`, `xox?-`, `ghp_` (and the other `gh?_` forms), `github_pat_`, `AIza`, `hf_`, `glpat-`,
+  `AKIA` or `ASIA` plus 16 characters, `sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`, `npm_`, `pypi-`
+- JWT-like text: `eyJ...` header and payload, three dot-separated parts of 20 or more characters each, and the three-part
+  chat-bot token shape (24, 6 and 27 or more characters)
+- a command-line flag whose name ends in `key`, `token`, `secret`, `password`, `passwd`, `pwd` or `passphrase`, followed by a
+  space and its value (`--token x`)
+- the value after a name that ends in `key`, `token`, `secret`, `password`, `passwd`, `pwd`, `passphrase` or `auth` (and the
+  same with a trailing `_id` or `_base`, as in `aws_access_key_id` and `secret_key_base`), followed by `=` or `:`. The
+  words `key`, `token`, `secret` and `auth` must start a word: they begin the name, follow `_`, `-` or `.`, are a CamelCase
+  capital (`apiKey`), or follow `api`, `access`, `secret`, `private`, `auth`, `bot`, `refresh`, `client`, `master`, `session`,
+  `pass`, `ssh`, `id`, `csrf`, `xsrf`, `jwt`, `app`, `webhook`, `fcm`, `push`, `device`, `priv`, `encryption`, `signing`,
+  `consumer` or `shared` (`apikey`, `csrftoken`); so `monkey: banana` and `turkey=1` stay readable. The password words
+  (`password`, `passwd`, `pwd`, `passphrase`) match anywhere in a name (`PGPASSWORD`, `dbpassword`). The name may have a prefix, dotted
+  (`client.token: x`) or not. The value is one word, a quoted string (with an optional `b`, `r`, `u` or `f` prefix), a whole
+  tuple (`_auth = ('user', 'pw')`), a list or an object in brackets or braces, two levels deep (`{"token": {"value": "x"}}`), a call (`HTTPBasicAuth('admin', 'pw')`), or a placeholder in square brackets of any
+  length without spaces (`[REDACTED]`, `[***]`), replaced as a whole. Only a dotted name ending in `auth` before `:` keeps
+  its message, so a logger such as `gateway.auth:` is not touched
+- email addresses
+- hexadecimal runs of 32 or more characters, and runs of 32 or more base64 or base64url characters (letters, digits, `+`,
+  `/`, `_`, `-`) that contain at least one digit and one letter of any case. A run is kept when it reads as a name: a UUID, or
+  at most 64 pieces separated by `/`, `_`, `-` or `+` that are each a word with at most one group of digits inside and up to
+  four at the end, in one case or Capitalized (so snake_case and CamelCase identifiers, paths and `request-<uuid>` stay)
+- phone-like numbers: 9 or more digits in a row, a `+` number written with spaces, dashes or brackets, or a local number that
+  starts with 0 and has three groups of digits split by spaces or dashes (`0944 123 456`)
+
+Shorter numbers, dotted module names, UUIDs, plain words and URLs without credentials are left as they are.
+
+Not caught (documented limits): a secret that has no digit and no known prefix (letters only), or that is shorter than
+32 characters without a name, flag or header in front of it; a long run of letters with a single group of digits, which reads
+like a name; a value split by quotes inside it (`token=abc'def'ghi` hides only `abc`); a list that holds another list, or an object nested more than two levels deep, under a secret name; names in other languages or scripts
+and names that are not in the list above (`sessionid=`, `credentials=`, `signature=`); a phone number that is not written in
+one of the forms above (for example `0944 123456` with two groups, or with dots); an address without a dot in its domain
+(`zed@localhost`) or with a non-ASCII domain; the header line of a private key (`-----BEGIN PRIVATE KEY-----`), whose body
+is only hidden where it forms a long run; a header written without a separator (`X-API-KEY abc`); and free text that is not
+a recognised secret shape, such as a password quoted in a sentence. The opposite also happens: ten-digit times, chat ids of
+9 or more digits and 40-character commit ids are hidden by the phone and hexadecimal rules, and a `/home/<name>` folder of a
+service account is hidden like any other.

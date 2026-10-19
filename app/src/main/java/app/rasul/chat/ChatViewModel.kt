@@ -26,6 +26,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -110,6 +111,12 @@ sealed interface ChatFailure {
 
     /** The fork request failed; [error] is the specific cause. */
     data class ForkFailed(val error: HermesError) : ChatFailure
+
+    /**
+     * [count] shared items were left out: over the photo limit, not the same kind as the first, or refused.
+     * [other] is a second problem of the same share, told in the same notice.
+     */
+    data class ShareItemsDropped(val count: Int, val other: ChatFailure? = null) : ChatFailure
 }
 
 sealed interface StatusLabel {
@@ -205,6 +212,8 @@ fun interface TargetLoader {
 /** What survives leaving the chat: the run breadcrumb lives under its OWN session id, never under a shared slot. */
 interface RunMemory {
     fun bindRevision(revision: String) = Unit
+    /** Where this chat's unsent composer text is kept; null = not kept. */
+    val drafts: ChatDrafts? get() = null
     suspend fun sessionId(): String
     suspend fun currentSessionId(): String? = null
     suspend fun newSessionFailure(): ChatFailure? = null
@@ -297,6 +306,7 @@ class ChatViewModel(
     internal var onFinished: ((String, ChatState) -> Unit)? = null
 
     fun close() {
+        flushDraft()
         onFinished = null
         notificationReplies.close()
         chatScope.coroutineContext[Job]?.cancel()
@@ -377,6 +387,8 @@ class ChatViewModel(
                 is HermesResult.Ok -> {
                     target = r.value
                     readSessionId()
+                    // Reading the draft never holds up the chat becoming ready.
+                    chatScope.launch { restoreSavedDraft() }
                     loadSessionControl(r.value)
                     // Send is available after resolving the target and stored run; load history before reattaching.
                     val stored = try {
@@ -614,12 +626,14 @@ class ChatViewModel(
     /** Puts an unsent text back, at most once. Touches the composer only, never the run; after the run changed it goes after what was typed since. */
     private fun restoreDraft(text: String, sameRun: Boolean, keptReply: Boolean = false) =
         run {
+            composerTouched = true
             var added = false
             _state.update {
                 added = !draftHas(it.draft, text)
                 if (!added) it else it.copy(draft = if (sameRun) joinDraft(text, it.draft) else joinDraft(it.draft, text))
             }
             if (added && keptReply) keptReplies.add(text)
+            if (added) persistDraft()
         }
 
     private fun persist(runId: String?, lastEventId: Long? = null) {
@@ -724,9 +738,55 @@ class ChatViewModel(
 
     fun onDraft(text: String) {
         if (preparingSend) return
+        composerTouched = true
         _state.update { it.copy(draft = text) }
         // A kept reply the user edited away must not delete a line typed later.
         keptReplies.retainAll { draftHas(text, it) }
+        scheduleDraftSave(text)
+    }
+
+    private var typedDraft: String? = null
+    private var draftSaveJob: Job? = null
+
+    /** Set by any typing, send or restore: the saved draft, read later, then must not overwrite what the user did. */
+    @Volatile private var composerTouched = false
+
+    /** Text typed since the last save is written once the typing pauses. */
+    private fun scheduleDraftSave(text: String) {
+        if (memory.drafts == null) return
+        typedDraft = text
+        draftSaveJob?.cancel()
+        draftSaveJob = chatScope.launch {
+            delay(DRAFT_SAVE_DELAY_MS)
+            flushDraft()
+        }
+    }
+
+    private fun flushDraft() {
+        val text = typedDraft ?: return
+        typedDraft = null
+        memory.drafts?.save(sessionId.orEmpty(), text)
+    }
+
+    /** The composer text now is what the chat keeps; blank clears it. Drops any save still waiting for the typing to pause. */
+    private fun persistDraft() {
+        val drafts = memory.drafts ?: return
+        draftSaveJob?.cancel()
+        typedDraft = null
+        val text = _state.value.draft
+        if (text.isBlank()) drafts.clear(sessionId.orEmpty()) else drafts.save(sessionId.orEmpty(), text)
+    }
+
+    /** What was typed and not sent last time; text already typed into this composer wins. */
+    private suspend fun restoreSavedDraft() {
+        val saved = try {
+            memory.drafts?.load(sessionId.orEmpty())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } ?: return
+        if (saved.isNotBlank()) _state.update { if (!composerTouched && it.draft.isEmpty()) it.copy(draft = saved) else it }
     }
 
     /**
@@ -736,19 +796,27 @@ class ChatViewModel(
      * arrival simply stays staged for the next send.
      */
     fun addAttachments(items: List<PendingAttachment>) {
-        if (items.isEmpty()) return
+        stageOrRefusal(items)?.let { refusal -> _state.update { it.fail(refusal) } }
+    }
+
+    /** Stages [items]; the reason they were refused instead, or null. */
+    private fun stageOrRefusal(items: List<PendingAttachment>): ChatFailure? {
+        if (items.isEmpty()) return null
         val current = _state.value.attachments
         val next = current + items
         val hasFile = next.any { it is PendingAttachment.TextFile }
         if ((hasFile && next.size > 1) || (current.isNotEmpty() && items.any { it is PendingAttachment.TextFile })) {
-            _state.update { it.fail(ChatFailure.AttachmentKindMixed) }
-            return
+            return ChatFailure.AttachmentKindMixed
         }
-        if (next.size > RunInputLimits.MAX_PHOTOS) {
-            _state.update { it.fail(ChatFailure.AttachmentTooManyPhotos) }
-            return
-        }
+        if (next.size > RunInputLimits.MAX_PHOTOS) return ChatFailure.AttachmentTooManyPhotos
         _state.update { it.copy(attachments = next) }
+        return null
+    }
+
+    /** One notice per share: what was left out and, when it applies, the other reason with it. */
+    private fun reportShare(dropped: Int, failure: ChatFailure?) {
+        val notice = if (dropped > 0) ChatFailure.ShareItemsDropped(dropped, failure) else failure
+        if (notice != null) _state.update { it.fail(notice) }
     }
 
     fun removeAttachment(key: Long) {
@@ -776,6 +844,36 @@ class ChatViewModel(
     }
 
     private var inFlightPhotos = 0
+
+    /**
+     * A share from another app: [text] is appended to the draft, the already read [items] stage
+     * like a pick (up to the photo limit; the rest is reported as not added together with
+     * [dropped]), and what could not be added is reported in the chat. Never sends. Runs on this
+     * ViewModel's scope and keeps Send off until the items are staged. The text waits out a send
+     * that is being prepared, so it lands in the draft after that send clears it.
+     */
+    fun acceptShare(text: String, items: List<PendingAttachment>, failure: ChatFailure?, dropped: Int) {
+        _state.update { it.copy(pendingAttachments = it.pendingAttachments + 1) }
+        chatScope.launch {
+            try {
+                _state.first { it.load != ChatLoad.Loading }
+                if (text.isNotEmpty()) appendToDraft(text)
+                if (items.isNotEmpty()) {
+                    failure?.let(::attachError)
+                    stageLoaded(items, sessionId, dropped)
+                } else reportShare(dropped, failure)
+            } finally {
+                _state.update { it.copy(pendingAttachments = (it.pendingAttachments - 1).coerceAtLeast(0)) }
+            }
+        }
+    }
+
+    private suspend fun appendToDraft(text: String) {
+        while (true) {
+            val s = _state.first { !it.preparingSend }
+            if (_state.compareAndSet(s, s.copy(draft = joinDraft(s.draft, text)))) return
+        }
+    }
 
     /** The file picker's result; same ViewModel-owned loading as [loadPhotos]. */
     fun loadFile(uri: Uri) {
@@ -813,13 +911,27 @@ class ChatViewModel(
      * nothing is staged and the photo-too-large message shows. The session is re-checked after
      * every suspension: a pick made in another chat is dropped, never staged into this one.
      */
-    private suspend fun stageLoaded(items: List<PendingAttachment>, atSession: String?) = stagingLock.withLock {
+    private suspend fun stageLoaded(loaded: List<PendingAttachment>, atSession: String?, sharedDropped: Int? = null) = stagingLock.withLock {
         if (sessionId != atSession) return@withLock
         val loader = attachLoader
-        var toAdd = items
         val staged = _state.value.attachments
+        var items = loaded
+        var droppedCount = 0
+        if (sharedDropped != null) {
+            // A share keeps what fits next to the photos already staged and reports the rest.
+            val photosOnly = staged.none { it is PendingAttachment.TextFile } && items.none { it is PendingAttachment.TextFile }
+            val room = (RunInputLimits.MAX_PHOTOS - staged.size).coerceAtLeast(0)
+            val cut = if (photosOnly && items.size > room) items.size - room else 0
+            items = items.take(items.size - cut)
+            droppedCount = sharedDropped + cut
+            if (items.isEmpty()) {
+                reportShare(droppedCount, null)
+                return@withLock
+            }
+        }
+        var toAdd = items
         if (staged.size + items.size > RunInputLimits.MAX_PHOTOS) {
-            addAttachments(items) // refuses with the too-many message before any refit
+            reportShare(droppedCount, stageOrRefusal(items)) // refuses with the too-many message before any refit
             return@withLock
         }
         if (loader != null && items.any { it is PendingAttachment.Photo }) {
@@ -830,14 +942,14 @@ class ChatViewModel(
                 val fitted = over.associate { it.key to loader.fit(it, budget)?.copy(key = PendingAttachment.newKey()) }
                 if (sessionId != atSession) return@withLock
                 if (fitted.values.any { it == null }) {
-                    _state.update { it.fail(ChatFailure.PhotoTooLarge) }
+                    reportShare(droppedCount, ChatFailure.PhotoTooLarge)
                     return@withLock
                 }
                 _state.update { s -> s.copy(attachments = s.attachments.map { fitted[it.key] ?: it }) }
                 toAdd = items.map { fitted[it.key] ?: it }
             }
         }
-        addAttachments(toAdd)
+        reportShare(droppedCount, stageOrRefusal(toAdd))
     }
 
     /** Captures notification input before any asynchronous work. */
@@ -903,13 +1015,19 @@ class ChatViewModel(
 
     private fun startRun(t: HermesTarget, text: String, input: JsonElement, staged: List<PendingAttachment> = emptyList(), clearDraft: Boolean = true, fromNotification: Boolean = false) {
         // The idempotency key tracks the send intent: same text + same staged attachments reuse it.
+        composerTouched = true
         val keySeed = if (staged.isEmpty()) text else text + "|" + staged.joinToString(",") { it.key.toString() }
         val key = pendingKey?.takeIf { it.first == keySeed }?.second ?: newKey()
         pendingKey = keySeed to key
         check(historyLoaded && pendingTurn == null)
         val message = ChatMessage(nextId++, MessageKind.User, text, attachments = staged.map { it.toSent() }, atMillis = System.currentTimeMillis())
         pendingTurn = PendingTurn(Anchor.Known(serverHistory.lastOrNull()?.key), messages = listOf(message))
-        if (clearDraft) keptReplies.clear()
+        if (clearDraft) {
+            keptReplies.clear()
+            // Still stored until the server accepts the run; a failed start keeps it.
+            draftSaveJob?.cancel()
+            typedDraft = null
+        }
         _state.update {
             it.copy(draft = if (clearDraft) "" else it.draft, terminal = null, terminalFailure = null, finishedRunId = null, run = ActiveRun(null, now(), StatusLabel.Starting)).display()
         }
@@ -931,6 +1049,8 @@ class ChatViewModel(
                         it.copy(draft = if (draftHas(it.draft, text)) dropDraftLine(it.draft, text) else it.draft)
                     }
                     pendingKey = null
+                    memory.drafts?.accepted(session.orEmpty())
+                    persistDraft()
                     persist(id)
                     followJob = chatScope.launch { collectRun(t, id, null) }
                 }
@@ -946,13 +1066,17 @@ class ChatViewModel(
                         }
                     }
                     if (kept) keptReplies.add(text)
+                    persistDraft()
                 }
             }
         }
     }
 
     private fun steer(t: HermesTarget, id: String, text: String) {
+        composerTouched = true
         keptReplies.clear()
+        draftSaveJob?.cancel()
+        typedDraft = null
         _state.update { it.copy(draft = "") }
         chatScope.launch {
             // One steer at a time, in the order typed; a run that ended while this one waited gets nothing sent.
@@ -965,7 +1089,10 @@ class ChatViewModel(
             }
             when {
                 r == null -> restoreDraft(text, sameRun = false)
-                r is HermesResult.Ok -> updateRun(id) { it.msg(MessageKind.UserSteer, text) }
+                r is HermesResult.Ok -> {
+                    persistDraft()
+                    updateRun(id) { it.msg(MessageKind.UserSteer, text) }
+                }
                 r is HermesResult.Err -> {
                     restoreDraft(text, sameRun = isCurrent(id))
                     if (!isCurrent(id)) return@launch
@@ -1237,6 +1364,8 @@ class ChatViewModel(
     }
 
     companion object {
+        /** Typing must pause this long before the composer text is saved. */
+        const val DRAFT_SAVE_DELAY_MS = 500L
         /** Markers for Info messages; the screen maps them to string resources. */
         const val INFO_STOPPED = "stopped"
         const val INFO_REPLAY_TRUNCATED = "replay_truncated"

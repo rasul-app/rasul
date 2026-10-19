@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
@@ -61,6 +62,23 @@ class AppContainerWiringTest {
         } finally {
             scope.cancel()
             runCatching { server.shutdown() }
+        }
+    }
+
+    @Test fun theContainersPinsFollowThePcRemovalNotItsEdit() = runBlocking {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val container = AppContainer(context, appScope = scope)
+            val id = container.connections.save(app.rasul.data.Connection("", "A", "https://a.example.invalid"), null)
+            container.pins.pin(id, null, "s1")
+            // Editing the PC keeps the pin; deleting it takes the pin along.
+            container.connections.save(app.rasul.data.Connection(id, "A", "https://moved.example.invalid"), null)
+            assertEquals(listOf("s1"), container.pins.pinned(id, null).first())
+            container.connections.delete(id)
+            assertTrue(container.pins.pinned(id, null).first().isEmpty())
+        } finally {
+            scope.cancel()
         }
     }
 

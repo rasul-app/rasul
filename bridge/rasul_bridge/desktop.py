@@ -18,8 +18,9 @@ import sys
 import time
 from urllib.parse import urlencode, urlsplit
 
-from .channels import CHANNEL, PAIRING, USER_ID, Refused, handle as channel_handle
+from .channels import BODY_LIMIT, CHANNEL, PAIRING, USER_ID, Refused, handle as channel_handle, valid_body
 from .http import HTTPError, Reader, headers
+from . import logs
 from .proxy import Upstream, response_body
 from .updater import Updater, clean
 
@@ -32,6 +33,7 @@ BODIES = {"toggle": {"name", "enabled"}, "install": {"identifier"}, "update_post
           "mcp_enabled": {"enabled"}, "mcp_install": {"id"}, "chan_enabled": {"enabled"},
           "chan_restart": {"force"}, "chan_apply": {"allowed_user_ids", "force"}}
 OPTIONAL = {"chan_setup": {"bot_name"}}
+CHECKED = ("chan_wa_setup", "chan_wa_apply", "chan_settings")
 RULES = [
     ("GET", r"/jobs/([A-Za-z0-9_-]{1,200})/runs", "runs", 10),
     ("GET", r"/skills", "skills", 30),
@@ -55,6 +57,12 @@ RULES = [
     ("GET", rf"/channels/telegram/setup/({PAIRING})", "chan_status", 30),
     ("POST", rf"/channels/telegram/setup/({PAIRING})/apply", "chan_apply", 3),
     ("DELETE", rf"/channels/telegram/setup/({PAIRING})", "chan_cancel", 6),
+    ("POST", r"/channels/whatsapp/setup", "chan_wa_setup", 3),
+    ("GET", rf"/channels/whatsapp/setup/({PAIRING})", "chan_wa_status", 30),
+    ("POST", rf"/channels/whatsapp/setup/({PAIRING})/apply", "chan_wa_apply", 3),
+    ("DELETE", rf"/channels/whatsapp/setup/({PAIRING})", "chan_wa_cancel", 6),
+    ("PUT", rf"/channels/({CHANNEL})/settings", "chan_settings", 6),
+    ("GET", r"/logs", "logs", 10),
 ]
 USAGE = {"input_tokens": "total_input", "output_tokens": "total_output",
          "cache_read_tokens": "total_cache_read", "reasoning_tokens": "total_reasoning",
@@ -459,7 +467,9 @@ class Desktop:
             raise HTTPError(404, "Route not found")
         match, name, cap = selected
         query = {}
-        if parsed.query:
+        if name == "logs":
+            query = logs.parse(parsed.query)
+        elif parsed.query:
             query_key, maximum = ("limit", 100) if name == "runs" else ("days", 365)
             if name not in ("runs", "usage") or not re.fullmatch(query_key + r"=[1-9][0-9]{0,2}", parsed.query):
                 raise HTTPError(400, "desktop_invalid")
@@ -469,7 +479,13 @@ class Desktop:
             query[query_key] = number
         value = None
         try:
-            if name in BODIES or name in OPTIONAL:
+            if name in CHECKED:
+                if len(body) > BODY_LIMIT.get(name, 1024):
+                    raise ValueError
+                value = decode(body) if body else {}
+                if not valid_body(name, value):
+                    raise ValueError
+            elif name in BODIES or name in OPTIONAL:
                 if len(body) > 1024:
                     raise ValueError
                 value = decode(body) if body or name in BODIES else {}
@@ -515,7 +531,7 @@ class Desktop:
                     return await upstream.collect_json(verb, path + "?" + urlencode({"profile": profile, **parameters}), token, data, soft)
                 result = await self.execute(device, profile, name, match, query, value, request, token)
                 code = 202 if name == "install" else 200
-                if name.startswith("chan_"):
+                if name.startswith("chan_") or name == "logs":
                     code, result = result
                 encoded = json.dumps(result, separators=(",", ":"), allow_nan=False).encode()
                 if (len(encoded) > CAP or contains_credential(result, token)
@@ -581,6 +597,8 @@ class Desktop:
     async def execute(self, device, profile, name, match, query, value, request, token):
         if name.startswith("chan_"):
             return await channel_handle(self, profile, name, match, value, request)
+        if name == "logs":
+            return await logs.handle(query, request)
         if name in ("skills", "toggle"):
             skills = rows(await request("GET", "/api/skills"))
             if name == "toggle":

@@ -113,7 +113,12 @@ class ApprovalAlertsTest {
             opened.complete(Unit)
             events.receiveAsFlow().collect { emit(it) }
         }
-        override suspend fun answer(requestId: String, choice: String) = ApprovalAnsweredDto(requestId, "answered")
+        val answers = mutableListOf<Pair<String, String>>()
+        var answerResult: suspend (String, String) -> ApprovalAnsweredDto = { id, _ -> ApprovalAnsweredDto(id, "answered") }
+        override suspend fun answer(requestId: String, choice: String): ApprovalAnsweredDto {
+            answers += requestId to choice
+            return answerResult(requestId, choice)
+        }
     }
 
     private fun fakeStore(): DataStore<Preferences> {
@@ -265,7 +270,8 @@ class ApprovalAlertsTest {
             assertEquals(context.getString(R.string.approval_alert_title, "Research", "shell"),
                 notification.extras.getCharSequence(Notification.EXTRA_TITLE))
             assertEquals("Run the cleanup.", notification.extras.getCharSequence(Notification.EXTRA_TEXT))
-            assertTrue((notification.actions ?: emptyArray()).isEmpty())
+            assertEquals(listOf(context.getString(R.string.approval_action_once), context.getString(R.string.approval_action_deny)),
+                notification.actions.map { it.title.toString() })
             assertEquals(context.getString(R.string.approval_alert_waiting),
                 notification.publicVersion.extras.getCharSequence(Notification.EXTRA_TITLE))
             // The ongoing watcher counts paired PCs and offers Stop.
@@ -460,5 +466,198 @@ class ApprovalAlertsTest {
         assertTrue(isApprovalsRoute("approvals/" + Uri.encode("id with space") + "/default"))
         listOf("approvals/", "approvals/a", "approvals/a/b/c", "approvals/%61/default", "other/a/b", "approvals/a/Default")
             .forEach { assertFalse(it, isApprovalsRoute(it)) }
+    }
+
+    private fun answerIntent(requestId: String, choice: String, bridge: String, profile: String = "default") =
+        android.content.Intent(context, ApprovalWatchService::class.java)
+            .setAction(app.rasul.notifications.ACTION_APPROVAL_ANSWER)
+            .putExtra(app.rasul.notifications.EXTRA_APPROVAL_BRIDGE, bridge)
+            .putExtra(app.rasul.notifications.EXTRA_APPROVAL_PROFILE, profile)
+            .putExtra(app.rasul.notifications.EXTRA_APPROVAL_REQUEST, requestId)
+            .putExtra(app.rasul.notifications.EXTRA_APPROVAL_CHOICE, choice)
+
+    private suspend fun TestScope.withAlert(requestId: String, lockOn: Boolean = false,
+        body: suspend (FakeApprovals, org.robolectric.android.controller.ServiceController<ApprovalWatchService>, String) -> Unit) {
+        val api = wireService(settingOn = true, lockOn = lockOn)
+        val controller = Robolectric.buildService(ApprovalWatchService::class.java).create()
+        try {
+            container.bridgeBots.state.first { it.groups.any { g -> g.profiles.isNotEmpty() } }
+            api.opened.await()
+            api.events.send(ApprovalsEvent.Snapshot(listOf(item(requestId))))
+            pump()
+            body(api, controller, container.bridges.bridges.first().single().bridgeId)
+        } finally { controller.destroy() }
+    }
+
+    /** The client lookup leaves the test dispatcher, so poll real time until [done]. */
+    private fun TestScope.settle(done: () -> Boolean) {
+        repeat(400) { runCurrent(); if (done()) return; Thread.sleep(25) }
+        runCurrent()
+    }
+
+    private fun notices() = manager.activeNotifications.filter { it.id == app.rasul.notifications.APPROVAL_NOTICE_ID }
+
+    @Test fun appLockOnPostsTheAlertWithoutButtons() = runTest(dispatcher) {
+        withAlert("c".repeat(32), lockOn = true) { _, _, _ ->
+            val posted = alerts().single().notification
+            assertTrue((posted.actions ?: emptyArray()).isEmpty())
+            assertNull(posted.publicVersion?.actions)
+        }
+    }
+
+    @Test fun approveOnceAnswersAndCancelsTheAlert() = runTest(dispatcher) {
+        val id = "d".repeat(32)
+        withAlert(id) { api, controller, bridge ->
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            settle { alerts().isEmpty() }
+            assertEquals(listOf(id to "once"), api.answers)
+            assertTrue(alerts().isEmpty())
+            assertTrue(notices().isEmpty())
+        }
+    }
+
+    @Test fun alreadyAnsweredShowsATimedSilentNotice() = runTest(dispatcher) {
+        val id = "e".repeat(32)
+        withAlert(id) { api, controller, bridge ->
+            api.answerResult = { _, _ -> throw app.rasul.bridge.ApprovalsException(app.rasul.bridge.ApprovalsError.Conflict) }
+            controller.get().onStartCommand(answerIntent(id, "deny", bridge), 0, 1)
+            settle { notices().isNotEmpty() }
+            assertTrue(alerts().isEmpty())
+            val notice = notices().single().notification
+            assertEquals(context.getString(R.string.approval_notice_answered), notice.extras.getCharSequence(Notification.EXTRA_TITLE))
+            assertEquals(app.rasul.notifications.APPROVAL_NOTICE_TIMEOUT_MS, notice.timeoutAfter)
+        }
+    }
+
+    @Test fun failedAnswerRepostsTheAlertWithItsButtonsAndTheError() = runTest(dispatcher) {
+        val id = "f".repeat(32)
+        withAlert(id) { api, controller, bridge ->
+            api.answerResult = { _, _ -> throw app.rasul.bridge.ApprovalsException(app.rasul.bridge.ApprovalsError.DeviceRevoked) }
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            settle { alerts().singleOrNull()?.notification?.actions?.size == 2 }
+            val posted = alerts().single().notification
+            assertEquals(2, posted.actions.size)
+            assertTrue(posted.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
+            assertTrue(posted.extras.getCharSequence(Notification.EXTRA_TEXT).toString().startsWith(context.getString(R.string.bridge_revoked)))
+            assertFalse(posted.extras.getCharSequence(Notification.EXTRA_TEXT).toString().contains("SECRET-COMMAND-TEXT"))
+        }
+    }
+
+    @Test fun lockedPhoneSendsNothingAndLeavesTheAlertUnchanged() = runTest(dispatcher) {
+        val id = "8".repeat(32)
+        withAlert(id) { api, controller, bridge ->
+            val keyguard = context.getSystemService(android.app.KeyguardManager::class.java)
+            shadowOf(keyguard).setIsDeviceLocked(true)
+            val before = alerts().single()
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            runCurrent(); runCurrent()
+            assertTrue(api.answers.isEmpty())
+            val after = alerts().single()
+            assertSame(before.notification, after.notification)
+            val posted = after.notification
+            assertEquals(2, posted.actions.size)
+            assertEquals("Run the cleanup.", posted.extras.getCharSequence(Notification.EXTRA_TEXT))
+            assertTrue(posted.flags and Notification.FLAG_LOCAL_ONLY != 0)
+            // Once the phone is unlocked the same button works.
+            shadowOf(keyguard).setIsDeviceLocked(false)
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 2)
+            settle { alerts().isEmpty() }
+            assertEquals(listOf(id to "once"), api.answers)
+        }
+    }
+
+    @Test fun tapBeforeTheAppLockStateLoadsWaitsThenAnswers() = runTest(dispatcher) {
+        val id = "7".repeat(32)
+        withAlert(id) { api, controller, bridge ->
+            val gate = CompletableDeferred<Unit>()
+            val enabledKey = androidx.datastore.preferences.core.booleanPreferencesKey("app_lock_enabled_v1")
+            val gated = object : DataStore<Preferences> {
+                override val data: Flow<Preferences> = flow {
+                    gate.await()
+                    emit(androidx.datastore.preferences.core.preferencesOf(enabledKey to false))
+                }
+                override suspend fun updateData(transform: suspend (Preferences) -> Preferences) = emptyPreferences()
+            }
+            install("appLock", AppLockController(AppLockSettings(gated), scope))
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            runCurrent(); runCurrent()
+            assertTrue(api.answers.isEmpty())
+            gate.complete(Unit)
+            settle { alerts().isEmpty() }
+            assertEquals(listOf(id to "once"), api.answers)
+        }
+    }
+
+    @Test fun tapIsDroppedWhenTheAppLockStateNeverLoads() = runTest(dispatcher) {
+        val id = "6".repeat(32)
+        withAlert(id) { api, controller, bridge ->
+            val never = object : DataStore<Preferences> {
+                override val data: Flow<Preferences> = flow { awaitCancellation() }
+                override suspend fun updateData(transform: suspend (Preferences) -> Preferences) = emptyPreferences()
+            }
+            install("appLock", AppLockController(AppLockSettings(never), scope))
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            advanceTimeBy(5_001); runCurrent(); runCurrent()
+            assertTrue(api.answers.isEmpty())
+        }
+    }
+
+    @Test fun answerTapIsIgnoredWhileTheAppLockIsOn() = runTest(dispatcher) {
+        val id = "9".repeat(32)
+        withAlert(id, lockOn = true) { api, controller, bridge ->
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            runCurrent(); runCurrent()
+            assertTrue(api.answers.isEmpty())
+            assertEquals(1, alerts().size)
+        }
+    }
+
+    /** A freshly started service whose feed never delivered the request: `posted` and the decider are empty. */
+    private suspend fun TestScope.withFreshService(
+        body: suspend (FakeApprovals, org.robolectric.android.controller.ServiceController<ApprovalWatchService>, String) -> Unit) {
+        val api = wireService(settingOn = true)
+        val controller = Robolectric.buildService(ApprovalWatchService::class.java).create()
+        try {
+            container.bridgeBots.state.first { it.groups.any { g -> g.profiles.isNotEmpty() } }
+            api.opened.await()
+            body(api, controller, container.bridges.bridges.first().single().bridgeId)
+        } finally { controller.destroy() }
+    }
+
+    @Test fun failedAnswerInAFreshProcessLeavesAnAlertWithTheError() = runTest(dispatcher) {
+        val id = "5".repeat(32)
+        withFreshService { api, controller, bridge ->
+            api.answerResult = { _, _ -> throw app.rasul.bridge.ApprovalsException(app.rasul.bridge.ApprovalsError.DeviceRevoked) }
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            settle { alerts().any { it.notification.extras.getCharSequence(Notification.EXTRA_TEXT) == context.getString(R.string.bridge_revoked) } }
+            val shown = alerts().single()
+            assertEquals(approvalAlertTag(bridgeBotId(bridge, "default"), id), shown.tag)
+            val posted = shown.notification
+            assertEquals(context.getString(R.string.bridge_revoked), posted.extras.getCharSequence(Notification.EXTRA_TEXT))
+            assertTrue((posted.actions ?: emptyArray()).isEmpty())
+            assertTrue(posted.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
+            assertNotNull(posted.contentIntent)
+        }
+    }
+
+    @Test fun lockedTapInAFreshProcessPostsNothing() = runTest(dispatcher) {
+        withFreshService { api, controller, bridge ->
+            shadowOf(context.getSystemService(android.app.KeyguardManager::class.java)).setIsDeviceLocked(true)
+            controller.get().onStartCommand(answerIntent("4".repeat(32), "once", bridge), 0, 1)
+            runCurrent(); runCurrent()
+            assertTrue(api.answers.isEmpty())
+            assertTrue(alerts().isEmpty())
+        }
+    }
+
+    @Test fun answeredElsewhereInAFreshProcessStillCancelsTheAlert() = runTest(dispatcher) {
+        val id = "3".repeat(32)
+        withFreshService { api, controller, bridge ->
+            api.answerResult = { _, _ -> throw app.rasul.bridge.ApprovalsException(app.rasul.bridge.ApprovalsError.Conflict) }
+            controller.get().onStartCommand(answerIntent(id, "once", bridge), 0, 1)
+            settle { notices().isNotEmpty() }
+            assertTrue(alerts().isEmpty())
+            assertEquals(1, notices().size)
+        }
     }
 }

@@ -193,6 +193,18 @@ data class UsageReportDto(
     @SerialName("period_days") val periodDays: Int? = null,
 )
 
+/** The answer of GET logs (docs/bridge-desktop.md "Logs"): [lines] are oldest first and already redacted on the PC. */
+@Serializable
+data class LogsDto(val file: String = "", val lines: List<String> = emptyList())
+
+/** The log files the bridge serves, as the `file` query value. */
+enum class LogFile(val query: String) { Errors("errors"), Agent("agent"), Gateway("gateway") }
+
+/** The `level` query values; [All] is the default and shows every line. */
+enum class LogLevel(val query: String) { All("ALL"), Error("ERROR"), Warning("WARNING"), Info("INFO") }
+
+const val LOG_LINES_MAX = 200
+
 enum class DesktopError(val message: Int) {
     Unavailable(R.string.desktop_unavailable),
     DesktopFailed(R.string.desktop_error),
@@ -221,6 +233,9 @@ enum class DesktopError(val message: Int) {
     UpdateNotStarted(R.string.update_err_not_started),
     CheckFailed(R.string.update_err_check_failed),
     NotApplicable(R.string.update_err_not_applicable),
+
+    /** The selected log file does not exist yet on the PC (token `logs_not_found`). */
+    LogsNotFound(R.string.logs_err_not_found),
 
     /** The MCP routes have tighter per-minute limits (test 3, install 1), so their 429 reads differently. */
     McpRateLimited(R.string.mcp_err_rate_limited),
@@ -255,6 +270,7 @@ internal fun desktopError(status: Int, body: String): DesktopError {
         token == "desktop_error" -> DesktopError.DesktopFailed
         token == "desktop_invalid" -> DesktopError.InvalidRequest
         token == "desktop_rate_limited" -> DesktopError.RateLimited
+        token == "logs_not_found" -> DesktopError.LogsNotFound
         status == 400 -> DesktopError.InvalidRequest
         status == 401 || status == 403 -> DesktopError.DeviceRevoked
         status == 404 -> DesktopError.NotFound
@@ -289,6 +305,9 @@ interface DesktopApi {
     suspend fun installSkill(identifier: String)
     suspend fun mcpServers(): List<McpServerDto>
     suspend fun usage(days: Int): UsageReportDto
+
+    /** The newest [lines] (1-200) of one Hermes log, oldest first; filtered by [level] unless it is [LogLevel.All]. */
+    suspend fun logs(file: LogFile, lines: Int = LOG_LINES_MAX, level: LogLevel = LogLevel.All): LogsDto
 
     suspend fun hermesUpdate(): HermesUpdateDto
 
@@ -383,6 +402,12 @@ class BridgeDesktopApi(private val endpoint: BridgeEndpoint) : DesktopApi {
         send("usage", query = mapOf("days" to days.coerceIn(1, 365).toString())) {
             json.decodeFromString<UsageReportDto>(it)
         }
+
+    override suspend fun logs(file: LogFile, lines: Int, level: LogLevel): LogsDto =
+        send(
+            "logs",
+            query = mapOf("file" to file.query, "lines" to lines.coerceIn(1, LOG_LINES_MAX).toString(), "level" to level.query),
+        ) { json.decodeFromString<LogsDto>(it) }
 
     override suspend fun hermesUpdate(): HermesUpdateDto =
         send("hermes/update") { json.decodeFromString<HermesUpdateDto>(it) }

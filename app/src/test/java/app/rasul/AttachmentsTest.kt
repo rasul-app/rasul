@@ -225,6 +225,14 @@ class AttachmentsTest {
         assertTrue(r.thumb.isNotEmpty())
     }
 
+    @Test fun reencodeKeepsThePhotoLongEdgeAtTheCapNotBelow() {
+        for ((w, h) in listOf(4000 to 3000, 3201 to 2000)) {
+            val r = reencodePhoto(jpeg(Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888))) as PhotoResult.Ok
+            val out = BitmapFactory.decodeByteArray(r.jpeg, 0, r.jpeg.size)
+            assertEquals("${w}x$h", RunInputLimits.PHOTO_LONG_EDGE, maxOf(out.width, out.height))
+        }
+    }
+
     @Test fun decodeRemoteThumbReadsDataUrlsOnly() {
         val bytes = jpeg(Bitmap.createBitmap(64, 48, Bitmap.Config.ARGB_8888))
         val url = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(bytes)

@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,7 +48,7 @@ import app.rasul.bridge.ChannelDto
 import app.rasul.bridge.ChannelError
 import app.rasul.bridge.ChannelFailure
 import app.rasul.bridge.ChannelState
-import app.rasul.bridge.ChannelFieldDto
+import app.rasul.bridge.WhatsappMode
 import app.rasul.desktop.DesktopHeader
 import app.rasul.desktop.DesktopMessage
 import app.rasul.ui.components.ChipKind
@@ -97,6 +99,18 @@ internal class ChannelsActions(
     val onApply: () -> Unit = {},
     val onAgain: () -> Unit = {},
     val onDone: () -> Unit = {},
+    val onSettings: (String) -> Unit = {},
+    val onWaStart: () -> Unit = {},
+    val onWaMode: (WhatsappMode) -> Unit = {},
+    val onWaNumbers: (String) -> Unit = {},
+    val onWaBegin: () -> Unit = {},
+    val onWaApply: () -> Unit = {},
+    val onWaCancel: () -> Unit = {},
+    val onWaAgain: () -> Unit = {},
+    val onWaDone: () -> Unit = {},
+    val onSettingInput: (String, String) -> Unit = { _, _ -> },
+    val onSettingClear: (String) -> Unit = {},
+    val onSettingsSave: () -> Unit = {},
 )
 
 @Composable
@@ -115,6 +129,7 @@ internal fun busyBody(agents: Int?): String =
 @Composable
 private fun noticeText(notice: ChannelNotice): String = when (notice) {
     ChannelNotice.Restarted -> stringResource(R.string.chan_restarted)
+    is ChannelNotice.SettingsSaved -> stringResource(R.string.chan_set_saved, notice.name)
     is ChannelNotice.Test -> when {
         notice.ok && notice.message != null -> stringResource(R.string.chan_test_ok_msg, notice.name, notice.message)
         notice.ok -> stringResource(R.string.chan_test_ok, notice.name)
@@ -140,10 +155,17 @@ fun ChannelsScreen(vm: ChannelsViewModel, targetName: String, onBack: () -> Unit
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) vm.onVisible()
         onDispose { lifecycle.removeObserver(observer); vm.onHidden() }
     }
-    val leaveSetup = { if (state.setup is TelegramSetup.Done) vm.finishSetup() else vm.cancelSetup() }
-    BackHandler(enabled = state.setup != null) { leaveSetup() }
+    val leaveSetup = {
+        when {
+            state.setup != null -> if (state.setup is TelegramSetup.Done) vm.finishSetup() else vm.cancelSetup()
+            state.whatsapp != null -> if (state.whatsapp is WhatsappSetup.Done) vm.finishWhatsapp() else vm.cancelWhatsapp()
+            else -> vm.closeSettings()
+        }
+    }
+    val inSubScreen = state.setup != null || state.whatsapp != null || state.settings != null
+    BackHandler(enabled = inSubScreen) { leaveSetup() }
     val actions = ChannelsActions(
-        onBack = { if (state.setup != null) leaveSetup() else onBack() },
+        onBack = { if (inSubScreen) leaveSetup() else onBack() },
         onRetry = vm::refresh,
         onToggle = vm::toggle,
         onTest = vm::test,
@@ -160,14 +182,27 @@ fun ChannelsScreen(vm: ChannelsViewModel, targetName: String, onBack: () -> Unit
         onApply = vm::applyTelegram,
         onAgain = vm::restartSetup,
         onDone = vm::finishSetup,
+        onSettings = vm::openSettings,
+        onWaStart = vm::startWhatsapp,
+        onWaMode = vm::setWhatsappMode,
+        onWaNumbers = vm::setWhatsappNumbers,
+        onWaBegin = vm::beginWhatsapp,
+        onWaApply = vm::applyWhatsapp,
+        onWaCancel = vm::cancelWhatsapp,
+        onWaAgain = vm::restartWhatsapp,
+        onWaDone = vm::finishWhatsapp,
+        onSettingInput = vm::setSettingInput,
+        onSettingClear = vm::toggleSettingClear,
+        onSettingsSave = vm::saveSettings,
     )
     ChannelsContent(state, targetName, actions)
     (state.busy as? BusyState.Asking)?.let { asking ->
+        val whatsapp = asking.action == BusyAction.WhatsappApply
         ConfirmDialog(
             title = stringResource(R.string.chan_busy_title),
-            body = busyBody(asking.activeAgents),
+            body = if (whatsapp) stringResource(R.string.chan_wa_busy_body) else busyBody(asking.activeAgents),
             cancelText = stringResource(R.string.chan_busy_wait),
-            confirmText = stringResource(R.string.chan_busy_now),
+            confirmText = stringResource(if (whatsapp) R.string.chan_wa_busy_now else R.string.chan_busy_now),
             onCancel = vm::waitForIdle,
             onDismiss = vm::cancelBusy,
             onConfirm = vm::restartNow,
@@ -186,6 +221,18 @@ internal fun ChannelsContent(state: ChannelsState, targetName: String, actions: 
         if (setup != null) {
             DesktopHeader(R.string.chan_tg_title, targetName, actions.onBack)
             TelegramSetupBody(setup, state, actions)
+            return@Column
+        }
+        val whatsapp = state.whatsapp
+        if (whatsapp != null) {
+            DesktopHeader(R.string.chan_wa_title, targetName, actions.onBack)
+            WhatsappSetupBody(whatsapp, state, actions)
+            return@Column
+        }
+        val form = state.settings
+        if (form != null) {
+            DesktopHeader(R.string.chan_set_title, form.channelName, actions.onBack)
+            SettingsBody(form, actions)
             return@Column
         }
         DesktopHeader(R.string.chan_title, targetName, actions.onBack, actions.onRetry.takeIf { !state.direct && !state.requestRunning }, R.string.refresh)
@@ -212,7 +259,7 @@ private fun LoadingBlock(label: Int) {
 
 /** An endless animation never lets a screenshot settle, so previews draw a fixed ring. */
 @Composable
-private fun Spinner() {
+internal fun Spinner() {
     val c = Rasul.colors
     if (LocalInspectionMode.current) {
         CircularProgressIndicator(progress = { 0.3f }, modifier = Modifier.size(24.dp), color = c.accent)
@@ -274,7 +321,7 @@ private fun RestartBanner(state: ChannelsState, actions: ChannelsActions) {
 
 /** "Waiting for Hermes to be idle…" with a Cancel that stops the repeats. */
 @Composable
-private fun WaitingBlock(onCancel: () -> Unit) {
+internal fun WaitingBlock(onCancel: () -> Unit) {
     val c = Rasul.colors
     Row(
         Modifier.semantics { liveRegion = LiveRegionMode.Polite },
@@ -286,6 +333,7 @@ private fun WaitingBlock(onCancel: () -> Unit) {
     SecondaryButton(stringResource(R.string.cancel), onCancel, modifier = Modifier.fillMaxWidth())
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ChannelRow(channel: ChannelDto, state: ChannelsState, last: Boolean, actions: ChannelsActions) {
     val c = Rasul.colors
@@ -299,9 +347,9 @@ private fun ChannelRow(channel: ChannelDto, state: ChannelsState, last: Boolean,
             RasulToggle(channel.enabled, label = channel.name, enabled = !locked) { wanted -> actions.onToggle(channel.id, wanted) }
         },
         bottom = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (testing) {
-                    Text(stringResource(R.string.chan_testing), style = RasulType.bodySmall, color = c.accent)
+                    Text(stringResource(R.string.chan_testing), style = RasulType.bodySmall, color = c.accent, modifier = Modifier.align(Alignment.CenterVertically))
                 } else {
                     val testLabel = stringResource(R.string.chan_test_for, channel.name)
                     Box(Modifier.semantics(mergeDescendants = true) { contentDescription = testLabel }) {
@@ -310,6 +358,15 @@ private fun ChannelRow(channel: ChannelDto, state: ChannelsState, last: Boolean,
                 }
                 if (channel.canConnectTelegram()) {
                     SmallOutlineButton(stringResource(R.string.chan_tg_connect), actions.onConnect, enabled = !locked)
+                }
+                if (channel.canConnectWhatsapp()) {
+                    SmallOutlineButton(stringResource(R.string.chan_wa_connect), actions.onWaStart, enabled = !locked)
+                }
+                if (channel.fields.isNotEmpty()) {
+                    val settingsLabel = stringResource(R.string.chan_settings_for, channel.name)
+                    Box(Modifier.semantics(mergeDescendants = true) { contentDescription = settingsLabel }) {
+                        SmallOutlineButton(stringResource(R.string.chan_settings), { actions.onSettings(channel.id) }, enabled = !locked)
+                    }
                 }
             }
         },
@@ -383,7 +440,7 @@ private fun atName(username: String) = "@" + username.removePrefix("@")
 
 /** Text the bridge sent (descriptions, states, error lines) is not Arabic: an LTR isolate keeps its words and full stops in place in an RTL layout. */
 @Composable
-private fun bridgeText(text: String): String =
+internal fun bridgeText(text: String): String =
     if (LocalLayoutDirection.current == LayoutDirection.Rtl) "⁦$text⁩" else text
 
 @Composable
@@ -437,7 +494,7 @@ private fun DoneBody(setup: TelegramSetup.Done, state: ChannelsState, actions: C
 private fun row(id: String, name: String, description: String, state: String?, enabled: Boolean, configured: Boolean = true, error: String? = null) =
     ChannelDto(
         id = id, name = name, description = description, enabled = enabled, configured = configured, state = state,
-        errorMessage = error, fields = listOf(ChannelFieldDto("TOKEN", required = true, isSet = configured)),
+        errorMessage = error,
     )
 
 private val mixed = listOf(

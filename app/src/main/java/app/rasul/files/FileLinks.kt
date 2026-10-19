@@ -101,6 +101,18 @@ object FileLinks {
     /** Files that decode safely to a small thumbnail with the platform decoder. */
     fun hasThumbnail(name: String): Boolean = extension(name) in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
 
+    private val inlineImages = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif")
+
+    /** Image types a bridge chat may show as a picture in the bubble. */
+    fun isInlineImage(name: String): Boolean = extension(name) in inlineImages
+
+    /** Bytes named by a link's size text (`1.2 MB`), or null when it is missing. */
+    fun sizeBytes(sizeText: String?): Long? {
+        val m = sizeSuffix.find(" ($sizeText)") ?: return null
+        val unit = when (m.groupValues[1].substringAfter(' ')) { "KB" -> 1024.0; "MB" -> 1024.0 * 1024; else -> 1.0 }
+        return (m.groupValues[1].substringBefore(' ').toDouble() * unit).toLong()
+    }
+
     /** Media types that are markup or script, or an app installer: never handed to a viewer. */
     fun neverRender(mime: String): Boolean =
         mime.endsWith("xml") || mime.contains("javascript") || mime.contains("ecmascript") ||

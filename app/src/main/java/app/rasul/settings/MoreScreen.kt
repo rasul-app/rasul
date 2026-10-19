@@ -138,6 +138,7 @@ fun MoreScreen(
     onHermesUpdate: () -> Unit = {},
     onCheckConnection: () -> Unit = {},
     onChannels: () -> Unit = {},
+    onLogs: () -> Unit = {},
 ) {
     var current by remember { mutableStateOf(LanguageOption.fromTags(AppCompatDelegate.getApplicationLocales().toLanguageTags())) }
     var sheet by rememberSaveable { mutableStateOf(false) }
@@ -184,6 +185,7 @@ fun MoreScreen(
             onHermesUpdate = onHermesUpdate,
             onCheckConnection = onCheckConnection,
             onChannels = onChannels,
+            onLogs = onLogs,
             showAppLockSetting = true,
             appLockEnabled = appLockEnabled,
             appLockAvailable = appLockAvailable,
@@ -256,6 +258,7 @@ fun MoreContent(
     onHermesUpdate: () -> Unit = {},
     onCheckConnection: () -> Unit = {},
     onChannels: () -> Unit = {},
+    onLogs: () -> Unit = {},
 ) {
     val c = Rasul.colors
     val rowPad = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 14.dp)
@@ -348,6 +351,14 @@ fun MoreContent(
                         ) {
                             RowTitle(stringResource(R.string.chan_row_title))
                             RowSub(stringResource(R.string.chan_row_sub, usageTargetName), maxLines = 1)
+                        }
+                        RasulRow(
+                            onClick = onLogs, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
+                            leading = { Icon(RasulIcons.Info, null, tint = c.accent, modifier = Modifier.size(24.dp)) },
+                            trailing = { Icon(RasulIcons.Chev, null, tint = c.muted, modifier = Modifier.size(18.dp)) },
+                        ) {
+                            RowTitle(stringResource(R.string.logs_title))
+                            RowSub(stringResource(R.string.logs_row_sub, usageTargetName), maxLines = 1)
                         }
                     }
                     RasulRow(

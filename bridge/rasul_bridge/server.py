@@ -22,14 +22,14 @@ from .audit import Audit
 from .approvals import ALL_ROUTE, Approvals, PHONE_ROUTE
 from .desktop import Desktop, RULES as DESKTOP_RULES
 from .http import HTTPError, Reader, chunk, request, response, stream_start
-from .limits import Limits
+from .limits import Limits, MAX_BODY
 from .instructions import Instructions
 from .network import extra_plan, lan_addresses, tailscale_addresses
 from .status import Status
 from .pairing import Pairing
 from .profiles import Profiles
 from .files import Files, TOKEN
-from .proxy import StreamAborted, Upstream, allowed
+from .proxy import StreamAborted, Upstream, allowed, with_media_note
 from .registry import Registry
 from .tls import TLSLink, ensure_identity, server_context
 
@@ -455,6 +455,12 @@ class Bridge:
                         raise HTTPError(400, action + "_invalid_fields") from None
                     forward_head = {**head, "content-type": "application/json"}
                     forward_body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+                if template == "/v1/runs" and method == "POST" and self.config.media_note and body:
+                    noted = with_media_note(body)
+                    # A body already at the limit is forwarded as sent rather than grown past it.
+                    if noted is not None and len(noted) <= MAX_BODY:
+                        forward_head = {**head, "content-type": "application/json"}
+                        forward_body = noted
                 if profile not in self.profiles.directories():
                     profile = None
                     raise HTTPError(404, "Profile not found")

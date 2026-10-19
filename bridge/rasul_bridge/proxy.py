@@ -1,6 +1,7 @@
 """Method and route allowlist, header replacement, and streaming forwarding."""
 
 import asyncio
+import json
 import re
 from urllib.parse import parse_qsl, urlsplit
 
@@ -44,6 +45,32 @@ def end_to_end(head, allowlist):
     nominated = {name.strip().lower() for name in head.get("connection", "").split(",")}
     return {name: value for name, value in head.items()
             if name in allowlist and name not in HOP_HEADERS and name not in nominated}
+
+
+MEDIA_NOTE = (
+    "This chat is the Rasul app, reached through Rasul Bridge. This note replaces the API-server note "
+    "about files. To give the user a file (image, PDF, document, audio, video or archive), put "
+    "MEDIA:/absolute/path on its own line in your reply. Images appear in the chat and other files "
+    "appear as download cards. Never paste a raw file path for the user to open. Send only files the "
+    "user should receive.")
+
+
+def with_media_note(body):
+    """Body with MEDIA_NOTE first in its instructions, or None when it must be forwarded unchanged."""
+    try:
+        value = json.loads(body.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    current = value.get("instructions", "")
+    if not isinstance(current, str):
+        return None
+    value["instructions"] = MEDIA_NOTE + ("\n\n" + current if current else "")
+    try:
+        return json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:  # a lone escaped surrogate cannot be re-encoded
+        return None
 
 
 class StreamAborted(Exception):

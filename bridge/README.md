@@ -150,8 +150,25 @@ With approvals enabled, `GET /v1/approvals` and `GET /v1/approvals/events` list 
 
 Messaging channels: list, switch on/off, test; Telegram setup from the phone. The bot token stays on the computer.
 
+WhatsApp setup and channel settings from the phone; secret values are write-only and never sent back.
+Recent Hermes logs for the phone (`GET /logs`): errors, agent or gateway, with secrets and personal paths hidden before anything leaves the computer.
+
 Tunnel setup, routing, computer sleep, and network policy affect availability.
 No tunnel account or credential belongs in this repository.
+
+## Files and pictures from the agent
+
+When the phone starts a run (`POST /v1/runs`), the bridge puts a short fixed note at
+the start of the run's `instructions`. The agent's API server otherwise tells every
+chat that file delivery is not available and to write the plain file path; the note
+tells it to put `MEDIA:/absolute/path` on its own line instead, which the bridge
+already turns into a picture or a download card. An `instructions` text sent by the
+phone is kept after the note. A body that is not a JSON object, has a non-text
+`instructions`, or would grow past the body limit is forwarded unchanged, as is every
+other route. To turn the note off, set `media_note = false` in the settings file
+(default `true`). After upgrading the bridge or changing `media_note`, a retry of a
+request first sent before the change can get Hermes's 409 `idempotency_key_conflict`
+once; sending the message again fixes it.
 
 ## Autostart
 

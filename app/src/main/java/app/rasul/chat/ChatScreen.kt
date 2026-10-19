@@ -78,6 +78,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -1667,6 +1668,8 @@ internal fun failureText(failure: ChatFailure): String = when (failure) {
     ChatFailure.ReplyKept -> stringResource(R.string.chat_err_reply_kept)
     is ChatFailure.ForkFailed -> sessionActionMessage(LocalContext.current, failure.error)
         ?: failureText(ChatFailure.Api(failure.error))
+    is ChatFailure.ShareItemsDropped -> pluralStringResource(R.plurals.share_dropped, failure.count, failure.count) +
+        failure.other?.let { " " + failureText(it) }.orEmpty()
 }
 
 /**

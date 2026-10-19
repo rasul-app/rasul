@@ -43,6 +43,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import app.rasul.R
 import app.rasul.data.ActiveTarget
+import app.rasul.data.PinStore
+import app.rasul.data.pinnedFirst
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
+import app.rasul.ui.components.RasulIcons
 import app.rasul.data.HermesError
 import app.rasul.data.Load
 import app.rasul.data.timeText
@@ -99,6 +104,9 @@ fun SessionsScreen(
     val busy by vm.busy.collectAsState()
     val renameError by vm.renameError.collectAsState()
     val deleteError by vm.deleteError.collectAsState()
+    val pinned by vm.pinned.collectAsState()
+    val draftLines by vm.draftLines.collectAsState()
+    val pinLimit by vm.pinLimit.collectAsState()
     var rename by remember(picker.target) { mutableStateOf<PendingSession?>(null) }
     var confirmDelete by remember(picker.target) { mutableStateOf<PendingSession?>(null) }
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
@@ -117,6 +125,9 @@ fun SessionsScreen(
                 busy = busy != null,
                 onRename = { session -> source?.let { vm.clearRenameError(); rename = PendingSession(it, session) } },
                 onDelete = { session -> source?.let { confirmDelete = PendingSession(it, session) } },
+                pinned = pinned,
+                draftLines = draftLines,
+                onTogglePin = { session -> source?.let { vm.togglePin(it, session) } },
             )
         }
     }
@@ -144,6 +155,7 @@ fun SessionsScreen(
             },
         )
     }
+    if (pinLimit) NoticeDialog(stringResource(R.string.chat_pin_limit, PinStore.MAX_PER_BOT), stringResource(R.string.ok), vm::clearPinLimit)
     deleteError?.let { NoticeDialog(it.sessionMessage(), stringResource(R.string.ok), vm::clearDeleteError) }
 }
 
@@ -165,6 +177,9 @@ internal fun SessionList(
     busy: Boolean = false,
     onRename: (SessionDto) -> Unit = {},
     onDelete: (SessionDto) -> Unit = {},
+    pinned: List<String> = emptyList(),
+    draftLines: Map<String, String> = emptyMap(),
+    onTogglePin: (SessionDto) -> Unit = {},
 ) {
     var filter by remember { mutableStateOf(SessionFilter.All) }
     if (list.isEmpty()) {
@@ -182,13 +197,13 @@ internal fun SessionList(
         FilterPill(stringResource(R.string.filter_open), filter == SessionFilter.Open, width = 60.dp) { filter = SessionFilter.Open }
         FilterPill(stringResource(R.string.filter_ended), filter == SessionFilter.Ended, width = 60.dp) { filter = SessionFilter.Ended }
     }
-    val shown = list.filter {
+    val shown = pinnedFirst(list.filter {
         when (filter) {
             SessionFilter.All -> true
             SessionFilter.Open -> it.isActive
             SessionFilter.Ended -> !it.isActive
         }
-    }
+    }, pinned) { it.id }
     LazyColumn(Modifier.fillMaxSize()) {
         itemsIndexed(shown, key = { _, s -> s.id }) { index, s ->
             val isArabic = LocalConfiguration.current.locales[0].language == "ar"
@@ -207,8 +222,21 @@ internal fun SessionList(
                         time?.let { Text(it, style = RasulType.meta, color = Rasul.colors.muted, modifier = Modifier.widthIn(min = 32.dp), textAlign = TextAlign.End) }
                     },
                 ) {
-                    RowTitle(s.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.session_untitled))
-                    s.preview?.takeIf { it.isNotBlank() }?.let { RowSub(it, maxLines = 1) }
+                    val isPinned = s.id in pinned
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (isPinned) Icon(
+                            RasulIcons.Pin, stringResource(R.string.chat_pinned),
+                            tint = Rasul.colors.accent, modifier = Modifier.size(14.dp),
+                        )
+                        Box(Modifier.weight(1f, fill = false)) { RowTitle(s.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.session_untitled)) }
+                    }
+                    val draft = draftLines[s.id]
+                    if (draft != null) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(stringResource(R.string.chat_draft_label), style = RasulType.rowSub, color = Rasul.colors.accent)
+                            Box(Modifier.weight(1f, fill = false)) { RowSub(draft, maxLines = 1) }
+                        }
+                    } else s.preview?.takeIf { it.isNotBlank() }?.let { RowSub(it, maxLines = 1) }
                     if (s.isCronRun) {
                         Text(
                             stringResource(R.string.session_job_run),
@@ -220,6 +248,10 @@ internal fun SessionList(
                     }
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    SessionMenuAction(stringResource(if (s.id in pinned) R.string.chat_unpin else R.string.chat_pin), enabled = true) {
+                        menuOpen = false
+                        onTogglePin(s)
+                    }
                     SessionMenuAction(stringResource(R.string.ux3c_chat_rename), enabled = !busy) {
                         menuOpen = false
                         onRename(s)

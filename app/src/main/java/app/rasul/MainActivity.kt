@@ -84,6 +84,8 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) container.appScope.launch { container.fileDownloads.cleanup() }
         openNotificationChat(intent)
         openNotificationApprovals(intent)
+        // A recreated activity (rotation, process restore) must not read the same share again, nor one reopened from recents.
+        if (savedInstanceState == null && intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0) receiveShare(intent)
         authenticator = AppLockAuthenticator(this) { credentialIntent, onSuccess, onCancel ->
             credentialState.begin(onSuccess, onCancel)
             credentialLauncher.launch(credentialIntent)
@@ -139,6 +141,22 @@ class MainActivity : AppCompatActivity() {
         setIntent(intent)
         openNotificationChat(intent)
         openNotificationApprovals(intent)
+        receiveShare(intent)
+    }
+
+    /**
+     * Starts reading a shared payload at once, while the sender's read grant is certain to be valid,
+     * then strips it from the intent. Nothing is shown here: the Send-to screen opens after the app lock.
+     */
+    private fun receiveShare(intent: Intent?) {
+        val shared = intent ?: return
+        val incoming = app.rasul.share.parseShare(shared, packageName, app.rasul.share.ownsProviderAuthority(packageManager, packageName)) ?: return
+        val stager = app.rasul.share.ShareStager(
+            app.rasul.chat.ChatAttachmentLoader(applicationContext),
+            app.rasul.share.contentResolverIsImage(applicationContext, shared.type),
+        )
+        app.rasul.share.clearShare(shared)
+        container.shares.receive(container.appScope, incoming, stager)
     }
 
     private fun openNotificationChat(intent: Intent?) {

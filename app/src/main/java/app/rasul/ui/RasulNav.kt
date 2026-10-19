@@ -91,6 +91,8 @@ import app.rasul.channels.ChannelsViewModel
 import app.rasul.bridge.channelsApi
 import app.rasul.desktop.HermesUpdateScreen
 import app.rasul.desktop.HermesUpdateViewModel
+import app.rasul.desktop.LogsScreen
+import app.rasul.desktop.LogsViewModel
 import app.rasul.desktop.PcCheckScreen
 import app.rasul.desktop.PcCheckViewModel
 import app.rasul.desktop.PcInfoViewModel
@@ -132,6 +134,7 @@ private const val SKILLS_TOOLS = "skills-tools"
 private const val USAGE = "usage"
 private const val HERMES_UPDATE = "hermes-update"
 private const val PC_CHECK = "pc-check"
+private const val LOGS = "logs"
 private const val CHANNELS = "channels"
 private const val RUN_HISTORY = "job-runs/{id}?src={src}&name={name}&bridge={bridge}&profile={profile}"
 private const val EDIT = "edit?id={id}"
@@ -165,6 +168,15 @@ fun RasulNav(
     val pendingChat by container.pendingChat.collectAsState()
     LaunchedEffect(pendingChat) {
         pendingChat?.let { nav.navigate(it) { popUpTo(BOTS); launchSingleTop = true }; container.pendingChat.value = null }
+    }
+    // A share opens its Send-to screen only on an unlocked app; behind the lock it waits in memory.
+    val pendingShare by container.shares.pending.collectAsState()
+    val shareLock by container.appLock.state.collectAsState()
+    val shareOpens = app.rasul.share.shareMayOpen(shareLock, pendingShare)
+    LaunchedEffect(pendingShare?.id, shareOpens, pendingShare?.route == null) {
+        if (shareOpens && pendingShare?.route == null) {
+            nav.navigate(app.rasul.share.SEND_TO_ROUTE) { launchSingleTop = true }
+        }
     }
     val sharedOwner = checkNotNull(LocalViewModelStoreOwner.current)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -268,11 +280,12 @@ fun RasulNav(
                     })
             }
             composable(BOTS) { Connections(container, nav, sharedOwner) }
+            composable(app.rasul.share.SEND_TO_ROUTE) { app.rasul.share.SendToDestination(container, nav, sharedOwner) }
             composable(SESSIONS) {
                 val bridgeState by container.bridgeBots.state.collectAsState()
                 val vm: SessionsViewModel = viewModel(
                     viewModelStoreOwner = sharedOwner,
-                    factory = viewModelFactory { initializer { SessionsViewModel(container.connections, container.activePc, container.sessions, container.runWatcher::invalidateSession) } },
+                    factory = viewModelFactory { initializer { SessionsViewModel(container.connections, container.activePc, container.sessions, container.runWatcher::invalidateSession, container.drafts, container.pins) } },
                 )
                 val connectionsVm: ConnectionsViewModel = viewModel(
                     viewModelStoreOwner = sharedOwner,
@@ -414,6 +427,7 @@ fun RasulNav(
                     onHermesUpdate = { nav.navigate(HERMES_UPDATE) },
                     onCheckConnection = { nav.navigate(PC_CHECK) },
                     onChannels = { nav.navigate(CHANNELS) },
+                    onLogs = { nav.navigate(LOGS) },
                 )
             }
             composable(HERMES_UPDATE) {
@@ -423,6 +437,10 @@ fun RasulNav(
             composable(CHANNELS) {
                 val picker by container.activePc.state.collectAsState()
                 ChannelsDestination(picker, container, onBack = { nav.popBackStack() })
+            }
+            composable(LOGS) {
+                val picker by container.activePc.state.collectAsState()
+                LogsDestination(picker, container, onBack = { nav.popBackStack() })
             }
             composable(PC_CHECK) {
                 val picker by container.activePc.state.collectAsState()
@@ -538,17 +556,12 @@ fun RasulNav(
                 val bots by container.bridgeBots.state.collectAsState()
                 val group = bots.groups.firstOrNull { it.id == bridge }
                 val name = group?.profiles?.firstOrNull { it.id == profile }?.displayName.orEmpty()
+                val chatKey = remember(entry) { bridgeChatEntryRoute(bridge, profile, newSession, session, revision) }
                 val vm by produceState<ChatViewModel?>(null, entry) {
-                    val query = buildList {
-                        if (newSession != null) add("newSession=" + Uri.encode(newSession))
-                        if (session != null) add("session=" + Uri.encode(session))
-                        if (revision != null) add("rev=" + Uri.encode(revision))
-                    }
-                    val route = "bridge-chat/" + Uri.encode(bridge) + "/" + Uri.encode(profile) +
-                        if (query.isEmpty()) "" else query.joinToString("&", "?")
-                    value = container.runWatcher.resolve(route)
+                    value = resolveChat(container, nav, chatKey)
                 }
                 vm?.let { model ->
+                    ClaimShare(container, chatKey, model)
                     val optionsLoader = remember(container, model) {
                         modelOptionsLoader(container, app.rasul.chat.TargetLoader {
                             model.resolvedTarget?.let { app.rasul.data.HermesResult.Ok(it) }
@@ -581,17 +594,12 @@ fun RasulNav(
                 val revision = entry.arguments?.getString("rev")
                 val name by produceState("") { value = container.connections.get(id)?.name.orEmpty() }
                 val profile = entry.arguments?.getString("run_profile")
+                val chatKey = remember(entry) { directChatEntryRoute(id, profile, newSession, session, revision) }
                 val vm by produceState<ChatViewModel?>(null, entry) {
-                    val query = buildList {
-                        if (profile != null) add("run_profile=" + Uri.encode(profile))
-                        if (newSession != null) add("newSession=" + Uri.encode(newSession))
-                        if (session != null) add("session=" + Uri.encode(session))
-                        if (revision != null) add("rev=" + Uri.encode(revision))
-                    }
-                    val route = "chat/" + Uri.encode(id) + if (query.isEmpty()) "" else query.joinToString("&", "?")
-                    value = container.runWatcher.resolve(route)
+                    value = resolveChat(container, nav, chatKey)
                 }
                 vm?.let { model ->
+                    ClaimShare(container, chatKey, model)
                     val optionsLoader = remember(container, model) {
                         modelOptionsLoader(container, app.rasul.chat.TargetLoader {
                             model.resolvedTarget?.let { app.rasul.data.HermesResult.Ok(it) }
@@ -719,6 +727,22 @@ private fun HermesUpdateDestination(picker: PcPicker, container: AppContainer, o
         HermesUpdateScreen(vm, target.name, onBack)
     } else {
         TargetLoadFallback(picker, container, R.string.hupd_title, onBack)
+    }
+}
+
+@Composable
+private fun LogsDestination(picker: PcPicker, container: AppContainer, onBack: () -> Unit) {
+    val target = picker.target as? ActiveTarget.Ready
+    if (target != null) {
+        val vm: LogsViewModel = viewModel(
+            key = "logs-" + target.target.hashCode(),
+            factory = viewModelFactory {
+                initializer { LogsViewModel(target.target.desktopApi()?.let { api -> { api } }) }
+            },
+        )
+        LogsScreen(vm, target.name, onBack)
+    } else {
+        TargetLoadFallback(picker, container, R.string.logs_title, onBack)
     }
 }
 
@@ -913,7 +937,7 @@ private fun SearchDestination(container: AppContainer, nav: androidx.navigation.
         initializer { ConnectionsViewModel(container.connections) }
     })
     val sessionsVm: SessionsViewModel = viewModel(viewModelStoreOwner = sharedOwner, factory = viewModelFactory {
-        initializer { SessionsViewModel(container.connections, container.activePc, container.sessions, container.runWatcher::invalidateSession) }
+        initializer { SessionsViewModel(container.connections, container.activePc, container.sessions, container.runWatcher::invalidateSession, container.drafts, container.pins) }
     })
     val jobsVm: JobsViewModel = viewModel(viewModelStoreOwner = sharedOwner, factory = viewModelFactory {
         initializer { JobsViewModel(container.connections, container.activePc, container.jobs) }
@@ -946,6 +970,41 @@ internal fun openBotChoice(
 ) {
     choice.bridgeId?.let { bridge -> choice.profileId?.let { onSelectBridge(bridge, it) } }
     nav.navigate(chatRoute(choice, newSession))
+}
+
+/** The route string a bridge chat entry resolves its model by (also what a pending share is matched against). */
+private fun bridgeChatEntryRoute(bridge: String, profile: String, newSession: String?, session: String?, revision: String?): String {
+    val query = buildList {
+        if (newSession != null) add("newSession=" + Uri.encode(newSession))
+        if (session != null) add("session=" + Uri.encode(session))
+        if (revision != null) add("rev=" + Uri.encode(revision))
+    }
+    return "bridge-chat/" + Uri.encode(bridge) + "/" + Uri.encode(profile) + if (query.isEmpty()) "" else query.joinToString("&", "?")
+}
+
+private fun directChatEntryRoute(id: String, profile: String?, newSession: String?, session: String?, revision: String?): String {
+    val query = buildList {
+        if (profile != null) add("run_profile=" + Uri.encode(profile))
+        if (newSession != null) add("newSession=" + Uri.encode(newSession))
+        if (session != null) add("session=" + Uri.encode(session))
+        if (revision != null) add("rev=" + Uri.encode(revision))
+    }
+    return "chat/" + Uri.encode(id) + if (query.isEmpty()) "" else query.joinToString("&", "?")
+}
+
+/** Resolves the chat model for [route]; when a share was sent there and the chat cannot be opened, the share returns to Send-to. */
+private suspend fun resolveChat(container: AppContainer, nav: androidx.navigation.NavController, route: String): ChatViewModel? {
+    val model = container.runWatcher.resolve(route)
+    if (model == null && container.shares.release(route)) nav.popBackStack()
+    return model
+}
+
+/** A chat opened from the Send-to screen takes its share (text into the draft, items as chips) once, and never sends it. */
+@Composable
+private fun ClaimShare(container: AppContainer, route: String, model: ChatViewModel) {
+    LaunchedEffect(model, route) {
+        container.shares.claim(route)?.let { model.acceptShare(it.text, it.items, it.failure, it.dropped) }
+    }
 }
 
 internal fun chatRoute(choice: ChatBotChoice, newSession: Boolean = false): String {

@@ -386,7 +386,7 @@ async def test_unauthenticated_calls_are_refused(tmp_path, monkeypatch, method, 
         assert not fake.requests
 
 
-# -- fix round: dashboard rights, stuck states, unknown counts, idle signals ---------------------
+# -- dashboard rights, stuck states, unknown counts, idle signals ---------------------
 
 
 @asynchronous
