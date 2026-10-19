@@ -463,13 +463,16 @@ internal fun ChatScreenContent(
                     }
                     MessageList(state.messages, Modifier.weight(1f), if (state.historyFailure != null || state.actionFailure != null) 0.dp else headerHeight)
                     state.run?.let { run ->
-                        RunCard(
+                        RunProgressCard(
                             run = run,
                             onStop = onStop,
                             onReconnect = onReconnect,
                             onRefresh = onRefresh,
                             onReview = if (approval != null && reviewHidden) ({ hiddenFor = null }) else null,
                         )
+                    }
+                    if (state.run == null) {
+                        state.summary?.takeIf { it.runId == state.finishedRunId }?.let { RunSummaryLine(it) }
                     }
                 }
             }
@@ -822,119 +825,16 @@ private fun MessageBubble(message: ChatMessage, maxWidth: androidx.compose.ui.un
                     }
                     if (message.text.isNotEmpty()) {
                         if (message.kind == MessageKind.Assistant) {
-                            app.rasul.files.AssistantText(message.text, RasulType.chatBody.copy(lineHeight = lineHeight), colors.ink)
+                            app.rasul.files.AssistantText(message.text, RasulType.chatBody.copy(lineHeight = lineHeight), colors.ink, Modifier.copyOnLongPress(message.text))
                         } else {
                             Text(
                                 message.text,
                                 style = RasulType.chatBody.copy(lineHeight = lineHeight),
                                 color = colors.ink,
+                                modifier = Modifier.copyOnLongPress(message.text),
                             )
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RunCard(
-    run: ActiveRun,
-    onStop: () -> Unit,
-    onReconnect: () -> Unit,
-    onRefresh: () -> Unit,
-    onReview: (() -> Unit)?,
-) {
-    val colors = Rasul.colors
-    var elapsed by remember(run.startedAtMs) { mutableLongStateOf(0L) }
-    LaunchedEffect(run.startedAtMs) {
-        while (true) {
-            elapsed = ((System.currentTimeMillis() - run.startedAtMs) / 1000).coerceAtLeast(0)
-            delay(1000)
-        }
-    }
-    val activeStep = when (run.status) {
-        StatusLabel.Starting, StatusLabel.Thinking, StatusLabel.Writing, StatusLabel.Helper -> 0
-        is StatusLabel.Tool -> 1
-        StatusLabel.WaitingApproval -> 2
-        StatusLabel.Stopping -> 0
-        is StatusLabel.Reconnecting, StatusLabel.Lost, StatusLabel.LiveUpdatesUnavailable -> 1
-    }
-    val toolName = (run.status as? StatusLabel.Tool)?.name
-
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-        shape = ChatCardShape,
-        color = colors.bg,
-        contentColor = colors.ink,
-        border = BorderStroke(1.dp, colors.cardBorder),
-        shadowElevation = 4.dp,
-    ) {
-        Column(
-            Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (run.status == StatusLabel.Lost) ConnectionLostBanner(onReconnect)
-            if (run.status == StatusLabel.LiveUpdatesUnavailable) {
-                Text(
-                    statusText(run.label),
-                    style = RasulType.bodySmall,
-                    color = colors.muted,
-                )
-            }
-            ProgressHeader(run, elapsed)
-            ProgressStep(
-                label = stringResource(R.string.chat_step_thinking),
-                index = 0,
-                activeStep = activeStep,
-            )
-            ProgressStep(
-                label = stringResource(R.string.chat_step_running_tool),
-                index = 1,
-                activeStep = activeStep,
-                chip = toolName,
-            )
-            ProgressStep(
-                label = stringResource(R.string.chat_step_approval),
-                index = 2,
-                activeStep = activeStep,
-                approvalStep = true,
-            )
-            Row(
-                Modifier.fillMaxWidth().padding(top = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                OutlinedButton(
-                    onClick = onStop,
-                    enabled = run.runId != null && !run.stopRequested,
-                    modifier = Modifier.heightIn(min = 48.dp),
-                    shape = ChatBubbleShape,
-                    border = BorderStroke(1.dp, colors.danger.copy(alpha = 0.35f)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(
-                            Modifier.size(8.dp).background(colors.danger, RoundedCornerShape(2.dp)),
-                        )
-                        Text(stringResource(R.string.chat_stop), style = RasulType.buttonSmall)
-                    }
-                }
-                if (run.status == StatusLabel.LiveUpdatesUnavailable) {
-                    TextButton(onClick = onRefresh) {
-                        Text(stringResource(R.string.chat_refresh), style = RasulType.buttonSmall)
-                    }
-                }
-                if (onReview != null) {
-                    PrimaryButton(
-                        text = stringResource(R.string.approval_review),
-                        onClick = onReview,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    )
                 }
             }
         }
@@ -945,109 +845,14 @@ private fun RunCard(
 internal fun codeTextStyle(base: TextStyle): TextStyle = base.copy(textDirection = TextDirection.Ltr)
 
 @Composable
-private fun CodeText(text: String, style: TextStyle, color: Color, modifier: Modifier = Modifier) {
+internal fun CodeText(text: String, style: TextStyle, color: Color, modifier: Modifier = Modifier) {
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
         Text(text, modifier = modifier, style = codeTextStyle(style), color = color)
     }
 }
 
 @Composable
-private fun ProgressHeader(run: ActiveRun, elapsed: Long) {
-    val colors = Rasul.colors
-    val waiting = run.status == StatusLabel.WaitingApproval
-    val lost = run.status == StatusLabel.Lost
-    val headline = when {
-        run.stopRequested -> statusText(run.label)
-        run.status is StatusLabel.Tool || lost -> stringResource(R.string.chat_step_running_tool)
-        else -> statusText(run.label)
-    }
-    val headlineColor = when {
-        waiting -> colors.warn
-        lost -> colors.muted
-        else -> colors.accent
-    }
-    val badgeColor = when {
-        waiting -> colors.warn.copy(alpha = 0.12f)
-        lost -> colors.fill
-        else -> colors.accentSoft
-    }
-    val timeText = String.format(Locale.US, "%02d:%02d", elapsed / 60, elapsed % 60)
-
-    Row(
-        Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            Modifier.size(28.dp).background(badgeColor, RoundedCornerShape(14.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                if (waiting) RasulIcons.Pause else RasulIcons.Clock,
-                contentDescription = null,
-                tint = headlineColor,
-                modifier = Modifier.size(14.dp),
-            )
-        }
-        Text(
-            headline,
-            modifier = Modifier.weight(1f),
-            style = RasulType.rowTitle,
-            color = headlineColor,
-        )
-        CodeText(
-            timeText,
-            style = RasulType.meta.copy(fontFamily = RasulMonoFontFamily, fontWeight = FontWeight.Medium),
-            color = colors.muted,
-        )
-    }
-}
-
-@Composable
-private fun ProgressStep(
-    label: String,
-    index: Int,
-    activeStep: Int,
-    chip: String? = null,
-    approvalStep: Boolean = false,
-) {
-    val colors = Rasul.colors
-    val complete = index < activeStep
-    val current = index == activeStep
-    val tint = when {
-        complete -> colors.success
-        current && approvalStep -> colors.warn
-        current -> colors.accent
-        else -> colors.hairline
-    }
-    val icon = when {
-        complete -> RasulIcons.Check
-        current && approvalStep -> RasulIcons.Info
-        else -> RasulIcons.Clock
-    }
-    val textColor = if (index > activeStep) colors.muted else colors.ink
-
-    Row(
-        Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
-        Text(label, modifier = Modifier.weight(1f), style = RasulType.sectionLabel, color = textColor)
-        chip?.let {
-            CodeText(
-                it,
-                modifier = Modifier.background(colors.fill, ChatChipShape)
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                style = RasulType.chip.copy(fontFamily = RasulMonoFontFamily),
-                color = colors.ink,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ConnectionLostBanner(onReconnect: () -> Unit) {
+internal fun ConnectionLostBanner(onReconnect: () -> Unit) {
     val colors = Rasul.colors
     val label = stringResource(R.string.chat_connection_lost_banner)
     Row(
@@ -1608,7 +1413,7 @@ internal fun ApprovalSheet(
 }
 
 @Composable
-private fun statusText(status: StatusLabel): String = when (status) {
+internal fun statusText(status: StatusLabel): String = when (status) {
     StatusLabel.Starting -> stringResource(R.string.status_starting)
     StatusLabel.Thinking -> stringResource(R.string.status_thinking)
     StatusLabel.Writing -> stringResource(R.string.status_writing)
@@ -1714,13 +1519,21 @@ private fun ChatPreviewBody(
         ChatMessage(1, MessageKind.User, stringResource(R.string.chat_preview_user_message), atMillis = CHAT_PREVIEW_AT),
         ChatMessage(2, MessageKind.Assistant, stringResource(R.string.chat_preview_assistant_message), atMillis = CHAT_PREVIEW_AT),
     )
+    val started = System.currentTimeMillis() - 42_000L
+    val steps = listOf(
+        RunStep("web_search", "gradle release notes", started + 2_000L, started + 9_000L, 7_000L),
+        RunStep("read_file", null, started + 10_000L, started + 11_000L, 1_000L),
+    )
+    fun preview(status: StatusLabel, phase: RunPhase, shown: List<RunStep> = steps) = ActiveRun(
+        "preview", started, status,
+        progress = RunProgress(started, phase, shown, stepCount = shown.size, lastEventAt = started + 20_000L),
+    )
     val run = when (kind) {
         ChatPreviewKind.Idle -> null
-        ChatPreviewKind.Thinking -> ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.Thinking)
-        ChatPreviewKind.Tool -> ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.Tool("terminal"))
-        ChatPreviewKind.Approval, ChatPreviewKind.ApprovalLong ->
-            ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.WaitingApproval)
-        ChatPreviewKind.Lost -> ActiveRun("preview", System.currentTimeMillis() - 42_000L, StatusLabel.Lost)
+        ChatPreviewKind.Thinking -> preview(StatusLabel.Thinking, RunPhase.Thinking)
+        ChatPreviewKind.Tool -> preview(StatusLabel.Tool("terminal"), RunPhase.Tool("terminal", "./gradlew test"))
+        ChatPreviewKind.Approval, ChatPreviewKind.ApprovalLong -> preview(StatusLabel.WaitingApproval, RunPhase.WaitingApproval)
+        ChatPreviewKind.Lost -> preview(StatusLabel.Lost, RunPhase.Thinking, steps.take(1))
         ChatPreviewKind.HistoryError -> null
         ChatPreviewKind.Fork -> null
     }

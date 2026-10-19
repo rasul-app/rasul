@@ -130,6 +130,13 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
                 screen == "McpCatalog" -> 78
                 screen == "HermesUpdateUnknown" -> 79
                 screen == "ChatApprovalLong" -> 80
+                screen == "HermesUpdateNoDetail" -> 81
+                screen == "ProgressReceived" -> 166
+                screen == "ProgressTool" -> 167
+                screen == "ProgressApproval" -> 168
+                screen == "ProgressStalled" -> 163
+                screen == "ProgressWriting" -> 164
+                screen == "ProgressDone" -> 165
                 screen == "ChannelsList" -> 100
                 screen == "ChannelsRestart" -> 101
                 screen == "ChannelsBusy" -> 102
@@ -143,6 +150,9 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
                 screen == "WhatsappError" -> 152
                 screen == "ChannelSettings" -> 153
                 screen == "ChannelsSettingsRow" -> 154
+                screen == "JobsLastRun" -> 160
+                screen == "JobsLastResult" -> 161
+                screen == "JobsHint" -> 162
                 else -> order.indexOf(screen).let { if (it < 0) order.size else it } + 1
             }
             val suffix = if (dark) "-dark" else ""

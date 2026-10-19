@@ -68,7 +68,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 /** A RunsApi whose replies can be held and released, so the tests run on the test scheduler only (no IO threads). */
-private class FakeRuns : RunsApi {
+internal class FakeRuns : RunsApi {
     val calls = mutableListOf<String>()
     val startKeys = mutableListOf<String?>()
     val startInputs = mutableListOf<kotlinx.serialization.json.JsonElement>()
@@ -118,7 +118,7 @@ private class FakeRuns : RunsApi {
 }
 
 /** Picker loads the tests can hold and release; records the per-photo budget the VM computed. */
-private class FakeAttachLoader : AttachmentLoader {
+internal class FakeAttachLoader : AttachmentLoader {
     var gate: CompletableDeferred<Unit>? = null
 
     /** Gates handed to successive loads, one each, before [gate] is used. */
@@ -149,7 +149,7 @@ private class FakeAttachLoader : AttachmentLoader {
     }
 }
 
-private class FakeSessions : SessionsApi {
+internal class FakeSessions : SessionsApi {
     val calls = mutableListOf<String>()
     var result: HermesResult<List<SessionMessageDto>> = HermesResult.Ok(emptyList())
     val queuedResults = mutableListOf<HermesResult<List<SessionMessageDto>>>()
@@ -167,7 +167,7 @@ private class FakeSessions : SessionsApi {
     }
 }
 
-private class FakeMemory(var active: String? = null, var cursor: Long? = null) : RunMemory {
+internal class FakeMemory(var active: String? = null, var cursor: Long? = null) : RunMemory {
     val writes = mutableListOf<String?>()
     val sessionWrites = mutableListOf<String>()
 

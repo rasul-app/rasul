@@ -14,13 +14,13 @@ English | [العربية](#العربية)
 
 ## What it does
 
-- **Chat with your agent.** Send a task, watch the reply and the tool progress stream in live.
+- **Chat with your agent.** Send a task and see at once that it arrived. A live card then shows what the agent is doing now, how long it has run and how many steps are done. Press and hold any message to copy it.
 - **Photos and text files.** Attach up to 4 photos or one small text file to a message; photos are downscaled and stripped of location metadata before sending.
 - **Steer or stop a running task.** A message sent while the agent works is added to the running task. Stop ends it.
 - **Approvals.** When the agent asks before running something, approve once or deny from the phone.
 - **Answer from the notification.** Approve or deny straight from the alert; the phone must be unlocked first.
 - **Sessions.** Browse past conversations and read their transcripts. Pin up to 20 chats to the top. Unsent text is kept per chat, encrypted on the phone.
-- **Jobs.** See scheduled jobs, pause, resume or run one now.
+- **Jobs.** See scheduled jobs, when each last ran and whether it worked; pause, resume or run one now. Turn on Job results in More to get a phone notice when a job finishes or fails.
 - **Several PCs and profiles.** Save each computer once and switch between them. Hermes profiles (`/p/<profile>/`) are supported.
 - **English and Arabic.** Pick the language in the app. Arabic is fully right-to-left.
 - **Files from the agent.** When the agent sends you a file from the computer, it appears as a card in the chat. Tap it to download, then open, save or share it. Pictures show inline in the chat. Web-type files and app installers are never opened inside the app.
@@ -37,7 +37,7 @@ There is no Rasul server. The app talks to your own computer, plus (optional, ca
 
 ## Status
 
-Early development (version 0.2.8). Pre-release APKs are on the Releases page.
+Early development (version 0.2.9). Pre-release APKs are on the Releases page.
 
 ## Requirements
 
@@ -144,12 +144,12 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 
 ### ماذا يقدّم
 
-- **المحادثة مع الوكيل:** أرسل مهمة وتابع الرد وتقدّم الأدوات لحظة بلحظة.
+- **المحادثة مع الوكيل:** أرسل مهمة وسترى فورًا أنها وصلت، ثم تعرض بطاقة حيّة ما يفعله الوكيل الآن ومنذ متى يعمل وعدد الخطوات المنجزة. اضغط مطولًا على أي رسالة لنسخها.
 - **توجيه المهمة الجارية أو إيقافها:** الرسالة التي ترسلها أثناء عمل الوكيل تُضاف إلى المهمة الجارية، وزر الإيقاف ينهيها.
 - **الموافقات:** عندما يطلب الوكيل الإذن قبل تنفيذ أمر، وافق مرة واحدة أو ارفض من الهاتف.
 - **الرد من الإشعار:** وافق أو ارفض مباشرة من التنبيه، بعد فتح قفل الهاتف.
 - **الجلسات:** تصفّح المحادثات السابقة واقرأ نصوصها. ثبّت حتى 20 محادثة في الأعلى، ويُحفظ النص غير المرسل لكل محادثة مشفّرًا على الهاتف.
-- **المهام المجدولة:** اعرض المهام، أوقفها مؤقتًا، استأنفها أو شغّلها الآن.
+- **المهام المجدولة:** اعرض المهام ومتى عملت كل منها آخر مرة وهل نجحت، وأوقفها مؤقتًا أو استأنفها أو شغّلها الآن. فعّل «نتائج المهام» من «المزيد» ليصلك إشعار عند انتهاء أي مهمة أو فشلها.
 - **أكثر من حاسوب وملف تعريف:** احفظ كل حاسوب مرة واحدة وبدّل بينها، مع دعم ملفات تعريف Hermes.
 - **العربية والإنجليزية:** اختر اللغة من داخل التطبيق، والواجهة العربية من اليمين إلى اليسار بالكامل.
 - **سمة فاتحة وداكنة.**
@@ -165,7 +165,7 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 
 ### الحالة
 
-قيد التطوير المبكر (الإصدار 0.2.8). ملفات APK التجريبية متاحة في صفحة الإصدارات.
+قيد التطوير المبكر (الإصدار 0.2.9). ملفات APK التجريبية متاحة في صفحة الإصدارات.
 
 ### جسر رسول (موصى به)
 

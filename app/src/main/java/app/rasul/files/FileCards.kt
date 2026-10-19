@@ -120,19 +120,20 @@ internal fun rememberDecoded(
  * in every other case it is the same single Text the chat always showed.
  */
 @Composable
-fun AssistantText(text: String, style: TextStyle, color: Color) {
+fun AssistantText(text: String, style: TextStyle, color: Color, textModifier: Modifier = Modifier) {
     val bridge = LocalFileBridge.current
     val downloads = LocalFileDownloads.current
     if (bridge == null || downloads == null || !FileLinks.hasFileLink(text)) {
-        Text(text, style = style, color = color)
+        Text(text, modifier = textModifier, style = style, color = color)
         return
     }
     val parts = remember(text) { FileLinks.split(text) }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    // One node for TalkBack: the text parts merge into the message node that carries the Copy action; each file card is its own merge boundary, so it stays a separate node.
+    Column(modifier = textModifier.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         parts.forEach { part ->
             when (part) {
                 is MessagePart.Text -> Text(part.text.trim('\n'), style = style, color = color)
-                is MessagePart.File -> FileCardHost(bridge, downloads, part.link)
+                is MessagePart.File -> Box(Modifier.semantics(mergeDescendants = true) {}) { FileCardHost(bridge, downloads, part.link) }
                 is MessagePart.Unavailable -> Text(
                     if (part.name == null) stringResource(R.string.file_not_available)
                     else stringResource(R.string.file_not_available_named, part.name),

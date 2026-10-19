@@ -1,11 +1,5 @@
 package app.rasul.settings
 
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
-import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -21,10 +15,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -34,13 +26,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
-import androidx.core.content.ContextCompat
 import app.rasul.R
 import app.rasul.data.ActiveTarget
 import app.rasul.data.CapabilitiesDto
@@ -122,6 +112,8 @@ fun MoreScreen(
     onHapticsChanged: (Boolean) -> Unit = {},
     approvalAlertsEnabled: Boolean = false,
     onApprovalAlertsChanged: (Boolean) -> Unit = {},
+    jobAlertsEnabled: Boolean = false,
+    onJobAlertsChanged: (Boolean) -> Unit = {},
     onHelp: () -> Unit = {},
     onPrivacy: () -> Unit = {},
     onFeedback: () -> Unit = {},
@@ -171,6 +163,8 @@ fun MoreScreen(
             showApprovalAlerts = approvalAlertsRowVisible(bridgeState),
             approvalAlerts = approvalAlertsEnabled,
             onApprovalAlertsChanged = onApprovalAlertsChanged,
+            jobAlerts = jobAlertsEnabled,
+            onJobAlertsChanged = onJobAlertsChanged,
             onHelp = onHelp,
             onPrivacy = onPrivacy,
             onFeedback = onFeedback,
@@ -242,6 +236,8 @@ fun MoreContent(
     showApprovalAlerts: Boolean = false,
     approvalAlerts: Boolean = false,
     onApprovalAlertsChanged: (Boolean) -> Unit = {},
+    jobAlerts: Boolean = false,
+    onJobAlertsChanged: (Boolean) -> Unit = {},
     onHelp: () -> Unit = {},
     onPrivacy: () -> Unit = {},
     onFeedback: () -> Unit = {},
@@ -378,7 +374,14 @@ fun MoreContent(
                 AppLockSettingRow(appLockEnabled, appLockAvailable, onAppLockChanged, last = false)
             }
             if (showApprovalAlerts) {
-                ApprovalAlertsRow(approvalAlerts, onApprovalAlertsChanged)
+                AlertToggleRow(
+                    R.string.approval_alerts, R.string.approval_alerts_summary, R.string.approval_alerts_denied,
+                    approvalAlerts, onApprovalAlertsChanged,
+                )
+                AlertToggleRow(
+                    R.string.job_alerts, R.string.job_alerts_summary, R.string.job_alerts_denied,
+                    jobAlerts, onJobAlertsChanged,
+                )
             }
             RasulRow(
                 onClick = onAppearanceRow, contentPadding = rowPad, gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
@@ -501,53 +504,23 @@ private fun AppLockSettingRow(
 }
 
 /**
- * Opt-in approval alerts while Rasul is closed. Enabling asks for POST_NOTIFICATIONS on API 33+;
+ * Opt-in alerts while Rasul is closed (approvals, job results). Enabling asks for POST_NOTIFICATIONS on API 33+;
  * a denial keeps the toggle off and shows where to allow it. Below-33 needs no permission.
  */
 @Composable
-private fun ApprovalAlertsRow(enabled: Boolean, onChanged: (Boolean) -> Unit) {
-    val context = LocalContext.current
-    var denied by rememberSaveable { mutableStateOf(false) }
-    val askNotifications = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> if (granted) onChanged(true) else denied = true }
+private fun AlertToggleRow(title: Int, summary: Int, deniedBody: Int, enabled: Boolean, onChanged: (Boolean) -> Unit) {
+    val toggle = rememberNotificationToggle(title, deniedBody, onChanged)
     RasulRow(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 6.dp),
         gap = 10.dp, hairlineStart = 16.dp, hairlineEnd = 54.dp,
         leading = { Icon(RasulIcons.Bot, null, tint = Rasul.colors.ink, modifier = Modifier.size(24.dp)) },
         trailing = {
-            app.rasul.ui.components.RasulToggle(
-                enabled,
-                label = stringResource(R.string.approval_alerts),
-            ) { checked ->
-                when {
-                    !checked -> onChanged(false)
-                    Build.VERSION.SDK_INT < 33 -> onChanged(true)
-                    ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) ==
-                        PackageManager.PERMISSION_GRANTED -> onChanged(true)
-                    else -> askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-                }
-            }
+            app.rasul.ui.components.RasulToggle(enabled, label = stringResource(title)) { checked -> toggle(checked) }
         },
     ) {
         // Plain Text on purpose: the single-line ellipsis path of RowTitle reports visual overflow for short Arabic titles.
-        Text(stringResource(R.string.approval_alerts), style = RasulType.rowTitle, color = Rasul.colors.ink, modifier = Modifier.fillMaxWidth())
-        Text(stringResource(R.string.approval_alerts_summary), style = RasulType.rowSub, color = Rasul.colors.muted, modifier = Modifier.fillMaxWidth())
-    }
-    if (denied) {
-        AlertDialog(
-            onDismissRequest = { denied = false },
-            title = { Text(stringResource(R.string.approval_alerts)) },
-            text = { Text(stringResource(R.string.approval_alerts_denied)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    denied = false
-                    context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
-                }) { Text(stringResource(R.string.pair_open_settings)) }
-            },
-            dismissButton = { TextButton(onClick = { denied = false }) { Text(stringResource(R.string.cancel)) } },
-        )
+        Text(stringResource(title), style = RasulType.rowTitle, color = Rasul.colors.ink, modifier = Modifier.fillMaxWidth())
+        Text(stringResource(summary), style = RasulType.rowSub, color = Rasul.colors.muted, modifier = Modifier.fillMaxWidth())
     }
 }
 
@@ -638,7 +611,7 @@ private fun MoreBridgeAr() = RasulTheme(false) {
 private fun MoreAlertsEn() = RasulTheme(false) {
     MoreContent(
         samplePcs, "a", LanguageOption.System, {}, {}, {},
-        bridges = sampleBridgeRows, showApprovalAlerts = true, approvalAlerts = true,
+        bridges = sampleBridgeRows, showApprovalAlerts = true, approvalAlerts = true, jobAlerts = true,
         showAppLockSetting = true, appearance = AppearanceOption.System,
         hapticsEnabled = true, versionName = PREVIEW_VERSION,
     )
@@ -649,7 +622,7 @@ private fun MoreAlertsEn() = RasulTheme(false) {
 private fun MoreAlertsAr() = RasulTheme(false) {
     MoreContent(
         samplePcs, "a", LanguageOption.System, {}, {}, {},
-        bridges = sampleBridgeRows, showApprovalAlerts = true, approvalAlerts = true,
+        bridges = sampleBridgeRows, showApprovalAlerts = true, approvalAlerts = true, jobAlerts = true,
         showAppLockSetting = true, appearance = AppearanceOption.System,
         hapticsEnabled = true, versionName = PREVIEW_VERSION,
     )

@@ -421,6 +421,20 @@ class Desktop:
                 raise ValueError
         return path.read_bytes()
 
+    def served_profiles(self):
+        """Profiles listed in the running dashboard's host record; None when no record can be read."""
+        directory = self.directory()
+        for role in ("serve", "-".join(("desktop", "serve"))):
+            try:
+                record = decode(self.read_private(directory / ("host-" + role + ".json")))
+                profiles = record["profiles"]
+                if (record["role"] == role and type(profiles) is list
+                        and all(type(profile) is str for profile in profiles)):
+                    return profiles
+            except (OSError, ValueError, TypeError, KeyError, EOFError):
+                continue
+        return None
+
     async def discover(self, profile):
         directory = self.directory()
         for role in ("serve", "-".join(("desktop", "serve"))):

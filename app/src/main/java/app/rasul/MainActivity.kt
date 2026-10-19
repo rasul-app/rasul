@@ -84,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) container.appScope.launch { container.fileDownloads.cleanup() }
         openNotificationChat(intent)
         openNotificationApprovals(intent)
+        openNotificationJobRuns(intent)
         // A recreated activity (rotation, process restore) must not read the same share again, nor one reopened from recents.
         if (savedInstanceState == null && intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0) receiveShare(intent)
         authenticator = AppLockAuthenticator(this) { credentialIntent, onSuccess, onCancel ->
@@ -141,6 +142,7 @@ class MainActivity : AppCompatActivity() {
         setIntent(intent)
         openNotificationChat(intent)
         openNotificationApprovals(intent)
+        openNotificationJobRuns(intent)
         receiveShare(intent)
     }
 
@@ -173,6 +175,12 @@ class MainActivity : AppCompatActivity() {
         val route = intent?.getStringExtra(app.rasul.notifications.APPROVALS_ROUTE) ?: return
         intent.removeExtra(app.rasul.notifications.APPROVALS_ROUTE)
         if (app.rasul.notifications.isApprovalsRoute(route)) container.pendingChat.value = route
+    }
+
+    private fun openNotificationJobRuns(intent: Intent?) {
+        val route = intent?.getStringExtra(app.rasul.notifications.JOB_RUNS_ROUTE) ?: return
+        intent.removeExtra(app.rasul.notifications.JOB_RUNS_ROUTE)
+        if (app.rasul.notifications.isJobRunsRoute(route)) container.pendingChat.value = route
     }
 
     override fun onStart() {

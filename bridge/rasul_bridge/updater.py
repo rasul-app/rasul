@@ -107,7 +107,8 @@ def map_check(raw):
     else:
         reason = "not_applicable"
     return {"current": clean(raw.get("current_version"), 64) or "unknown", "latest": latest,
-            "behind": behind, "can_apply": reason is None, "reason": reason, "changes": changes}
+            "behind": behind, "can_apply": reason is None, "reason": reason, "changes": changes,
+            "update_available": raw.get("update_available") is True}
 
 
 class Updater:
@@ -115,7 +116,7 @@ class Updater:
         self.desktop, self.poll = desktop, poll
         self.state, self.result, self.queued_at = "idle", None, None
         self.check = {"current": "unknown", "latest": None, "behind": 0, "can_apply": False,
-                      "reason": "dashboard_not_running", "changes": []}
+                      "reason": "dashboard_not_running", "changes": [], "update_available": False}
         self.applies = deque()
         self.lock = asyncio.Lock()
         self.task = None
@@ -126,7 +127,27 @@ class Updater:
     # -- plumbing -----------------------------------------------------------------
 
     async def dashboard(self, profile):
-        upstream, token = await self.desktop.discover(profile)
+        try:
+            upstream, token = await self.desktop.discover(profile)
+        except HTTPError:
+            # The update belongs to the installation. A profile created after the dashboard started
+            # is not listed in its host record, so only in that case run through a profile the record
+            # does list: the default one, else any other. Any other discovery failure is raised as is.
+            served = self.desktop.served_profiles()
+            if profile == "default" or served is None or profile in served:
+                raise
+            known = self.desktop.profiles.directories()
+            upstream = None
+            for profile in ["default", *sorted(name for name in served if name != "default")]:
+                if profile not in served or profile not in known:
+                    continue
+                try:
+                    upstream, token = await self.desktop.discover(profile)
+                    break
+                except HTTPError:
+                    continue
+            if upstream is None:
+                raise
         self.dash_pid = upstream.record["pid"]
 
         async def request(verb, path, data=None, **parameters):

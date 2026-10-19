@@ -70,6 +70,10 @@ internal fun idleChip(status: HermesUpdateDto): IdleChip = when {
 internal fun knownVersion(version: String?): String? =
     version?.trim()?.takeIf { it.isNotEmpty() && !it.equals("unknown", ignoreCase = true) }
 
+/** The Latest row: the version when Hermes gave one, else "newer version" when it only said an update exists. */
+internal fun latestText(status: HermesUpdateDto, newer: String, unknown: String): String =
+    knownVersion(status.latest?.take(7)) ?: if (status.updateAvailable) newer else unknown
+
 /** The fixed result sentences of the bridge (updater.py) with their own EN + AR strings. */
 private val RESULT_MESSAGES: Map<String, Int> = mapOf(
     "Cancelled." to R.string.hupd_res_cancelled,
@@ -197,13 +201,13 @@ private fun StatusBody(
         SectionLabel(stringResource(R.string.hupd_versions))
         InsetGroup {
             VersionRow(R.string.hupd_current, knownVersion(status.current) ?: unknown, last = false)
-            VersionRow(R.string.hupd_latest, knownVersion(status.latest?.take(7)) ?: unknown, last = false)
+            VersionRow(R.string.hupd_latest, latestText(status, stringResource(R.string.hupd_latest_newer), unknown), last = false)
             VersionRow(
                 R.string.hupd_agents, status.activeAgents?.let { stringResource(R.string.check_count, it) } ?: unknown, last = true,
             )
         }
         StateBlock(status)
-        ChangesBlock(status.changes)
+        ChangesBlock(status.changes, status.updateAvailable)
         ActionsBlock(state, status, onWhenIdle, onNowAsk, onCancel)
     }
 }
@@ -293,13 +297,13 @@ private fun ResultBlock(status: HermesUpdateDto, pad: Modifier) {
 }
 
 @Composable
-private fun ChangesBlock(changes: List<HermesChangeDto>) {
+private fun ChangesBlock(changes: List<HermesChangeDto>, updateAvailable: Boolean) {
     val c = Rasul.colors
     SectionLabel(stringResource(R.string.hupd_whats_new), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 8.dp))
     InsetGroup {
         if (changes.isEmpty()) {
             Text(
-                stringResource(R.string.hupd_changes_empty), style = RasulType.body, color = c.muted,
+                stringResource(if (updateAvailable) R.string.hupd_changes_not_sent else R.string.hupd_changes_empty), style = RasulType.body, color = c.muted,
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
             )
         } else {
@@ -424,6 +428,19 @@ private fun HermesUpdateNowConfirmAr() = RasulTheme(false) {
         onCancel = {}, onConfirm = {}, destructive = true,
     )
 }
+
+private val noDetailStatus = HermesUpdateDto(current = "0.22.0", behind = null, canApply = true, activeAgents = 0)
+
+@Composable
+private fun NoDetailPreview() = HermesUpdateContent(HermesUpdateState(status = noDetailStatus), "My PC", {}, {}, {}, {}, {})
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 780, name = "HermesUpdateNoDetail")
+@Composable
+private fun HermesUpdateNoDetailEn() = RasulTheme(false) { NoDetailPreview() }
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 780, locale = "ar", name = "HermesUpdateNoDetail")
+@Composable
+private fun HermesUpdateNoDetailAr() = RasulTheme(false) { NoDetailPreview() }
 
 private val unknownStatus = HermesUpdateDto(current = "0.21.4", behind = 0, reason = "dashboard_not_running", activeAgents = null)
 

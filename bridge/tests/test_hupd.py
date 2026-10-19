@@ -107,7 +107,7 @@ async def test_check_mapping_caps_and_text_filtering(tmp_path, monkeypatch):
         status, value = await call("GET", "/hermes/update")
         assert status == 200
         assert set(value) == {"current", "latest", "behind", "can_apply", "reason", "changes",
-                              "state", "active_agents", "queued_at", "result"}
+                              "update_available", "state", "active_agents", "queued_at", "result"}
         assert (value["current"], value["latest"], value["behind"]) == ("1.0", "abcdef1", 30)
         assert value["can_apply"] is True and value["reason"] is None and value["state"] == "idle"
         assert len(value["changes"]) == 17  # 20 raw commits, 3 of them junk
@@ -638,3 +638,96 @@ async def test_two_concurrent_applies_start_exactly_one(tmp_path, monkeypatch):
         assert (failure.status, failure.message) == (409, "update_in_progress")
         assert next(o for o in outcomes if isinstance(o, tuple))[0] == 202
         assert len(fake.posts("/api/hermes/update")) == 1
+
+
+@asynchronous
+async def test_profile_missing_from_the_host_record_still_checks_and_updates(tmp_path, monkeypatch):
+    """The record lists the profiles served when the dashboard started; a profile created later is
+    not in it, but the update belongs to the installation, so it runs through a listed profile."""
+    async with hermes(tmp_path, monkeypatch) as (bridge, fake, call):
+        (bridge.config.hermes_home / "profiles" / "admin").mkdir(parents=True)
+        fast(bridge)
+        other = "/v1/profiles/admin/desktop"
+        status, value = await call("GET", "/hermes/update", prefix=other)
+        assert status == 200
+        assert (value["current"], value["can_apply"], value["reason"]) == ("1.0", True, None)
+        status, value = await call("POST", "/hermes/update", {"mode": "now"}, prefix=other)
+        assert status == 202
+        assert len(fake.posts("/api/hermes/update")) == 1
+        assert all("profile=admin" not in request[1] for request in fake.requests)
+        await until(lambda: bridge.desktop.updater.state == "done")
+
+
+@asynchronous
+async def test_profile_missing_from_the_record_with_no_dashboard_is_still_not_running(tmp_path, monkeypatch):
+    async with hermes(tmp_path, monkeypatch) as (bridge, fake, call):
+        (bridge.config.hermes_home / "profiles" / "admin").mkdir(parents=True)
+        fake.record.unlink()
+        value = (await call("GET", "/hermes/update", prefix="/v1/profiles/admin/desktop"))[1]
+        assert value["can_apply"] is False and value["reason"] == "dashboard_not_running"
+
+
+@asynchronous
+async def test_other_discovery_error_does_not_fall_back(tmp_path, monkeypatch):
+    """A profile the record lists but whose discovery fails is not swapped for the default one."""
+    async with hermes(tmp_path, monkeypatch) as (bridge, fake, call):
+        (bridge.config.hermes_home / "profiles" / "admin").mkdir(parents=True)
+        record = json.loads(fake.record.read_text())
+        record["profiles"] = ["default", "admin"]
+        fake.record.write_text(json.dumps(record))
+        asked, original = [], bridge.desktop.discover
+
+        async def discover(profile):
+            asked.append(profile)
+            if profile == "admin":
+                raise updater_module.HTTPError(503, "desktop_unavailable")
+            return await original(profile)
+        monkeypatch.setattr(bridge.desktop, "discover", discover)
+        value = (await call("GET", "/hermes/update", prefix="/v1/profiles/admin/desktop"))[1]
+        assert (value["can_apply"], value["reason"]) == (False, "dashboard_not_running")
+        assert asked == ["admin"]
+        assert not fake.requests
+
+
+@asynchronous
+async def test_record_serving_only_a_non_default_profile_is_used(tmp_path, monkeypatch):
+    async with hermes(tmp_path, monkeypatch) as (bridge, fake, call):
+        for name in ("admin", "other"):
+            (bridge.config.hermes_home / "profiles" / name).mkdir(parents=True)
+        record = json.loads(fake.record.read_text())
+        record["profiles"] = ["other"]
+        fake.record.write_text(json.dumps(record))
+        fake.profile = "other"
+        fast(bridge)
+        prefix = "/v1/profiles/admin/desktop"
+        status, value = await call("GET", "/hermes/update", prefix=prefix)
+        assert status == 200
+        assert (value["current"], value["can_apply"], value["reason"]) == ("1.0", True, None)
+        assert fake.requests and all("profile=other" in request[1] for request in fake.requests
+                                     if request[1].startswith("/api/hermes"))
+        assert (await call("POST", "/hermes/update", {"mode": "now"}, prefix=prefix))[0] == 202
+        await until(lambda: bridge.desktop.updater.state == "done")
+
+
+@asynchronous
+async def test_queued_update_keeps_hermes_update_available(tmp_path, monkeypatch):
+    async with hermes(tmp_path, monkeypatch) as (bridge, fake, call):
+        fake.behind = -1
+        original = fake.result
+
+        def result(method, path, value):
+            data = original(method, path, value)
+            if path == "/api/hermes/update/check":
+                data["update_available"] = True
+            return data
+        fake.result = result
+        fake.running = True
+        fast(bridge)
+        assert (await call("GET", "/hermes/update"))[1]["update_available"] is True
+        assert (await call("POST", "/hermes/update", {"mode": "now"}))[0] == 202
+        value = (await call("GET", "/hermes/update"))[1]
+        assert value["state"] == "running" and value["reason"] == "update_in_progress"
+        assert value["behind"] is None and value["can_apply"] is False
+        assert value["update_available"] is True
+        fake.running = False
+        await until(lambda: bridge.desktop.updater.state == "done")

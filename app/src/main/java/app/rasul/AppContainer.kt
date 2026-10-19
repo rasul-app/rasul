@@ -33,7 +33,7 @@ class AppContainer(
     val client = HermesClient()
     val sessions = SessionsClient(client)
     val sessionControl = app.rasul.sessions.SessionControlClient(client)
-    val jobs = JobsClient(client)
+    val jobs: app.rasul.jobs.JobsApi = JobsClient(client)
     val drafts = app.rasul.data.DraftStore(context.chatExtrasDataStore, KeystoreSecretCipher())
     /** Draft writes queue apart from [runWriter], so a slow draft write never delays a run breadcrumb. */
     val draftWriter = OrderedWriter(appScope)
@@ -67,6 +67,7 @@ class AppContainer(
     /** Bot key (`bridge:<bridgeId>:<profileId>`) of the open approvals screen, if any. */
     val approvalsVisible = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     val approvalAlerts = app.rasul.notifications.ApprovalAlerts(this, context.applicationContext)
+    val jobSeen = app.rasul.notifications.JobSeenStore(context.dataStore)
     val updatePrefs = app.rasul.update.UpdatePrefs(context.dataStore)
     val updateInstaller = app.rasul.update.SessionApkInstaller(context.applicationContext)
     val updates = app.rasul.update.UpdateController(

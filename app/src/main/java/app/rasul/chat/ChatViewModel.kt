@@ -153,6 +153,8 @@ data class ActiveRun(
     val lastSeq: Long? = null,
     /** The assistant bubble currently being streamed into; null between segments (after a tool call). */
     val draftId: Long? = null,
+    /** What the progress card shows; built only from the events of this run. */
+    val progress: RunProgress = RunProgress(startedAtMs),
 ) {
     val label: StatusLabel get() = if (stopRequested) StatusLabel.Stopping else status
 }
@@ -179,6 +181,8 @@ data class ChatState(
     val terminal: RunEvent? = null,
     val terminalFailure: ChatFailure? = null,
     val finishedRunId: String? = null,
+    /** The line kept under the reply of the run [finishedRunId]; not saved across app restarts. */
+    val summary: RunSummary? = null,
     val queuedReplies: Int = 0,
     val preparingSend: Boolean = false,
     /** Staged (not yet sent) attachments, shown as removable chips above the composer. */
@@ -412,7 +416,7 @@ class ChatViewModel(
                         it.copy(
                             load = ChatLoad.Ready,
                             run = if (stored != null && it.run == null) {
-                                ActiveRun(stored, now(), StatusLabel.Thinking)
+                                ActiveRun(stored, now(), StatusLabel.Thinking, progress = RunProgress.restored(now()))
                             } else {
                                 it.run
                             },
@@ -717,7 +721,14 @@ class ChatViewModel(
         followJob?.cancel()
         statusJob?.cancel()
         if (missingRunWaitingForHistory == id) missingRunWaitingForHistory = null
-        var finished = changed.copy(run = null, finishedRunId = id, approvals = emptyList(), answering = emptySet())
+        val summary = RunSummary(
+            runId = id,
+            outcome = outcomeOf(changed.terminal),
+            elapsedMs = if (run.progress.restored) null else (now() - run.startedAtMs).coerceAtLeast(0),
+            stepCount = run.progress.stepCount,
+            steps = run.progress.steps,
+        )
+        var finished = changed.copy(run = null, finishedRunId = id, summary = summary, approvals = emptyList(), answering = emptySet())
         if (!pendingSteer.isNullOrBlank()) {
             finished = finished.copy(draft = joinDraft(pendingSteer, finished.draft)).msg(MessageKind.Info, INFO_STEER_RETURNED)
         }
@@ -1040,7 +1051,7 @@ class ChatViewModel(
                     _state.update {
                         applied = it.run != null && it.run.runId == null
                         // Drop only the attachments this send carried; a text-only notification reply leaves staged chips.
-                        if (applied) it.withRun { run -> run.copy(runId = id) }
+                        if (applied) it.withRun { run -> run.copy(runId = id, progress = run.progress.copy(receivedAt = now(), lastEventAt = now())) }
                             .copy(attachments = it.attachments.filterNot { a -> staged.any { s -> s.key == a.key } }) else it
                     }
                     if (!applied) return@launch
@@ -1253,7 +1264,10 @@ class ChatViewModel(
             val i = s.approvals.indexOfFirst { it.requestId == null }
             if (i < 0) s.approvals else s.approvals.filterIndexed { j, _ -> j != i }
         }
-        val r = s.run?.let { if (left.isEmpty() && it.status == StatusLabel.WaitingApproval) it.copy(status = StatusLabel.Thinking) else it }
+        val r = s.run?.let {
+            val cleared = if (left.isEmpty()) it.copy(progress = it.progress.approvalCleared()) else it
+            if (left.isEmpty() && it.status == StatusLabel.WaitingApproval) cleared.copy(status = StatusLabel.Thinking) else cleared
+        }
         return s.copy(approvals = left, run = r)
     }
 
@@ -1270,7 +1284,7 @@ class ChatViewModel(
         val cur = s.run?.status
         // Lost and LiveUpdatesUnavailable keep their label so Reconnect / Refresh stay on the card.
         val st = if (cur == StatusLabel.Lost || cur == StatusLabel.LiveUpdatesUnavailable) cur else StatusLabel.WaitingApproval
-        return s.copy(approvals = list, run = s.run?.copy(status = st ?: StatusLabel.WaitingApproval))
+        return s.copy(approvals = list, run = s.run?.copy(status = st ?: StatusLabel.WaitingApproval, progress = s.run.progress.approval()))
     }
 
     /** An approval taken from GET /v1/runs/{id}: add-only, because the status is lossy (api_server_runs.py:270-271, 1158). */
@@ -1282,7 +1296,9 @@ class ChatViewModel(
         follow(t, runId, after).collect { u ->
             if (!isCurrent(runId)) return@collect
             when (u) {
-                is RunUpdate.Reconnecting -> updateRun(runId) { it.withRun { r -> r.copy(status = StatusLabel.Reconnecting(u.attempt, u.max)) } }
+                is RunUpdate.Reconnecting -> updateRun(runId) {
+                    it.withRun { r -> r.copy(status = StatusLabel.Reconnecting(u.attempt, u.max), progress = r.progress.reconnecting(u.attempt, u.max)) }
+                }
                 is RunUpdate.Lost ->
                     if (u.error == HermesError.NotFound) startStatusCheck(t, runId, attach = false)
                     else updateRun(runId) {
@@ -1307,12 +1323,23 @@ class ChatViewModel(
         st.withRun { it.copy(status = next) }
     }
 
+    /** Updates the progress model; while approvals are open an activity phase stays WaitingApproval, like [setStatus]. */
+    private fun progress(id: String, f: RunProgress.() -> RunProgress) = updateRun(id) { st ->
+        st.withRun { r ->
+            val next = r.progress.f()
+            val held = st.approvals.isNotEmpty() && (next.phase !is RunPhase.Reconnecting)
+            r.copy(progress = if (held) next.copy(phase = RunPhase.WaitingApproval) else next)
+        }
+    }
+
     private fun onEvent(id: String, e: RunEvent) {
         if (!isCurrent(id)) return
+        progress(id) { alive(now()) }
         when (e) {
             is RunEvent.MessageDelta -> {
                 updateRun(id) { appendDelta(it, e.delta) }
                 setStatus(id, StatusLabel.Writing)
+                progress(id) { writing() }
             }
             is RunEvent.MessageInterim -> updateRun(id) { s ->
                 val n = if (!e.alreadyStreamed && e.text.isNotBlank()) s.msg(MessageKind.Assistant, e.text) else s
@@ -1322,14 +1349,26 @@ class ChatViewModel(
                 // A tool call ends the current answer segment: the next text is its own bubble.
                 updateRun(id) { it.withRun { r -> r.copy(draftId = null) } }
                 setStatus(id, StatusLabel.Tool(e.tool))
+                progress(id) { toolStarted(e.tool, e.preview, now()) }
             }
-            is RunEvent.ToolCompleted, is RunEvent.Reasoning -> setStatus(id, StatusLabel.Thinking)
-            is RunEvent.Subagent -> setStatus(id, StatusLabel.Helper)
+            is RunEvent.ToolCompleted -> {
+                setStatus(id, StatusLabel.Thinking)
+                progress(id) { toolCompleted(e.tool, e.durationSeconds, e.error, e.preview, now()) }
+            }
+            is RunEvent.Reasoning -> {
+                setStatus(id, StatusLabel.Thinking)
+                progress(id) { thinking() }
+            }
+            is RunEvent.Subagent -> {
+                setStatus(id, StatusLabel.Helper)
+                progress(id) { thinking() }
+            }
             is RunEvent.ApprovalRequest -> updateRun(id) { addApproval(it, e, replace = true) }
             // Without an id the event cannot be matched to a pending approval, so it removes nothing.
             is RunEvent.ApprovalResponded -> if (e.requestId != null) updateRun(id) { removeApproval(it, e.requestId) }
             is RunEvent.ReplayTruncated -> updateRun(id) { it.msg(MessageKind.Info, INFO_REPLAY_TRUNCATED) }
-            RunEvent.Steered, RunEvent.Stopping -> Unit
+            RunEvent.Steered -> progress(id) { steered(now()) }
+            RunEvent.Stopping -> Unit
             is RunEvent.Completed -> finish(id, e.pendingSteer, outcome = if (e.output.isNotEmpty()) Outcome.Answered else Outcome.NoAnswer) { s ->
                 (if (e.output.isNotEmpty()) setFinalText(s, e.output) else s).copy(terminal = e)
             }

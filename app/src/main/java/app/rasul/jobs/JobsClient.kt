@@ -25,6 +25,7 @@ data class JobDto(
     @SerialName("next_run_at") val nextRunAt: JsonElement? = null,
     @SerialName("last_run_at") val lastRunAt: JsonElement? = null,
     @SerialName("last_status") val lastStatus: String? = null,
+    @SerialName("last_error") val lastError: JsonElement? = null,
     val schedule: JsonElement? = null,
     val prompt: String? = null,
 ) {
@@ -54,6 +55,31 @@ data class JobDto(
         }
 
     val isPaused: Boolean get() = jobState == JobState.Paused
+
+    /** How the last finished run ended, or null when the job has no recorded status. */
+    val lastRun: LastRunStatus? get() = lastRunStatus(lastStatus)
+
+    /** The error text of a failed run; blank or non-text values count as none. */
+    val lastErrorText: String?
+        get() = (lastError as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+/** `last_status` of a cron job: "ok", "error", "delivery_failed", or another explicit status string. */
+sealed interface LastRunStatus {
+    data object Succeeded : LastRunStatus
+    data object Failed : LastRunStatus
+    data object DeliveryFailed : LastRunStatus
+    data class Other(val raw: String) : LastRunStatus
+}
+
+fun lastRunStatus(raw: String?): LastRunStatus? {
+    val text = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return when (text.lowercase()) {
+        "ok" -> LastRunStatus.Succeeded
+        "error" -> LastRunStatus.Failed
+        "delivery_failed" -> LastRunStatus.DeliveryFailed
+        else -> LastRunStatus.Other(text)
+    }
 }
 
 enum class JobState {

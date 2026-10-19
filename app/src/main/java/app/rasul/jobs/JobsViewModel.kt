@@ -2,6 +2,11 @@ package app.rasul.jobs
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.rasul.bridge.DesktopApi
+import app.rasul.bridge.DesktopError
+import app.rasul.bridge.JobRunDto
+import app.rasul.bridge.desktopApi
+import app.rasul.bridge.desktopFailure
 import app.rasul.data.ActiveTarget
 import app.rasul.data.ConnectionStore
 import app.rasul.data.HermesError
@@ -28,6 +33,8 @@ class JobsViewModel(
     private val store: ConnectionStore,
     private val pcs: ActivePcHolder,
     private val client: JobsApi,
+    /** The bridge-only run-history API of a target; null for a direct connection. */
+    private val desktop: (HermesTarget) -> DesktopApi? = { it.desktopApi() },
 ) : ViewModel() {
     private val _state = MutableStateFlow<Load<List<JobDto>>>(Load.Loading)
     val state: StateFlow<Load<List<JobDto>>> = _state
@@ -46,6 +53,10 @@ class JobsViewModel(
     /** Id of the job an action is running for (its buttons are disabled meanwhile). */
     private val _busy = MutableStateFlow<String?>(null)
     val busy: StateFlow<String?> = _busy
+
+    /** The expanded "Last result" of each job, by job id. Fetched only when the user taps; cleared on every reload. */
+    private val _lastResults = MutableStateFlow<Map<String, LastResult>>(emptyMap())
+    val lastResults: StateFlow<Map<String, LastResult>> = _lastResults
 
     private val refreshes = MutableStateFlow(0)
 
@@ -72,6 +83,7 @@ class JobsViewModel(
                     _busy.value = null
                 }
                 _state.value = Load.Loading
+                _lastResults.value = emptyMap()
                 _state.value = pending ?: try {
                     target.load { client.list(it) }
                 } catch (e: CancellationException) {
@@ -100,6 +112,32 @@ class JobsViewModel(
     fun runNow(source: ActiveTarget.Ready, j: JobDto) {
         if (j.jobState.isTerminal) return
         act(source, j.id) { t -> client.runNow(t, j.id) }
+    }
+
+    /**
+     * "Last result" on a bridge job card: the first tap fetches runs?limit=1 for that one job (never on list load, so
+     * the bridge's per-minute limit is spared), a tap on an open result closes it, a tap after an error retries.
+     */
+    fun toggleLastResult(source: ActiveTarget.Ready, j: JobDto) {
+        val shown = _lastResults.value[j.id]
+        if (shown is LastResult.Loading) return
+        if (shown is LastResult.Ready) {
+            _lastResults.update { it - j.id }
+            return
+        }
+        val api = desktop(source.target) ?: return
+        val gen = generation
+        _lastResults.update { it + (j.id to LastResult.Loading) }
+        viewModelScope.launch {
+            val result: LastResult? = try {
+                if (pcs.currentTarget() != source) null else LastResult.Ready(api.jobRuns(j.id, limit = 1).firstOrNull())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                LastResult.Failed(desktopFailure(e))
+            }
+            if (gen == generation) _lastResults.update { if (result == null) it - j.id else it + (j.id to result) }
+        }
     }
 
     fun clearActionError() { _actionError.value = null }
@@ -273,4 +311,11 @@ class JobsViewModel(
             }
         }
     }
+}
+
+/** What the "Last result" action shows under a job card. */
+sealed interface LastResult {
+    data object Loading : LastResult
+    data class Ready(val run: JobRunDto?) : LastResult
+    data class Failed(val error: DesktopError) : LastResult
 }

@@ -366,6 +366,10 @@ async def test_run_events_history_and_download_over_the_link(tmp_path):
             assert status == 200 and str(work) not in body.decode() and "rasul-file://" in body.decode()
             status, _, body = await fetch(link, reader, "/v1/profiles/default/hermes/api/sessions/s1/messages")
             assert status == 200 and str(work) not in body.decode() and "rasul-file://" in body.decode()
+            upstream.json["/api/sessions/s2/messages"] = {"object": "list", "session_id": "s2", "data": [
+                {"role": "assistant", "content": text}], "pagination": {}}
+            status, _, body = await fetch(link, reader, "/v1/profiles/default/hermes/api/sessions/s2/messages")
+            assert status == 200 and str(work) not in body.decode() and "rasul-file://" in body.decode()
 
             status, head, body = await fetch(link, reader, "/v1/files/" + tokens[0])
             assert status == 200 and body == pdf.read_bytes()
@@ -483,6 +487,64 @@ def test_run_and_history_json_mint_only_assistant_output(tmp_path):
     assert [("rasul-file://" in str(m["content"])) for m in messages] == [False, False, False, True, True]
     assert messages[0]["content"] == "send [file]" and messages[3]["reasoning"] == "think [file]"
     assert str(work) not in json.dumps(messages)
+
+
+@pytest.mark.parametrize("key", ["data", "messages"])
+def test_history_list_key_of_the_agent_mints_only_assistant_tags(tmp_path, key):
+    files, work, _ = make(tmp_path)
+    png = work / "shot.png"
+    png.write_bytes(b"\x89PNG")
+    tag = f"MEDIA:{png}"
+    body = {"object": "list", "session_id": "s1", key: [
+        {"role": "assistant", "content": tag}, {"role": "user", "content": f"look {tag}"}],
+        "pagination": {"note": f"x {tag}"}}
+    history = files.filter("dev", "default", "/api/sessions/{id}/messages")
+    history.feed(json.dumps(body).encode())
+    value = json.loads(b"".join(history.finish()))
+    assert "rasul-file://" in value[key][0]["content"] and str(work) not in json.dumps(value)
+    assert value[key][1]["content"] == "look [file]" and value["pagination"]["note"] == "x [file]"
+
+
+def strict_files(tmp_path):
+    clock = Clock()
+    clock.now = time.time()
+    files, work, _ = make(tmp_path, clock)
+    write_config(tmp_path / "upstream", "gateway:\n  strict: true\n")
+    path = work / "shot.png"
+    path.write_bytes(b"\x89PNG-one")
+    return files, clock, path
+
+
+def test_a_file_offered_while_recent_is_offered_again_after_the_window(tmp_path):
+    files, clock, path = strict_files(tmp_path)
+    link = files.mint("dev", "default", str(path))
+    assert link is not None
+    clock.now += files_module.DEFAULT_RECENT_SECONDS + 60
+    assert files.validate(str(path), "default") is None
+    assert files.mint("dev", "default", str(path)) == link
+    entry, stream = files.open("dev", link_token(link))
+    stream.close()
+    assert entry["name"] == "shot.png"
+
+
+def test_a_stale_file_is_not_offered_again_when_anything_differs(tmp_path):
+    files, clock, path = strict_files(tmp_path)
+    assert files.mint("dev", "default", str(path))
+    clock.now += files_module.DEFAULT_RECENT_SECONDS + 60
+    assert files.mint("other", "default", str(path)) is None             # another device
+    assert files.mint("dev", "another", str(path)) is None              # another profile
+    other = path.with_name("other.png")
+    other.write_bytes(b"\x89PNG-two")
+    assert files.mint("dev", "default", str(other)) is None             # never offered
+    path.write_bytes(b"\x89PNG-changed!")
+    assert files.mint("dev", "default", str(path)) is None              # changed since the offer
+
+
+def test_a_stale_file_is_not_offered_again_after_its_link_expired(tmp_path):
+    files, clock, path = strict_files(tmp_path)
+    assert files.mint("dev", "default", str(path))
+    clock.now += files_module.TOKEN_LIFETIME + 1
+    assert files.mint("dev", "default", str(path)) is None
 
 
 def test_denies_match_the_agents_cache_credentials_and_kanban_boards(tmp_path):

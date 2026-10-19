@@ -7,6 +7,7 @@ import app.rasul.desktop.HermesUpdateViewModel
 import app.rasul.desktop.IdleChip
 import app.rasul.desktop.idleChip
 import app.rasul.desktop.knownVersion
+import app.rasul.desktop.latestText
 import app.rasul.desktop.updateNotice
 import app.rasul.desktop.updateResultMessage
 import java.io.File
@@ -122,6 +123,27 @@ class HermesUpdateFixTest {
         fake.updateError = null
         vm.refresh(); settle()
         assertNull(updateNotice(vm.state.value))
+    }
+
+    @Test fun latestRowNamesAnUpdateWhenHermesGivesNoVersion() {
+        val noDetail = HermesUpdateDto(current = "0.22.0", behind = null, canApply = true)
+        assertEquals("Newer", latestText(noDetail, "Newer", "Unknown"))
+        assertEquals("abcdef1", latestText(noDetail.copy(latest = "abcdef1234"), "Newer", "Unknown"))
+        val none = HermesUpdateDto(current = "0.22.0", behind = 0, reason = "dashboard_not_running")
+        assertEquals("Unknown", latestText(none, "Newer", "Unknown"))
+    }
+
+    @Test fun queuedUpdateWithUnknownCountStillShowsTheNewerLine() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        val queued = json.decodeFromString<HermesUpdateDto>(
+            """{"current":"0.22.0","latest":null,"behind":null,"can_apply":false,"reason":"update_in_progress",""" +
+                """"update_available":true,"state":"queued"}""",
+        )
+        assertTrue(queued.updateAvailable)
+        assertEquals("Newer", latestText(queued, "Newer", "Unknown"))
+        assertEquals(IdleChip.Available, idleChip(queued))
+        val before = queued.copy(available = false)
+        assertEquals("Unknown", latestText(before, "Newer", "Unknown"))
     }
 
     @Test fun noNoticeWhenNothingFailed() {

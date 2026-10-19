@@ -2,6 +2,7 @@ package app.rasul.jobs
 
 import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -33,11 +35,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import app.rasul.R
+import app.rasul.bridge.JobRunDto
 import app.rasul.data.ActiveTarget
 import app.rasul.data.HermesError
 import app.rasul.data.Load
@@ -58,6 +63,7 @@ import app.rasul.ui.components.RowTitle
 import app.rasul.ui.components.ScreenHeader
 import app.rasul.ui.components.SmallOutlineButton
 import app.rasul.ui.components.StatusChip
+import app.rasul.settings.rememberNotificationToggle
 import app.rasul.ui.PrimaryScreenActions
 import app.rasul.ui.text
 import app.rasul.ui.theme.Rasul
@@ -76,8 +82,14 @@ fun JobsScreen(
     onPairPc: () -> Unit = {},
     onSearch: () -> Unit = {},
     onOpenHistory: (ActiveTarget.Ready, JobDto) -> Unit = { _, _ -> },
+    /** True while job-result alerts are off, a bridge is paired and the hint was not dismissed. */
+    alertsHint: Boolean = false,
+    onAlertsTurnOn: () -> Unit = {},
+    onAlertsHintDismiss: () -> Unit = {},
 ) {
     val state by vm.state.collectAsState()
+    val lastResults by vm.lastResults.collectAsState()
+    val turnOnAlerts = rememberNotificationToggle(R.string.job_alerts, R.string.job_alerts_denied) { if (it) onAlertsTurnOn() }
     val busy by vm.busy.collectAsState()
     val actionError by vm.actionError.collectAsState()
     val formError by vm.formError.collectAsState()
@@ -110,6 +122,11 @@ fun JobsScreen(
                 list, busy = busy != null,
                 historyAvailable = source?.target?.bridge != null,
                 onHistory = { j -> source?.let { onOpenHistory(it, j) } },
+                lastResults = lastResults,
+                onLastResult = { j -> source?.let { vm.toggleLastResult(it, j) } },
+                alertsHint = alertsHint,
+                onAlertsTurnOn = { turnOnAlerts(true) },
+                onAlertsHintDismiss = onAlertsHintDismiss,
                 // Pause is safe: one tap. Resume can run an overdue job at once: confirm.
                 onToggle = { j -> source?.let { s -> if (j.isPaused) confirmResume = Pending(s, j) else vm.togglePause(s, j) } },
                 onRunNow = { j -> source?.let { confirmRun = Pending(it, j) } },
@@ -174,6 +191,11 @@ internal fun JobList(
     busy: Boolean,
     historyAvailable: Boolean = false,
     onHistory: (JobDto) -> Unit = {},
+    lastResults: Map<String, LastResult> = emptyMap(),
+    onLastResult: (JobDto) -> Unit = {},
+    alertsHint: Boolean = false,
+    onAlertsTurnOn: () -> Unit = {},
+    onAlertsHintDismiss: () -> Unit = {},
     onToggle: (JobDto) -> Unit,
     onRunNow: (JobDto) -> Unit,
     onEdit: (JobDto) -> Unit = {},
@@ -185,6 +207,9 @@ internal fun JobList(
         return
     }
     LazyColumn(Modifier.fillMaxSize()) {
+        if (alertsHint) {
+            item(key = "alerts-hint") { JobAlertsHint(onAlertsTurnOn, onAlertsHintDismiss) }
+        }
         items(list, key = { it.id }) { j ->
             val jobName = j.name?.takeIf { it.isNotBlank() } ?: j.id
             val (badgeBg, badgeIcon, badgeTint) = when (j.jobState) {
@@ -218,6 +243,10 @@ internal fun JobList(
                         SmallOutlineButton(stringResource(R.string.ux3c_job_delete), { onDelete(j) }, enabled = !busy)
                         if (historyAvailable) {
                             SmallOutlineButton(stringResource(R.string.job_run_history), { onHistory(j) }, enabled = !busy)
+                            SmallOutlineButton(
+                                stringResource(R.string.job_last_result), { onLastResult(j) },
+                                description = stringResource(R.string.job_last_result_named, jobName),
+                            )
                         }
                         if (!j.jobState.isTerminal) {
                             SmallOutlineButton(stringResource(R.string.job_run_now), { onRunNow(j) }, enabled = !busy)
@@ -235,6 +264,8 @@ internal fun JobList(
                     JobState.Completed -> RowSub(stringResource(R.string.job_completed), c.successText)
                     JobState.Error -> RowSub(stringResource(R.string.job_failed), c.danger)
                 }
+                JobLastRun(j)
+                lastResults[j.id]?.let { JobLastResultBlock(it, onOpenHistory = { onHistory(j) }) }
             }
         }
         if (!historyAvailable) {
@@ -245,6 +276,81 @@ internal fun JobList(
                     modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 16.dp),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun LastRunStatus.label(): String = when (this) {
+    LastRunStatus.Succeeded -> stringResource(R.string.job_last_status_succeeded)
+    LastRunStatus.Failed -> stringResource(R.string.job_last_status_failed)
+    LastRunStatus.DeliveryFailed -> stringResource(R.string.job_last_status_delivery_failed)
+    is LastRunStatus.Other -> raw
+}
+
+/** "Last run: <time> · Succeeded" (failures in the error colour) and, when the run left one, its error as a muted line. */
+@Composable
+private fun JobLastRun(j: JobDto) {
+    val c = Rasul.colors
+    val status = j.lastRun
+    val time = timeText(j.lastRunAt)
+    if (status == null && time == null) return
+    val label = status?.label()
+    val text = when {
+        time != null && label != null -> stringResource(R.string.job_last_run, time, label)
+        time != null -> stringResource(R.string.job_last_run_time, time)
+        else -> stringResource(R.string.job_last_run_status, label.orEmpty())
+    }
+    val color = when (status) {
+        LastRunStatus.Succeeded -> c.successText
+        LastRunStatus.Failed -> c.danger
+        LastRunStatus.DeliveryFailed -> c.warnText
+        else -> c.muted
+    }
+    RowSub(text, color)
+    if (status !is LastRunStatus.Succeeded) j.lastErrorText?.let { RowSub(it, c.muted, maxLines = 2) }
+}
+
+/** The expanded "Last result": the run's preview as plain text (6 lines at most) and a link to the full history. */
+@Composable
+private fun JobLastResultBlock(result: LastResult, onOpenHistory: () -> Unit) {
+    val c = Rasul.colors
+    when (result) {
+        LastResult.Loading -> RowSub(stringResource(R.string.job_last_result_loading))
+        is LastResult.Failed -> RowSub(stringResource(result.error.message), c.danger)
+        is LastResult.Ready -> {
+            val preview = result.run?.preview?.takeIf { it.isNotBlank() }
+            Text(
+                preview ?: stringResource(if (result.run == null) R.string.job_last_result_none else R.string.job_last_result_empty),
+                style = RasulType.rowSub, color = if (preview != null) c.ink else c.muted,
+                maxLines = 6, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 4.dp).testTag("job_last_result_text"),
+            )
+            Text(
+                stringResource(R.string.job_last_result_open_history),
+                style = RasulType.buttonSmall, color = c.accent,
+                modifier = Modifier.minimumInteractiveComponentSize()
+                    .clickable(role = Role.Button, onClick = onOpenHistory),
+            )
+        }
+    }
+}
+
+/** One-time hint above the list while job-result alerts are off. */
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+internal fun JobAlertsHint(onTurnOn: () -> Unit, onNotNow: () -> Unit) {
+    val c = Rasul.colors
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)
+            .background(c.accentSoft, RasulShapes.dialog).padding(16.dp)
+            .testTag("job_alerts_hint"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(stringResource(R.string.job_alerts_hint), style = RasulType.body, color = c.ink)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallOutlineButton(stringResource(R.string.job_alerts_hint_turn_on), onTurnOn)
+            SmallOutlineButton(stringResource(R.string.job_alerts_hint_not_now), onNotNow)
         }
     }
 }
@@ -422,16 +528,31 @@ private val sampleJobs = listOf(
 
 private val samplePcs = listOf(Connection("a", "My PC", "http://192.0.2.7:8642", "default"))
 
+private val lastRunJobs = listOf(
+    JobDto("1", "Daily log summary", "Every day at 03:00", enabled = true, nextRunAt = JsonPrimitive(1_900_000_000),
+        lastRunAt = JsonPrimitive("2030-03-17T03:00:00+00:00"), lastStatus = "ok"),
+    JobDto("2", "Clean old builds", "Every 6 hours", enabled = true, nextRunAt = JsonPrimitive(1_900_000_000),
+        lastRunAt = JsonPrimitive("2030-03-17T02:00:00+00:00"), lastStatus = "error",
+        lastError = JsonPrimitive("Command exited with code 2: disk quota exceeded while writing the build cache index")),
+    JobDto("3", "Weekly digest", "Every Monday", enabled = true,
+        lastRunAt = JsonPrimitive("2030-03-11T08:00:00+00:00"), lastStatus = "delivery_failed"),
+)
+
 @Composable
-private fun JobsPreviewBody(dialog: Boolean = false) = RasulTheme(false) {
+private fun JobsPreviewBody(
+    dialog: Boolean = false,
+    jobs: List<JobDto> = sampleJobs,
+    lastResults: Map<String, LastResult> = emptyMap(),
+    hint: Boolean = false,
+) = RasulTheme(false) {
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
         ScreenHeader(stringResource(R.string.tab_jobs)) {
             GlassText(stringResource(R.string.ux3c_job_create), {})
             GlassText(stringResource(R.string.refresh), {})
         }
         PcSwitcherHost(PcPicker(samplePcs, "a"), {})
-        JobList(sampleJobs, busy = false, onToggle = {}, onRunNow = {}, onEdit = {}, onDelete = {},
-            historyAvailable = true, onHistory = {})
+        JobList(jobs, busy = false, onToggle = {}, onRunNow = {}, onEdit = {}, onDelete = {},
+            historyAvailable = true, onHistory = {}, lastResults = lastResults, alertsHint = hint)
     }
     if (dialog) {
         ConfirmDialog(
@@ -448,6 +569,37 @@ private fun JobsEn() = JobsPreviewBody()
 @Preview(showBackground = true, widthDp = 390, heightDp = 800, locale = "ar")
 @Composable
 private fun JobsAr() = JobsPreviewBody()
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 800)
+@Composable
+private fun JobsLastRunEn() = JobsPreviewBody(jobs = lastRunJobs)
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 800, locale = "ar")
+@Composable
+private fun JobsLastRunAr() = JobsPreviewBody(jobs = lastRunJobs)
+
+private val sampleLastResult = mapOf(
+    "1" to LastResult.Ready(
+        JobRunDto("r1", "Daily log summary", JsonPrimitive(1_900_000_000), JsonPrimitive(1_900_000_252), false,
+            "Summarized 14 notes from yesterday.\nTwo notes mention the quarterly review; one asks for a reply by Friday.\nNo errors."),
+    ),
+)
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 800)
+@Composable
+private fun JobsLastResultEn() = JobsPreviewBody(jobs = lastRunJobs, lastResults = sampleLastResult)
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 800, locale = "ar")
+@Composable
+private fun JobsLastResultAr() = JobsPreviewBody(jobs = lastRunJobs, lastResults = sampleLastResult)
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 800)
+@Composable
+private fun JobsHintEn() = JobsPreviewBody(hint = true)
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 800, locale = "ar")
+@Composable
+private fun JobsHintAr() = JobsPreviewBody(hint = true)
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 700)
 @Composable

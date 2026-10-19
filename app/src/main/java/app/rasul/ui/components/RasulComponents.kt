@@ -302,11 +302,12 @@ fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modi
 
 /** Small outlined pill button for job actions. */
 @Composable
-fun SmallOutlineButton(text: String, onClick: () -> Unit, enabled: Boolean = true, width: Dp? = null) {
+fun SmallOutlineButton(text: String, onClick: () -> Unit, enabled: Boolean = true, width: Dp? = null, description: String? = null) {
     val c = Rasul.colors
     val col = if (enabled) c.accent else c.accent.copy(alpha = 0.4f)
     Box(
         Modifier.minimumInteractiveComponentSize().clip(RasulShapes.filter)
+            .then(if (description == null) Modifier else Modifier.semantics { contentDescription = description })
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {

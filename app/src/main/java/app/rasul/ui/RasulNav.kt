@@ -344,8 +344,22 @@ fun RasulNav(
                     viewModelStoreOwner = sharedOwner,
                     factory = viewModelFactory { initializer { JobsViewModel(container.connections, container.activePc, container.jobs) } },
                 )
+                val jobBots by container.bridgeBots.state.collectAsState()
                 JobsScreen(
                     vm, onPairPc = { nav.navigate("pair-guide") }, onSearch = { nav.navigate(SEARCH) },
+                    alertsHint = !preferences.jobAlerts && !preferences.jobAlertsHintDismissed &&
+                        app.rasul.settings.approvalAlertsRowVisible(jobBots),
+                    onAlertsTurnOn = {
+                        saveSettings(SettingsWrite(R.string.job_alerts_write_error) {
+                            container.settings.turnOnJobAlerts()
+                            container.approvalAlerts.sync()
+                        })
+                    },
+                    onAlertsHintDismiss = {
+                        saveSettings(SettingsWrite(R.string.job_alerts_write_error) {
+                            container.settings.setJobAlertsHintDismissed(true)
+                        })
+                    },
                     onOpenHistory = { source, job ->
                         val token = container.transcriptSources.put(source)
                         // Stable, secret-free identity so the target survives process death: saved bridge id
@@ -408,6 +422,15 @@ fun RasulNav(
                     onApprovalAlertsChanged = { enabled ->
                         saveSettings(SettingsWrite(R.string.approval_alerts_write_error) {
                             container.settings.setApprovalAlerts(enabled)
+                            container.approvalAlerts.sync()
+                        })
+                    },
+                    jobAlertsEnabled = preferences.jobAlerts,
+                    onJobAlertsChanged = { enabled ->
+                        saveSettings(SettingsWrite(R.string.job_alerts_write_error) {
+                            container.settings.setJobAlerts(enabled)
+                            // Turning it off forgets the seen runs, so turning it on again starts from a fresh seed.
+                            if (!enabled) container.jobSeen.clear()
                             container.approvalAlerts.sync()
                         })
                     },

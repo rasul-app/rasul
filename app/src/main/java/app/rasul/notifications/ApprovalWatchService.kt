@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -24,6 +25,7 @@ import app.rasul.bridge.ApprovalsError
 import app.rasul.bridge.ApprovalsRepository
 import app.rasul.bridge.BridgeBotsState
 import app.rasul.bridge.bridgeBotId
+import app.rasul.data.HermesResult
 import app.rasul.security.publicOnly
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -32,8 +34,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -51,6 +58,7 @@ internal const val PAUSED_TAG = "approval_paused"
 private const val EXPIRY_SWEEP_MS = 30_000L
 private const val FOLLOW_RETRY_MS = 5_000L
 private const val LOCK_STATE_WAIT_MS = 5_000L
+private const val BOTS_WAIT_MS = 20_000L
 
 internal fun approvalAlertTag(botKey: String, requestId: String) = "$botKey/$requestId"
 
@@ -95,22 +103,24 @@ internal class ApprovalAlertDecider {
     }
 }
 
-/** Starts/stops [ApprovalWatchService] to match (setting ON and at least one paired bridge). */
+/**
+ * Starts/stops [ApprovalWatchService] to match (approval alerts or job results ON, and at least one paired bridge).
+ * One service serves both settings and only does the work of the ones that are ON.
+ */
 class ApprovalAlerts(private val container: AppContainer, private val context: Context) {
     suspend fun sync() {
-        var enabled = try {
-            container.settings.values.first().approvalAlerts
+        val settings = try {
+            container.settings.values.first()
         } catch (e: CancellationException) { throw e }
-        catch (_: Exception) { false }
+        catch (_: Exception) { null }
+        var enabled = settings != null && (settings.approvalAlerts || settings.jobAlerts)
         val bridges = try {
             container.bridges.bridges.first()
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { return } // unreadable storage is not "no PC": change nothing
         if (enabled && bridges.isEmpty()) {
             // A stale ON cannot survive the last saved PC: clear it so the toggle matches reality.
-            try { container.settings.setApprovalAlerts(false) }
-            catch (e: CancellationException) { throw e }
-            catch (_: Exception) { }
+            clearAlertSettings(container)
             enabled = false
         }
         val intent = Intent(context, ApprovalWatchService::class.java)
@@ -130,18 +140,37 @@ class ApprovalAlerts(private val container: AppContainer, private val context: C
     }
 }
 
+/** Turns both alert settings off and forgets the job-run map, so a later opt-in starts from a fresh seed. */
+internal suspend fun clearAlertSettings(container: AppContainer) {
+    try { container.settings.setApprovalAlerts(false) }
+    catch (e: CancellationException) { throw e }
+    catch (_: Exception) { }
+    try { container.settings.setJobAlerts(false) }
+    catch (e: CancellationException) { throw e }
+    catch (_: Exception) { }
+    try { container.jobSeen.clear() }
+    catch (e: CancellationException) { throw e }
+    catch (_: Exception) { }
+}
+
 /**
  * Opt-in watcher: while enabled it runs the shared approvals follower (one SSE per bridge bot via
  * [ApprovalsRepository.follow]) and posts a high-importance notification for each NEW pending
  * approval. The command text never enters a notification; the public version says only "Approval
- * waiting". No BOOT_COMPLETED receiver: on Android 15+ BOOT_COMPLETED may not launch a dataSync
+ * waiting". With job results ON it also polls each paired bot's job list every [JOB_POLL_MS] (and once when the
+ * app comes to the foreground) and posts one notification per newly finished run. No BOOT_COMPLETED receiver: on Android 15+ BOOT_COMPLETED may not launch a dataSync
  * foreground service, so the watcher restarts on the next app open instead.
  */
 class ApprovalWatchService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val container get() = (application as RasulApp).container
     private val manager get() = getSystemService(NotificationManager::class.java)
-    private val decider = ApprovalAlertDecider()
+    private var decider = ApprovalAlertDecider()
+    private var approvalsOn = false
+    private var jobsOn = false
+    private var jobsPolling = false
+    private val jobTrigger = Channel<Unit>(Channel.CONFLATED)
+    private val jobGate = JobPollGate(SystemClock::elapsedRealtime)
 
     /** What each live alert needs to be posted again, e.g. after a failed answer. */
     private val posted = HashMap<String, Pair<ApprovalAlert, String>>()
@@ -157,6 +186,7 @@ class ApprovalWatchService : Service() {
     private var lastStartId = 0
     private var stopping = false
     private var watchedPcs = -1
+    private var watchedMode = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -165,17 +195,42 @@ class ApprovalWatchService : Service() {
         if (Build.VERSION.SDK_INT >= 29) startForeground(WATCH_ID, foreground, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         else startForeground(WATCH_ID, foreground)
         scope.launch { followForever { container.bridgeBots.follow() } }
-        scope.launch { followForever { container.approvals.follow() } }
         scope.launch {
-            combine(
-                container.approvals.state,
-                container.bridgeBots.state,
-                container.approvalsVisible,
-            ) { _, bots, _ -> bots }
-                .collect { bots ->
-                    publish()
-                    if (noBotRemains(bots)) shutdown() // the setting stays ON; the next app open restarts it
+            container.bridgeBots.state.collect { bots ->
+                publishWatch()
+                if (noBotRemains(bots)) shutdown() // the settings stay ON; the next app open restarts it
+            }
+        }
+        scope.launch {
+            container.settings.values.map { it.approvalAlerts }.distinctUntilChanged().collectLatest { on ->
+                approvalsOn = on
+                if (!on) {
+                    withdrawApprovalAlerts()
+                    return@collectLatest
                 }
+                coroutineScope {
+                    launch { followForever { container.approvals.follow() } }
+                    launch {
+                        combine(
+                            container.approvals.state,
+                            container.bridgeBots.state,
+                            container.approvalsVisible,
+                        ) { _, bots, _ -> bots }.collect { publish() }
+                    }
+                    launch { while (currentCoroutineContext().isActive) { delay(EXPIRY_SWEEP_MS); publish() } }
+                }
+            }
+        }
+        scope.launch {
+            container.settings.values.map { it.jobAlerts }.distinctUntilChanged().collectLatest { on ->
+                jobsOn = on
+                publishWatch()
+                if (!on) {
+                    cancelJobNotifications(this@ApprovalWatchService)
+                    return@collectLatest
+                }
+                pollJobsForever()
+            }
         }
         scope.launch {
             container.appLock.state.collect { lock ->
@@ -183,21 +238,18 @@ class ApprovalWatchService : Service() {
                 publish()
             }
         }
-        scope.launch { container.settings.values.collect { if (!it.approvalAlerts) shutdown() } }
+        scope.launch { container.settings.values.collect { if (!it.approvalAlerts && !it.jobAlerts) shutdown() } }
         scope.launch {
             try {
                 container.bridges.bridges.collect { saved ->
                     if (saved.isEmpty()) {
-                        try { container.settings.setApprovalAlerts(false) }
-                        catch (e: CancellationException) { throw e }
-                        catch (_: Exception) { }
+                        clearAlertSettings(container)
                         shutdown()
                     }
                 }
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { } // unreadable storage: keep running, change nothing
         }
-        scope.launch { while (currentCoroutineContext().isActive) { delay(EXPIRY_SWEEP_MS); publish() } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -209,14 +261,14 @@ class ApprovalWatchService : Service() {
         }
         if (intent?.action == ACTION_STOP) {
             scope.launch {
-                try { container.settings.setApprovalAlerts(false) }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { }
+                clearAlertSettings(container)
                 shutdown()
             }
             return START_NOT_STICKY
         }
         publish()
+        // The app came to the foreground: read the jobs once now instead of waiting for the next tick.
+        if (jobsPolling && jobGate.foregroundDue()) jobTrigger.trySend(Unit)
         return START_NOT_STICKY
     }
 
@@ -243,13 +295,29 @@ class ApprovalWatchService : Service() {
         }
     }
 
-    private fun publish() {
+    /** Keeps the ongoing notification's PC count (and wording) current. */
+    private fun publishWatch() {
         if (stopping) return
         val groups = container.bridgeBots.state.value.groups
-        if (groups.size != watchedPcs) {
+        val mode = (if (approvalsOn) 1 else 0) + (if (jobsOn) 2 else 0)
+        if (groups.size != watchedPcs || mode != watchedMode) {
             watchedPcs = groups.size
+            watchedMode = mode
             manager.notify(WATCH_ID, watchNotification(watchedPcs))
         }
+    }
+
+    private fun withdrawApprovalAlerts() {
+        decider.liveTags().forEach { manager.cancel(it, APPROVAL_ALERT_ID) }
+        posted.clear()
+        decider = ApprovalAlertDecider()
+        publishWatch()
+    }
+
+    private fun publish() {
+        if (stopping) return
+        publishWatch()
+        if (!approvalsOn) return
         // Not posted means not alerted: with notifications denied nothing is marked, so allowing them
         // later still alerts the requests that are still pending.
         if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) return
@@ -266,6 +334,51 @@ class ApprovalWatchService : Service() {
             posted[alert.tag] = alert to name
             manager.notify(alert.tag, APPROVAL_ALERT_ID, buildApprovalNotification(this, alert, name, publicOnly, withActions = !publicOnly))
         }
+    }
+
+    /** One read of every paired bot now, then again every [JOB_POLL_MS] or when the app returns to the foreground. */
+    private suspend fun pollJobsForever() {
+        jobsPolling = true
+        try {
+            while (currentCoroutineContext().isActive) {
+                try { pollJobsOnce() }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { } // a failed read leaves the map as it is; the next tick retries
+                jobGate.finished()
+                withTimeoutOrNull(JOB_POLL_MS) { jobTrigger.receive() }
+            }
+        } finally {
+            jobsPolling = false
+        }
+    }
+
+    /**
+     * Reads GET /api/jobs per ready bot. A bot that cannot be read now keeps its recorded runs. Alerts are posted
+     * before the map is saved, so a crash in between repeats a notification rather than losing one.
+     */
+    private suspend fun pollJobsOnce() {
+        if (stopping || !NotificationManagerCompat.from(this).areNotificationsEnabled()) return
+        val bots = container.bridgeBots
+        withTimeoutOrNull(BOTS_WAIT_MS) { bots.state.first { it.loaded && it.groups.none { group -> group.loading } } }
+        val groups = bots.state.value.groups
+        var seen = container.jobSeen.load()
+        val alerts = mutableListOf<JobAlert>()
+        val liveBots = mutableSetOf<String>()
+        val unsettled = mutableListOf<String>()
+        for (group in groups) {
+            if (group.loading || group.error != null) unsettled += group.id
+            for (profile in group.profiles) {
+                liveBots += bridgeBotId(group.id, profile.id)
+                val target = (bots.target(group.id, profile.id) as? HermesResult.Ok)?.value ?: continue
+                val jobs = (container.jobs.list(target) as? HermesResult.Ok)?.value ?: continue
+                val poll = decideJobAlerts(group.id, profile.id, jobs, seen)
+                seen = poll.seen
+                alerts += poll.alerts
+            }
+        }
+        if (stopping || !jobsOn) return
+        postJobAlerts(this, alerts, container.appLock.state.value.publicOnly())
+        container.jobSeen.save(pruneJobSeen(seen, liveBots, unsettled))
     }
 
     private fun showSending(tag: String) {
@@ -314,7 +427,8 @@ class ApprovalWatchService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, WATCH_CHANNEL)
             .setSmallIcon(R.drawable.rasul_signal_monochrome)
-            .setContentTitle(resources.getQuantityString(R.plurals.approval_watching, count, count))
+            .setContentTitle(resources.getQuantityString(
+                if (approvalsOn || !jobsOn) R.plurals.approval_watching else R.plurals.job_watching, count, count))
             .setOngoing(true)
             .setSilent(true)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -335,7 +449,7 @@ class ApprovalWatchService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             manager.notify(PAUSED_TAG, PAUSED_ID, NotificationCompat.Builder(this, WATCH_CHANNEL)
                 .setSmallIcon(R.drawable.rasul_signal_monochrome)
-                .setContentTitle(getString(R.string.approval_paused))
+                .setContentTitle(getString(if (approvalsOn || !jobsOn) R.string.approval_paused else R.string.job_alerts_paused))
                 .setContentIntent(open)
                 .setAutoCancel(true)
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -478,6 +592,7 @@ internal fun createApprovalChannels(context: Context) {
     val manager = context.getSystemService(NotificationManager::class.java)
     manager.createNotificationChannel(NotificationChannel(APPROVALS_CHANNEL, context.getString(R.string.approvals_title), NotificationManager.IMPORTANCE_HIGH))
     manager.createNotificationChannel(NotificationChannel(WATCH_CHANNEL, context.getString(R.string.approval_channel_watch), NotificationManager.IMPORTANCE_LOW))
+    manager.createNotificationChannel(NotificationChannel(JOB_RESULTS_CHANNEL, context.getString(R.string.job_alerts_channel), NotificationManager.IMPORTANCE_DEFAULT))
 }
 
 /** Strict `approvals/{bridge}/{profile}`: canonical encoded segments, profile per the bridge id contract. */

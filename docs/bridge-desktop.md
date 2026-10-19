@@ -102,7 +102,10 @@ Memory review, quick commands, adding MCP servers and general command dispatch a
 ## Hermes update (0.2.6)
 
 Routes use the same prefix and rules as above. The update is a property of the installation, not
-of a profile; any served profile may be named. State is held in memory: a bridge restart drops a
+of a profile; any profile may be named. Only when the dashboard's host record does not list that profile
+(it was created after the dashboard started), the check and the update run through the default profile,
+else through any profile the record lists. Any other discovery failure is reported as it is.
+State is held in memory: a bridge restart drops a
 queued update (state returns to `idle`).
 
 | Method and suffix | Request | Response | Per minute |
@@ -111,8 +114,9 @@ queued update (state returns to `idle`).
 | POST `/hermes/update` | `{mode:"when_idle"\|"now"}` | HTTP 202 status object | 6 |
 | DELETE `/hermes/update` | none | HTTP 200 status object | 6 |
 
-Status object: `{current, latest, behind, can_apply, reason, changes:[{title}], state, active_agents,
-queued_at, result}`. `latest` is the newest upstream commit id or null; `changes` has at most 20 text
+Status object: `{current, latest, behind, can_apply, reason, changes:[{title}], update_available, state,
+active_agents, queued_at, result}`. `update_available` is Hermes' own flag and stays true while an update
+is queued or running. `latest` is the newest upstream commit id or null; `changes` has at most 20 text
 titles of at most 200 characters; `state` is `idle|queued|running|done|failed`; `active_agents` is the
 gateway's current count or null; `queued_at` is an ISO time while queued; `result` is
 `{ok, from, to, message}` or null. `reason` (when `can_apply` is false) is one of `up_to_date`,

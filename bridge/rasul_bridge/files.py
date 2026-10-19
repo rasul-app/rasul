@@ -441,8 +441,11 @@ class Files:
             return True
         return False
 
-    def validate(self, raw, profile=None, fresh=False):
-        """The resolved path for a tag, or None when it must not be delivered."""
+    def validate(self, raw, profile=None, fresh=False, offered=()):
+        """The resolved path for a tag, or None when it must not be delivered.
+
+        A path in ``offered`` was already handed to this device: it no longer has to be recent
+        (every other rule still applies)."""
         candidate = normalize(raw)
         if not candidate or "\x00" in candidate or unsafe_form(candidate):
             return None
@@ -469,11 +472,12 @@ class Files:
         trusted = any(r is not None and _within(resolved, r)
                       for r in (_resolve(root) for root in self._allowed_roots(profile)))
         strict, window, _ = self._policy(profile)
+        recent = resolved in offered or self._fresh(resolved, window)
         if not trusted and self._denied(resolved, fresh=fresh):
             # the system temp folder sits inside a denied data folder: only fresh files from it pass
-            if self._denied(resolved, temp_ok=True, fresh=fresh) or not self._fresh(resolved, window):
+            if self._denied(resolved, temp_ok=True, fresh=fresh) or not recent:
                 return None
-        if strict and not trusted and not self._fresh(resolved, window):
+        if strict and not trusted and not recent:
             return None
         return resolved
 
@@ -487,7 +491,15 @@ class Files:
     # ---- tokens ---------------------------------------------------------------------------
     def mint(self, device, profile, raw):
         """A markdown link for a valid file, or None (the caller shows an unavailable note)."""
+        now = self.clock()
+        bound = self.tokens.setdefault(device, OrderedDict())
+        for token in [t for t, e in bound.items() if e["expires"] <= now]:
+            del bound[token]
         resolved = self.validate(raw, profile)
+        # a file that is no longer recent is offered again only as the unchanged file this device already holds
+        again = resolved is None
+        if again:
+            resolved = self.validate(raw, profile, offered={e["path"] for e in bound.values() if e["profile"] == profile})
         if resolved is None:
             return None
         try:
@@ -497,12 +509,10 @@ class Files:
             return None
         if info.st_size > MAX_FILE_BYTES:
             return None
-        now = self.clock()
-        bound = self.tokens.setdefault(device, OrderedDict())
-        for token in [t for t, e in bound.items() if e["expires"] <= now]:
-            del bound[token]
         key = (profile, str(resolved), info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino)
         token = next((t for t, e in bound.items() if e["key"] == key), None)
+        if again and token is None:
+            return None
         name = clean_name(resolved.name)
         if token is None:
             token = secrets.token_urlsafe(32)
@@ -552,7 +562,7 @@ class Files:
     def history_value(self, device, profile, value):
         """Session history: only an assistant message's ``content`` can mint links."""
         if isinstance(value, dict):
-            return {k: (self.history_value(device, profile, v) if k == "messages" and isinstance(v, list)
+            return {k: (self.history_value(device, profile, v) if k in ("messages", "data") and isinstance(v, list)
                         else self.strip_value(v)) for k, v in value.items()}
         if isinstance(value, list):
             return [self.assistant_value(device, profile, m, ("content",))
@@ -598,7 +608,7 @@ class Files:
             raise HTTPError(429, "file_rate_limited")
         entry = self.lookup(device, token)
         path = entry["path"]
-        if self.validate(str(path), entry["profile"], fresh=True) != path:
+        if self.validate(str(path), entry["profile"], fresh=True, offered={path}) != path:
             self.audit("file_denied", device, entry["profile"], entry["name"], entry["size"])
             raise HTTPError(410, "file_unavailable")
         try:

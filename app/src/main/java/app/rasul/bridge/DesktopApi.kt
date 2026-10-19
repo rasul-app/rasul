@@ -142,13 +142,15 @@ data class HermesUpdateDto(
     @SerialName("can_apply") val canApply: Boolean = false,
     val reason: String? = null,
     val changes: List<HermesChangeDto> = emptyList(),
+    /** Hermes' own answer; stays true while an update is queued or running, when [canApply] is false. */
+    @SerialName("update_available") val available: Boolean = false,
     val state: String = "idle",
     @SerialName("active_agents") val activeAgents: Int? = null,
     @SerialName("queued_at") val queuedAt: String? = null,
     val result: HermesUpdateResultDto? = null,
 ) {
-    /** True when the PC is behind, or behind by an unknown amount and the bridge can apply the update. */
-    val updateAvailable: Boolean get() = (behind ?: 0) > 0 || (behind == null && canApply)
+    /** True when Hermes says so, or the PC is behind, or behind by an unknown amount and the bridge can apply the update. */
+    val updateAvailable: Boolean get() = available || (behind ?: 0) > 0 || (behind == null && canApply)
     val isQueued: Boolean get() = state == STATE_QUEUED
     val isRunning: Boolean get() = state == STATE_RUNNING
 
