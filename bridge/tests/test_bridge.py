@@ -12,6 +12,7 @@ import secrets
 import ssl
 import sys
 import struct
+import time
 import uuid
 import zlib
 
@@ -58,6 +59,7 @@ class FakeUpstream:
         self.broken_stream = False
         self.expected_key = None
         self.response_headers = b""
+        self.delays = {}
 
     async def handle(self, reader, writer):
         task = asyncio.current_task()
@@ -98,6 +100,8 @@ class FakeUpstream:
                     closed.cancel()
                     await asyncio.gather(complete, closed, return_exceptions=True)
             else:
+                if target in self.delays:  # seconds to wait, or None to never answer
+                    await (asyncio.sleep(self.delays[target]) if self.delays[target] else asyncio.Event().wait())
                 value = {"active_agents": self.active_agents, **self.health_extra} if target == "/health/detailed" else {"status": "ok"}
                 data = json.dumps(value).encode()
                 writer.write(f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\n".encode()
@@ -115,11 +119,11 @@ class FakeUpstream:
 
     async def close(self):
         self.server.close()
-        await self.server.wait_closed()
         tasks = list(self.tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self.server.wait_closed()
 
 
 @asynccontextmanager
@@ -915,6 +919,49 @@ async def test_profile_event_keepalive_during_suspended_probe(tmp_path):
                     if data.startswith(b"event: profiles\ndata: "):
                         break
                     assert data == b": keepalive\n\n"
+
+
+def many_profiles(bridge, count=12):
+    for number in range(count - 1):
+        (bridge.config.hermes_home / "profiles" / f"bot{number:02d}").mkdir(parents=True)
+    bridge.profiles.init_keys()
+    return list(bridge.profiles.directories())
+
+
+def models_target(name):
+    return "/v1/models" if name == "default" else f"/p/{name}/v1/models"
+
+
+@asynchronous
+async def test_profile_snapshot_probes_together_and_keeps_order(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        names = many_profiles(bridge)
+        for name in names:
+            upstream.delays[models_target(name)] = 0.3
+        started = time.monotonic()
+        snapshot = await bridge.profiles.snapshot()
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0  # one after another would take 12 x 0.3 s
+        assert [p["id"] for p in snapshot["profiles"]] == names
+        assert all(p["ready"] for p in snapshot["profiles"])
+        assert snapshot["profiles"][0]["default"] and not snapshot["profiles"][1]["default"]
+        assert set(snapshot["profiles"][0]) == {"id", "name", "display_name", "ready", "default"}
+        assert (await bridge.profiles.snapshot())["revision"] == snapshot["revision"]
+
+
+@asynchronous
+async def test_one_hanging_profile_is_not_ready_without_slowing_the_list(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        names = many_profiles(bridge)
+        upstream.delays[models_target(names[5])] = None
+        started = time.monotonic()
+        snapshot = await bridge.profiles.snapshot()
+        assert time.monotonic() - started < 5.5
+        assert [p["ready"] for p in snapshot["profiles"]] == [n != names[5] for n in names]
+        upstream.delays.pop(models_target(names[5]))
+        healed = await bridge.profiles.snapshot()
+        assert all(p["ready"] for p in healed["profiles"])
+        assert healed["revision"] == snapshot["revision"] + 1
 
 
 @asynchronous

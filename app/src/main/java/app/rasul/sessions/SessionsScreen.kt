@@ -468,6 +468,7 @@ internal fun TranscriptMessages(msgs: List<SessionMessageDto>, isCronRun: Boolea
                             Text(
                                 when (a) {
                                     is SentAttachment.NamedFile -> a.name
+                                    is SentAttachment.SentFile -> a.name
                                     else -> stringResource(R.string.chat_photo_label)
                                 },
                                 style = RasulType.body, color = Rasul.colors.muted, modifier = Modifier.heightIn(min = 21.dp),

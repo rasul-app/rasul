@@ -112,6 +112,7 @@ import app.rasul.data.ModelOptionsDto
 import app.rasul.data.PendingAttachment
 import app.rasul.data.RunInputLimits
 import app.rasul.data.SentAttachment
+import app.rasul.data.UploadState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import app.rasul.data.RunModelSelection
@@ -216,6 +217,10 @@ fun ChatScreen(
     val filePicker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
     ) { uri -> if (uri != null) vm.loadFile(uri) }
+    // Any file type, several at once: only a bridge chat offers it; the ViewModel checks the 4-file and 50 MB limits.
+    val anyFilePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris -> vm.addFiles(uris) }
     ChatScreenContent(
         state = state,
         title = title,
@@ -247,6 +252,9 @@ fun ChatScreen(
             )
         },
         onPickFile = { filePicker.launch(arrayOf("*/*")) },
+        onPickAnyFile = { anyFilePicker.launch(arrayOf("*/*")) },
+        onRetryUpload = vm::retryUpload,
+        filesViaBridge = vm.resolvedTarget?.bridge != null,
         onRemoveAttachment = vm::removeAttachment,
         modelOptionsLoader = modelOptionsLoader,
         selectedModel = selectedModel,
@@ -347,6 +355,10 @@ internal fun ChatScreenContent(
     onRetryHistory: () -> Unit,
     onPickPhotos: () -> Unit = {},
     onPickFile: () -> Unit = {},
+    onPickAnyFile: () -> Unit = {},
+    onRetryUpload: (Long) -> Unit = {},
+    /** True in a bridge chat: the File option is on. A direct connection shows it off, with the reason. */
+    filesViaBridge: Boolean = false,
     onRemoveAttachment: (Long) -> Unit = {},
     modelOptionsLoader: suspend (Boolean) -> HermesResult<ModelOptionsDto>,
     selectedModel: RunModelSelection?,
@@ -498,6 +510,9 @@ internal fun ChatScreenContent(
                     preparing = state.pendingAttachments > 0,
                     onPickPhotos = onPickPhotos,
                     onPickFile = onPickFile,
+                    onPickAnyFile = onPickAnyFile,
+                    onRetryUpload = onRetryUpload,
+                    filesViaBridge = filesViaBridge,
                     onRemoveAttachment = onRemoveAttachment,
                 )
             }
@@ -902,10 +917,15 @@ private fun Composer(
     preparing: Boolean,
     onPickPhotos: () -> Unit,
     onPickFile: () -> Unit,
+    onPickAnyFile: () -> Unit,
+    onRetryUpload: (Long) -> Unit,
+    filesViaBridge: Boolean,
     onRemoveAttachment: (Long) -> Unit,
 ) {
     val colors = Rasul.colors
-    val sendLabel = stringResource(R.string.chat_send)
+    val uploading = attachments.any { it is PendingAttachment.UploadFile && it.state is UploadState.Uploading }
+    val filesNotReady = attachments.any { it is PendingAttachment.UploadFile && it.state !is UploadState.Ready }
+    val sendLabel = if (uploading) stringResource(R.string.chat_uploading) else stringResource(R.string.chat_send)
     val modelAccessibilityName = stringResource(
         R.string.ux3b_model_chip_accessibility,
         listOfNotNull(modelName, effortLabel).joinToString(" "),
@@ -917,7 +937,7 @@ private fun Composer(
     val voiceError = (voiceState as? VoiceInputState.Error)?.cause?.let { error ->
         stringResource(voiceErrorString(error))
     }
-    val enabled = (draft.isNotBlank() || attachments.isNotEmpty()) && !sending
+    val enabled = (draft.isNotBlank() || attachments.isNotEmpty()) && !sending && !filesNotReady
     var attachMenu by remember { mutableStateOf(false) }
     var fieldValue by remember { mutableStateOf(TextFieldValue(draft, selection = TextRange(draft.length))) }
     // The draft is what Send sends: outside changes (voice insert, send) keep the caret they
@@ -967,10 +987,13 @@ private fun Composer(
                     val name = when (attachment) {
                         is PendingAttachment.Photo -> stringResource(R.string.chat_photo_number, ++photoN)
                         is PendingAttachment.TextFile -> attachment.name
+                        is PendingAttachment.UploadFile -> attachment.name
                     }
-                    AttachmentChip(attachment, name, onRemoveAttachment)
+                    if (attachment is PendingAttachment.UploadFile) UploadFileChip(attachment, onRemoveAttachment, onRetryUpload)
+                    else AttachmentChip(attachment, name, onRemoveAttachment)
                 }
                 if (preparing) PreparingChip()
+                if (uploading) UploadingNote()
             }
         }
         Column(
@@ -1023,19 +1046,11 @@ private fun Composer(
                         )
                     }
                     DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_attach_photos)) },
-                            onClick = {
-                                attachMenu = false
-                                onPickPhotos()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_attach_file)) },
-                            onClick = {
-                                attachMenu = false
-                                onPickFile()
-                            },
+                        AttachMenuItems(
+                            filesViaBridge = filesViaBridge,
+                            onPickPhotos = { attachMenu = false; onPickPhotos() },
+                            onPickAnyFile = { attachMenu = false; onPickAnyFile() },
+                            onPickFile = { attachMenu = false; onPickFile() },
                         )
                     }
                 }
@@ -1147,6 +1162,47 @@ private fun Composer(
     }
 }
 
+/**
+ * The rows of the attach menu. A bridge chat gets Photos and File (any type); a direct connection keeps Photos and the
+ * text file, and shows File switched off with the reason.
+ */
+@Composable
+internal fun AttachMenuItems(
+    filesViaBridge: Boolean,
+    onPickPhotos: () -> Unit,
+    onPickAnyFile: () -> Unit,
+    onPickFile: () -> Unit,
+) {
+    val colors = Rasul.colors
+    DropdownMenuItem(
+        text = { Text(stringResource(R.string.chat_attach_photos)) },
+        onClick = onPickPhotos,
+    )
+    if (filesViaBridge) {
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.chat_attach_any_file)) },
+            onClick = onPickAnyFile,
+            modifier = Modifier.testTag("chat_attach_any_file"),
+        )
+    } else {
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.chat_attach_file)) },
+            onClick = onPickFile,
+        )
+        DropdownMenuItem(
+            text = {
+                Column {
+                    Text(stringResource(R.string.chat_attach_any_file))
+                    Text(stringResource(R.string.chat_attach_needs_bridge), style = RasulType.bodySmall, color = colors.muted)
+                }
+            },
+            enabled = false,
+            onClick = {},
+            modifier = Modifier.testTag("chat_attach_any_file"),
+        )
+    }
+}
+
 @Composable
 private fun ListeningPulse() {
     val colors = Rasul.colors
@@ -1221,6 +1277,8 @@ private fun AttachmentChip(attachment: PendingAttachment, name: String, onRemove
                     )
                 }
             }
+            // Bridge files have their own chip ([UploadFileChip]).
+            is PendingAttachment.UploadFile -> Unit
             is PendingAttachment.TextFile -> {
                 Icon(RasulIcons.FileDoc, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
                 Text(
@@ -1279,6 +1337,7 @@ private fun SentAttachmentView(attachment: SentAttachment, mine: Boolean) {
                 color = if (mine) colors.onAccent else colors.muted,
             )
         }
+        is SentAttachment.SentFile -> SentFileCard(attachment.name, attachment.size, mine)
         is SentAttachment.NamedFile -> Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1471,6 +1530,20 @@ internal fun failureText(failure: ChatFailure): String = when (failure) {
     ChatFailure.AttachmentTooManyPhotos -> stringResource(R.string.chat_err_attach_too_many)
     ChatFailure.AttachmentRunActive -> stringResource(R.string.chat_err_attach_run_active)
     ChatFailure.ReplyKept -> stringResource(R.string.chat_err_reply_kept)
+    ChatFailure.FilesNeedBridge -> stringResource(R.string.chat_attach_needs_bridge)
+    is ChatFailure.UploadTooLarge -> stringResource(R.string.chat_err_upload_too_large, failure.name)
+    is ChatFailure.UploadEmpty -> stringResource(R.string.chat_err_upload_empty, failure.name)
+    ChatFailure.TooManyFiles -> stringResource(R.string.chat_err_upload_too_many)
+    ChatFailure.FilesMixed -> stringResource(R.string.chat_err_upload_mixed)
+    ChatFailure.BridgeNeedsUpdate -> stringResource(R.string.chat_err_upload_old_bridge)
+    ChatFailure.PcDiskFull -> stringResource(R.string.chat_err_upload_disk_full)
+    ChatFailure.TooManyOpenUploads -> stringResource(R.string.chat_err_upload_open_limit)
+    ChatFailure.PcSaveFailed -> stringResource(R.string.chat_err_upload_save_failed)
+    ChatFailure.UploadBotMissing -> stringResource(R.string.chat_err_upload_bot_missing)
+    ChatFailure.RunInputRefused -> stringResource(R.string.chat_err_run_input_refused)
+    is ChatFailure.FilesGone ->
+        if (failure.names.size == 1) stringResource(R.string.chat_err_upload_gone, failure.names.single())
+        else stringResource(R.string.chat_err_upload_gone_many, failure.names.joinToString(", "))
     is ChatFailure.ForkFailed -> sessionActionMessage(LocalContext.current, failure.error)
         ?: failureText(ChatFailure.Api(failure.error))
     is ChatFailure.ShareItemsDropped -> pluralStringResource(R.plurals.share_dropped, failure.count, failure.count) +

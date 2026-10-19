@@ -16,10 +16,26 @@ sealed interface PendingAttachment {
     /** A small UTF-8 text file; sent as a text part prefixed with its [name]. */
     data class TextFile(override val key: Long, val name: String, val text: String) : PendingAttachment
 
+    /**
+     * A file of any type sent through the bridge: its bytes never sit in memory here, they stream to the
+     * PC while [state] moves from uploading to ready (the PC file id) or failed.
+     */
+    data class UploadFile(override val key: Long, val name: String, val size: Long, val state: UploadState) : PendingAttachment
+
     companion object {
         private val nextKey = AtomicLong(1)
         fun newKey(): Long = nextKey.getAndIncrement()
     }
+}
+
+/** Where one [PendingAttachment.UploadFile] is. */
+sealed interface UploadState {
+    /** [sent] of the file's bytes were accepted by the bridge. */
+    data class Uploading(val sent: Long = 0) : UploadState
+
+    /** The bridge holds the whole file as [fileId]; this is what `rasul_files` carries. */
+    data class Ready(val fileId: String) : UploadState
+    data class Failed(val failure: UploadFailure) : UploadState
 }
 
 /**
@@ -41,10 +57,17 @@ sealed interface SentAttachment {
 
     /** A small text file. History rows show its name as the first line of the text part instead. */
     data class NamedFile(val name: String) : SentAttachment
+
+    /** A file sent through the bridge: shown as a card with its name and size, without a download link. [size] is [SIZE_UNKNOWN] in history. */
+    data class SentFile(val name: String, val size: Long) : SentAttachment
 }
+
+/** The size of a sent file that session history does not carry; the card then shows the name alone. */
+const val SIZE_UNKNOWN = -1L
 
 /** What the composer stages turn into on the sent bubble. */
 fun PendingAttachment.toSent(): SentAttachment = when (this) {
     is PendingAttachment.Photo -> SentAttachment.LocalPhoto(thumb)
     is PendingAttachment.TextFile -> SentAttachment.NamedFile(name)
+    is PendingAttachment.UploadFile -> SentAttachment.SentFile(name, size)
 }

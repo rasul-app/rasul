@@ -21,7 +21,7 @@ from websockets.exceptions import ConnectionClosed
 from .audit import Audit
 from .approvals import ALL_ROUTE, Approvals, PHONE_ROUTE
 from .desktop import Desktop, RULES as DESKTOP_RULES
-from .http import HTTPError, Reader, chunk, request, response, stream_start
+from .http import HTTPError, Reader, chunk, no_content, request, response, stream_start
 from .limits import Limits, MAX_BODY
 from .instructions import Instructions
 from .network import extra_plan, lan_addresses, tailscale_addresses
@@ -31,6 +31,7 @@ from .profiles import Profiles
 from .files import Files, TOKEN
 from .proxy import StreamAborted, Upstream, allowed, with_media_note
 from .registry import Registry
+from .uploads import Uploads
 from .tls import TLSLink, ensure_identity, server_context
 
 
@@ -82,6 +83,7 @@ class Bridge:
         self.desktop = Desktop(self.profiles)
         self.status = Status(self)
         self.files = Files(config.hermes_home, store.root, self.file_audit)
+        self.uploads = Uploads(store.root, lambda profile: self.profiles.directories().get(profile))
         self.connections = {}
         self.pending = {}
         self.anonymous = {}
@@ -240,6 +242,7 @@ class Bridge:
         while True:
             await asyncio.sleep(0.1)
             self.audit_call("flush_rejections")
+            self.uploads.sweep()
             for connection, device in list(self.connections.items()):
                 # Failed WebSocket opening handshakes never invoke handle().
                 if connection.transport.is_closing():
@@ -396,6 +399,27 @@ class Bridge:
                 value = self.instructions.call(profile, value)
                 status = 200
                 await response(link, status, value)
+            elif method == "POST" and re.fullmatch(r"/v1/profiles/[a-z0-9][a-z0-9_-]{0,63}/uploads", target):
+                route, profile = "/v1/profiles/{id}/uploads", target.split("/")[3]
+                value = self.uploads.start(device, profile, body)
+                status = 201
+                await response(link, status, value)
+            elif method == "PUT" and re.fullmatch(r"/v1/uploads/[0-9a-f]{32}/chunks/(?:0|[1-9][0-9]{0,5})", target):
+                route = "/v1/uploads/{id}/chunks/{index}"
+                _, _, _, key, _, index = target.split("/")
+                self.uploads.chunk(device, key, int(index), body)
+                status = 204
+                await no_content(link)
+            elif method == "POST" and re.fullmatch(r"/v1/uploads/[0-9a-f]{32}/complete", target):
+                route = "/v1/uploads/{id}/complete"
+                value = self.uploads.complete(device, target.split("/")[3], body)
+                status = 200
+                await response(link, status, value)
+            elif method == "DELETE" and re.fullmatch(r"/v1/uploads/[0-9a-f]{32}", target):
+                route = "/v1/uploads/{id}"
+                self.uploads.delete(device, target.rsplit("/", 1)[1])
+                status = 204
+                await no_content(link)
             elif re.match(r"/v1/profiles/[a-z0-9][a-z0-9_-]{0,63}/desktop(?:/|$)", path):
                 route = "/v1/profiles/{id}/desktop/unknown"
                 profile = path.split("/")[3]
@@ -455,8 +479,13 @@ class Bridge:
                         raise HTTPError(400, action + "_invalid_fields") from None
                     forward_head = {**head, "content-type": "application/json"}
                     forward_body = json.dumps(value, ensure_ascii=False).encode("utf-8")
-                if template == "/v1/runs" and method == "POST" and self.config.media_note and body:
-                    noted = with_media_note(body)
+                run_body = body
+                if template == "/v1/runs" and method == "POST" and body:
+                    run_body = self.uploads.attach(device, profile, body)
+                    if run_body is not body:
+                        forward_head, forward_body = {**head, "content-type": "application/json"}, run_body
+                if template == "/v1/runs" and method == "POST" and self.config.media_note and run_body:
+                    noted = with_media_note(run_body)
                     # A body already at the limit is forwarded as sent rather than grown past it.
                     if noted is not None and len(noted) <= MAX_BODY:
                         forward_head = {**head, "content-type": "application/json"}

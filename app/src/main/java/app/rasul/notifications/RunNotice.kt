@@ -14,7 +14,11 @@ import app.rasul.ui.rateLimitMessage
 data class RunNotice(val active: Boolean, val text: String, val approval: Boolean = false, val openOnly: Boolean = false)
 
 fun ChatState.hasActiveWork(): Boolean =
-    run?.status != StatusLabel.Lost && run?.status != StatusLabel.LiveUpdatesUnavailable && (run != null || queuedReplies > 0 || preparingSend)
+    run?.status != StatusLabel.Lost && run?.status != StatusLabel.LiveUpdatesUnavailable &&
+        (run != null || queuedReplies > 0 || preparingSend || uploading)
+
+/** Nothing runs, waits to be sent or uploads: the chat may be replaced or closed without losing work. */
+fun ChatState.isIdle(): Boolean = run == null && queuedReplies == 0 && !preparingSend && !uploading
 
 fun notificationText(publicText: String, privateText: String, lockEnabled: Boolean): String =
     if (lockEnabled) publicText else privateText
@@ -33,6 +37,7 @@ fun runNotice(context: Context, state: ChatState): RunNotice {
     fun text(id: Int, vararg args: Any) = context.getString(id, *args)
     val run = state.run
     if (run == null && state.terminal == null && state.terminalFailure == null && (state.preparingSend || state.queuedReplies > 0)) return RunNotice(true, text(R.string.status_thinking))
+    if (run == null && state.terminal == null && state.terminalFailure == null && state.uploading) return RunNotice(true, text(R.string.chat_uploading))
     if (run?.status == StatusLabel.Lost) return RunNotice(false, text(R.string.run_connection_lost), openOnly = true)
     if (run?.status == StatusLabel.LiveUpdatesUnavailable) return RunNotice(false, text(R.string.run_live_updates_stopped), openOnly = true)
     if (run != null) {
@@ -108,6 +113,20 @@ fun failureText(context: Context, failure: ChatFailure): String {
         ChatFailure.AttachmentKindMixed -> text(R.string.chat_err_attach_mixed)
         ChatFailure.AttachmentTooManyPhotos -> text(R.string.chat_err_attach_too_many)
         ChatFailure.AttachmentRunActive -> text(R.string.chat_err_attach_run_active)
+        ChatFailure.FilesNeedBridge -> text(R.string.chat_attach_needs_bridge)
+        is ChatFailure.UploadTooLarge -> text(R.string.chat_err_upload_too_large, failure.name)
+        is ChatFailure.UploadEmpty -> text(R.string.chat_err_upload_empty, failure.name)
+        ChatFailure.TooManyFiles -> text(R.string.chat_err_upload_too_many)
+        ChatFailure.FilesMixed -> text(R.string.chat_err_upload_mixed)
+        ChatFailure.BridgeNeedsUpdate -> text(R.string.chat_err_upload_old_bridge)
+        ChatFailure.PcDiskFull -> text(R.string.chat_err_upload_disk_full)
+        ChatFailure.TooManyOpenUploads -> text(R.string.chat_err_upload_open_limit)
+        ChatFailure.PcSaveFailed -> text(R.string.chat_err_upload_save_failed)
+        ChatFailure.UploadBotMissing -> text(R.string.chat_err_upload_bot_missing)
+        ChatFailure.RunInputRefused -> text(R.string.chat_err_run_input_refused)
+        is ChatFailure.FilesGone ->
+            if (failure.names.size == 1) text(R.string.chat_err_upload_gone, failure.names.single())
+            else text(R.string.chat_err_upload_gone_many, failure.names.joinToString(", "))
         ChatFailure.ReplyKept -> text(R.string.chat_err_reply_kept)
         is ChatFailure.ForkFailed -> app.rasul.chat.sessionActionMessage(context, failure.error)
             ?: failureText(context, ChatFailure.Api(failure.error))

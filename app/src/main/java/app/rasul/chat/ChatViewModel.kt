@@ -13,6 +13,13 @@ import app.rasul.data.RunEvent
 import app.rasul.data.RunInputLimits
 import app.rasul.data.RunInputPlan
 import app.rasul.data.RunUpdate
+import app.rasul.data.UploadApi
+import app.rasul.data.UploadException
+import app.rasul.data.UploadFailure
+import app.rasul.data.UploadState
+import app.rasul.data.FileUploadLimits
+import app.rasul.data.FileUploader
+import app.rasul.data.uploadApi
 import app.rasul.data.RunsApi
 import app.rasul.data.SentAttachment
 import app.rasul.data.followRun
@@ -109,6 +116,42 @@ sealed interface ChatFailure {
     /** A notification reply could not be sent; its text was put back into the composer draft. */
     data object ReplyKept : ChatFailure
 
+    /** The File option was used on a direct connection. */
+    data object FilesNeedBridge : ChatFailure
+
+    /** [name] is over the 50 MB a file may have. */
+    data class UploadTooLarge(val name: String) : ChatFailure
+
+    /** [name] has no content. */
+    data class UploadEmpty(val name: String) : ChatFailure
+
+    /** More than [FileUploadLimits.MAX_FILES] files in one message. */
+    data object TooManyFiles : ChatFailure
+
+    /** Photos (or a text file) and bridge files are staged together. */
+    data object FilesMixed : ChatFailure
+
+    /** The bridge has no upload route: it needs an update on the PC. */
+    data object BridgeNeedsUpdate : ChatFailure
+
+    /** The PC has no room for the file. */
+    data object PcDiskFull : ChatFailure
+
+    /** The bridge already holds as many unfinished uploads as it allows. */
+    data object TooManyOpenUploads : ChatFailure
+
+    /** The PC could not write the file (the bridge's `upload_failed`). */
+    data object PcSaveFailed : ChatFailure
+
+    /** The bridge does not have this bot any more. */
+    data object UploadBotMissing : ChatFailure
+
+    /** The bridge refused the message body of a run (`invalid_run_input`). */
+    data object RunInputRefused : ChatFailure
+
+    /** The bridge no longer has these staged files (it dropped them after a day, or they were removed on the PC). */
+    data class FilesGone(val names: List<String>) : ChatFailure
+
     /** The fork request failed; [error] is the specific cause. */
     data class ForkFailed(val error: HermesError) : ChatFailure
 
@@ -203,6 +246,12 @@ data class ChatState(
         run == null && !preparingSend && queuedReplies == 0 && !forking
 
     val canFork: Boolean get() = supportsFork && canChooseModel
+
+    /** A bridge file is still on its way to the PC: Send waits. */
+    val uploading: Boolean get() = attachments.any { it is PendingAttachment.UploadFile && it.state is UploadState.Uploading }
+
+    /** A staged file is uploading or failed: it cannot be sent as it is. */
+    val filesNotReady: Boolean get() = attachments.any { it is PendingAttachment.UploadFile && it.state !is UploadState.Ready }
 
     /** The one the sheet shows: the oldest still pending. */
     val approval: ApprovalUi? get() = approvals.firstOrNull()
@@ -305,12 +354,25 @@ class ChatViewModel(
     /** Turns picker URIs into staged attachments; null in tests that never pick. */
     private val attachLoader: AttachmentLoader? = null,
     private val control: ChatSessionControl = ChatSessionControl.None,
+    /** The upload routes of a target's bridge; null (direct connection) means files cannot be sent. */
+    private val uploadApiFor: (HermesTarget) -> UploadApi? = { it.uploadApi() },
+    /** Pause between chunk retries; tests replace it. */
+    private val uploadPause: suspend (Long) -> Unit = { delay(it) },
 ) : ViewModel() {
     private val chatScope = kotlinx.coroutines.CoroutineScope((scope ?: viewModelScope).coroutineContext + kotlinx.coroutines.SupervisorJob((scope ?: viewModelScope).coroutineContext[Job]))
     internal var onFinished: ((String, ChatState) -> Unit)? = null
 
+    /** The scope [chatScope] hangs from: it is still alive after [close] has ended the chat's own scope. */
+    private val parentScope = scope ?: viewModelScope
+
     fun close() {
         flushDraft()
+        // The bridge keeps an unfinished upload for an hour and allows four at a time: free them now.
+        // This runs on the scope the chat's own scope hangs from, because the chat's scope ends right below.
+        val api = target?.let(uploadApiFor)
+        val open = uploads.values.mapNotNull { it.uploadId }
+        if (api != null && open.isNotEmpty()) deleteUploads(api, open, parentScope)
+        uploads.clear()
         onFinished = null
         notificationReplies.close()
         chatScope.coroutineContext[Job]?.cancel()
@@ -547,6 +609,7 @@ class ChatViewModel(
                 pendingKey = null
                 missingRunWaitingForHistory = null
                 persist(null)
+                cancelAllUploads()
                 _state.update {
                     it.copy(
                         messages = emptyList(),
@@ -814,6 +877,7 @@ class ChatViewModel(
     private fun stageOrRefusal(items: List<PendingAttachment>): ChatFailure? {
         if (items.isEmpty()) return null
         val current = _state.value.attachments
+        if (current.any { it is PendingAttachment.UploadFile }) return ChatFailure.FilesMixed
         val next = current + items
         val hasFile = next.any { it is PendingAttachment.TextFile }
         if ((hasFile && next.size > 1) || (current.isNotEmpty() && items.any { it is PendingAttachment.TextFile })) {
@@ -832,7 +896,176 @@ class ChatViewModel(
 
     fun removeAttachment(key: Long) {
         if (preparingSend) return
+        val removed = _state.value.attachments.firstOrNull { it.key == key }
+        if (removed is PendingAttachment.UploadFile) cancelUpload(key, removed.state)
         _state.update { it.copy(attachments = it.attachments.filterNot { a -> a.key == key }) }
+    }
+
+    /** One file being sent to the PC: where it is read from, the running coroutine, and the bridge's upload id once made. */
+    private class UploadRun(val uri: Uri, val mime: String) {
+        @Volatile var job: Job? = null
+        @Volatile var uploadId: String? = null
+
+        /** The chip was removed; a create that was still in flight is deleted as soon as it answers. */
+        @Volatile var removed = false
+    }
+
+    /** Number of files this chat still tracks for upload; a sent file is dropped. */
+    internal val trackedUploads: Int get() = uploads.size
+
+    private val uploads = java.util.concurrent.ConcurrentHashMap<Long, UploadRun>()
+
+    /** Stops the upload and, when the bridge holds an unfinished one, asks it to delete that (best effort). */
+    private fun cancelUpload(key: Long, state: UploadState) {
+        val run = uploads.remove(key) ?: return
+        run.removed = true
+        val id = run.uploadId
+        // Without an id the bridge may still be answering create: let it finish, startUpload then deletes what it made.
+        if (id != null || run.job?.isActive != true) run.job?.cancel()
+        val t = target
+        if (id != null && state !is UploadState.Ready && t != null) {
+            val api = uploadApiFor(t) ?: return
+            deleteUploads(api, listOf(id), chatScope)
+        }
+    }
+
+    private fun deleteUploads(api: UploadApi, ids: List<String>, on: kotlinx.coroutines.CoroutineScope) {
+        on.launch(workDispatcher) {
+            for (id in ids) {
+                try {
+                    api.cancel(id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // The bridge drops an unfinished upload after an hour anyway.
+                }
+            }
+        }
+    }
+
+    private fun cancelAllUploads() {
+        _state.value.attachments.filterIsInstance<PendingAttachment.UploadFile>().forEach { cancelUpload(it.key, it.state) }
+    }
+
+    private fun setUploadState(key: Long, state: UploadState) {
+        _state.update { s ->
+            s.copy(attachments = s.attachments.map { if (it.key == key && it is PendingAttachment.UploadFile) it.copy(state = state) else it })
+        }
+    }
+
+    /**
+     * The File picker's result. Each file is checked for size, staged as a chip and starts uploading at once, on this
+     * ViewModel's scope so a rotation cannot stop it. Up to [FileUploadLimits.MAX_FILES] files; a file that is too
+     * large or empty is refused by name while the others stay.
+     */
+    fun addFiles(uris: List<Uri>) {
+        val loader = attachLoader ?: return
+        if (uris.isEmpty()) return
+        val t = target ?: return
+        val api = uploadApiFor(t)
+        if (api == null) {
+            _state.update { it.fail(ChatFailure.FilesNeedBridge) }
+            return
+        }
+        val atSession = sessionId
+        _state.update { it.copy(pendingAttachments = it.pendingAttachments + 1) }
+        chatScope.launch {
+            try {
+                val picked = uris.map { uri -> uri to loader.describeFile(uri) }
+                stagingLock.withLock {
+                    if (sessionId != atSession) return@withLock
+                    if (_state.value.attachments.any { it !is PendingAttachment.UploadFile }) {
+                        _state.update { it.fail(ChatFailure.FilesMixed) }
+                        return@withLock
+                    }
+                    for ((uri, info) in picked) {
+                        if (info == null) {
+                            _state.update { it.fail(ChatFailure.FileUnreadable) }
+                            continue
+                        }
+                        val failure = when {
+                            info.size > FileUploadLimits.MAX_FILE_BYTES -> ChatFailure.UploadTooLarge(info.name)
+                            info.size <= 0 -> ChatFailure.UploadEmpty(info.name)
+                            _state.value.attachments.size >= FileUploadLimits.MAX_FILES -> ChatFailure.TooManyFiles
+                            else -> null
+                        }
+                        if (failure != null) {
+                            _state.update { it.fail(failure) }
+                            if (failure == ChatFailure.TooManyFiles) break
+                            continue
+                        }
+                        val key = PendingAttachment.newKey()
+                        uploads[key] = UploadRun(uri, info.mime)
+                        _state.update {
+                            it.copy(attachments = it.attachments + PendingAttachment.UploadFile(key, info.name, info.size, UploadState.Uploading()))
+                        }
+                        startUpload(key, info.name, info.size, api)
+                    }
+                }
+            } finally {
+                _state.update { it.copy(pendingAttachments = (it.pendingAttachments - 1).coerceAtLeast(0)) }
+            }
+        }
+    }
+
+    /** Sends a failed file again from the start (the bridge may have dropped the half upload). */
+    fun retryUpload(key: Long) {
+        val file = _state.value.attachments.firstOrNull { it.key == key } as? PendingAttachment.UploadFile ?: return
+        if (file.state !is UploadState.Failed) return
+        val t = target ?: return
+        val api = uploadApiFor(t) ?: return
+        val run = uploads[key] ?: return
+        run.uploadId?.let { stale -> chatScope.launch(workDispatcher) { try { api.cancel(stale) } catch (e: CancellationException) { throw e } catch (_: Exception) { } } }
+        run.uploadId = null
+        setUploadState(key, UploadState.Uploading())
+        startUpload(key, file.name, file.size, api)
+    }
+
+    private fun startUpload(key: Long, name: String, size: Long, api: UploadApi) {
+        val run = uploads[key] ?: return
+        run.job = chatScope.launch {
+            try {
+                val loader = attachLoader ?: return@launch
+                val done = withContext(workDispatcher) {
+                    FileUploader(api, uploadPause).upload(
+                        name, size, run.mime,
+                        open = { loader.openFile(run.uri) },
+                        onCreated = { id ->
+                            run.uploadId = id
+                            if (run.removed) {
+                                deleteUploads(api, listOf(id), chatScope)
+                                throw CancellationException("The file was removed while the upload was being made")
+                            }
+                        },
+                        onProgress = { sent -> setUploadState(key, UploadState.Uploading(sent)) },
+                    )
+                }
+                run.uploadId = null
+                setUploadState(key, UploadState.Ready(done.file))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: UploadException) {
+                if (run.removed) return@launch
+                setUploadState(key, UploadState.Failed(e.failure))
+                uploadNotice(name, e.failure)?.let { notice -> _state.update { it.fail(notice) } }
+            } catch (e: Exception) {
+                setUploadState(key, UploadState.Failed(UploadFailure.Rejected(null)))
+            }
+        }
+    }
+
+    /** The specific message for a failure that has one; the chip's own "Upload failed. Try again" covers the rest. */
+    private fun uploadNotice(name: String, failure: UploadFailure): ChatFailure? = when (failure) {
+        UploadFailure.OldBridge -> ChatFailure.BridgeNeedsUpdate
+        UploadFailure.ProfileMissing -> ChatFailure.UploadBotMissing
+        UploadFailure.SaveFailed -> ChatFailure.PcSaveFailed
+        UploadFailure.TooLarge -> ChatFailure.UploadTooLarge(name)
+        UploadFailure.Empty -> ChatFailure.UploadEmpty(name)
+        UploadFailure.TooManyUploads -> ChatFailure.TooManyOpenUploads
+        UploadFailure.DiskFull -> ChatFailure.PcDiskFull
+        UploadFailure.Unreadable -> ChatFailure.FileUnreadable
+        is UploadFailure.Network -> ChatFailure.Api(failure.error)
+        is UploadFailure.Rejected -> null
     }
 
     /** The picker/loader layer reports why an attachment could not be staged. */
@@ -981,6 +1214,8 @@ class ChatViewModel(
         // Notification replies stay text-only: staged chips are left in the composer for the next manual send.
         val staged = if (fromNotification) emptyList() else s.attachments
         if ((text.isEmpty() && staged.isEmpty()) || t == null || s.load != ChatLoad.Ready || preparingSend || s.pendingAttachments > 0) return null
+        // A file that is still uploading, or failed, is not on the PC yet: nothing is sent until every chip is ready.
+        if (staged.any { it is PendingAttachment.UploadFile && it.state !is UploadState.Ready }) return null
         val run = s.run
         if (staged.isNotEmpty() && run != null) {
             // Steer is text-only: keep chips and draft, explain instead of silently dropping the send.
@@ -998,11 +1233,14 @@ class ChatViewModel(
                         }
                         val session = readSessionId() ?: return@launch
                         // Base64 encode + serialize happen once, on the worker; the client posts the element as-is.
+                        val files = staged.filterIsInstance<PendingAttachment.UploadFile>()
                         val plan = if (staged.isEmpty()) RunInputPlan.TextOnly
+                            else if (files.isNotEmpty()) RunInputPlan.TextOnly
                             else withContext(workDispatcher) { planRunInput(text, staged) }
                         val input = when (plan) {
                             is RunInputPlan.WithParts -> plan.input
-                            RunInputPlan.TextOnly -> JsonPrimitive(text)
+                            // Files travel as ids beside `input`; a message of only files names them so the input is not empty.
+                            RunInputPlan.TextOnly -> JsonPrimitive(text.ifEmpty { files.joinToString(", ") { it.name } })
                             RunInputPlan.TooLarge -> {
                                 _state.update { it.fail(ChatFailure.AttachmentTooLarge) }
                                 return@launch
@@ -1013,7 +1251,8 @@ class ChatViewModel(
                         // rather than anchoring the new turn to stale history.
                         if (!loadHistory(t, session)) return@launch
                         pendingTurn?.let { retirePending(keepMessages = it.outcome != Outcome.Answered) }
-                        startRun(t, text, input, staged, clearDraft = !fromNotification, fromNotification = fromNotification)
+                        val fileIds = files.mapNotNull { (it.state as? UploadState.Ready)?.fileId }
+                        startRun(t, text, input, staged, fileIds = fileIds, clearDraft = !fromNotification, fromNotification = fromNotification)
                     } finally {
                         preparingSend = false
                     }
@@ -1024,7 +1263,7 @@ class ChatViewModel(
         }
     }
 
-    private fun startRun(t: HermesTarget, text: String, input: JsonElement, staged: List<PendingAttachment> = emptyList(), clearDraft: Boolean = true, fromNotification: Boolean = false) {
+    private fun startRun(t: HermesTarget, text: String, input: JsonElement, staged: List<PendingAttachment> = emptyList(), fileIds: List<String> = emptyList(), clearDraft: Boolean = true, fromNotification: Boolean = false) {
         // The idempotency key tracks the send intent: same text + same staged attachments reuse it.
         composerTouched = true
         val keySeed = if (staged.isEmpty()) text else text + "|" + staged.joinToString(",") { it.key.toString() }
@@ -1044,7 +1283,7 @@ class ChatViewModel(
         }
         val session = sessionId
         chatScope.launch {
-            when (val r = runs.startRun(t, input, session, key)) {
+            when (val r = if (fileIds.isEmpty()) runs.startRun(t, input, session, key) else runs.startRun(t, input, session, key, fileIds)) {
                 is HermesResult.Ok -> {
                     val id = r.value.runId
                     var applied = false
@@ -1055,6 +1294,8 @@ class ChatViewModel(
                             .copy(attachments = it.attachments.filterNot { a -> staged.any { s -> s.key == a.key } }) else it
                     }
                     if (!applied) return@launch
+                    // The files went with the run: their upload records are done with.
+                    staged.forEach { a -> uploads.remove(a.key) }
                     // A kept reply that now started must not stay in the composer to be sent twice.
                     if (fromNotification && keptReplies.remove(text)) _state.update {
                         it.copy(draft = if (draftHas(it.draft, text)) dropDraftLine(it.draft, text) else it.draft)
@@ -1073,7 +1314,14 @@ class ChatViewModel(
                         else {
                             pendingTurn = null
                             kept = fromNotification && !draftHas(it.draft, text)
-                            it.copy(run = null, terminalFailure = if (fromNotification) ChatFailure.ReplyKept else ChatFailure.Api(r.error), draft = if (draftHas(it.draft, text)) it.draft else joinDraft(text, it.draft)).fail(ChatFailure.Api(r.error))
+                            val gone = fileIds.isNotEmpty() && (r.error as? HermesError.Server)?.serverCode == "file_unavailable"
+                            val failure = if ((r.error as? HermesError.Server)?.serverCode == "invalid_run_input") ChatFailure.RunInputRefused else ChatFailure.Api(r.error)
+                            val goneNames = staged.filterIsInstance<PendingAttachment.UploadFile>().map { f -> f.name }
+                            if (gone) staged.forEach { a -> uploads.remove(a.key) }
+                            val next = it.copy(run = null, terminalFailure = if (fromNotification) ChatFailure.ReplyKept else failure, draft = if (draftHas(it.draft, text)) it.draft else joinDraft(text, it.draft))
+                            // The bridge no longer has the files: their chips go, so the user attaches them again.
+                            if (gone) next.copy(attachments = next.attachments.filterNot { a -> staged.any { s -> s.key == a.key } }).fail(ChatFailure.FilesGone(goneNames))
+                            else next.fail(failure)
                         }
                     }
                     if (kept) keptReplies.add(text)

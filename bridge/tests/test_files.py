@@ -817,6 +817,64 @@ def test_temp_folder_files_are_delivered_only_when_fresh_and_not_secret(tmp_path
     assert files.validate(str(old)) is not None
 
 
+def scratch_setup(tmp_path, monkeypatch):
+    """A Hermes home inside the fake per-user data folder, with the system temp folder somewhere else."""
+    local = tmp_path / "user" / ("App" + "Data") / "Local"
+    home = local / "hermes"
+    (home / "profiles" / "admin").mkdir(parents=True)
+    system_temp = tmp_path / "systemtemp"
+    system_temp.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(system_temp))
+    (tmp_path / "data").mkdir()
+    return Files(home, tmp_path / "data", None, time.time), home, local
+
+
+def scratch_file(folder, name="shot.png"):
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(b"x")
+    return path
+
+
+def test_fresh_files_in_the_agent_scratch_folder_are_delivered(tmp_path, monkeypatch):
+    files, home, _ = scratch_setup(tmp_path, monkeypatch)
+    named = scratch_file(home / "profiles" / "admin" / "cache" / "scratch")
+    default = scratch_file(home / "cache" / "scratch")
+    assert files.validate(str(named), "admin") is not None
+    assert files.validate(str(default)) is not None
+    assert files.mint("dev", "admin", str(named)) is not None
+
+
+def test_scratch_files_follow_the_recency_window_and_the_other_rules(tmp_path, monkeypatch):
+    files, home, local = scratch_setup(tmp_path, monkeypatch)
+    scratch = home / "profiles" / "admin" / "cache" / "scratch"
+    old, secret = scratch_file(scratch, "old.png"), scratch_file(scratch, "token.pem")
+    aged(old, 3600)
+    assert files.validate(str(old), "admin") is None and files.validate(str(secret), "admin") is None
+    # only scratch is lifted: the agent's other cache folders and other data folders stay refused
+    for other in (home / "profiles" / "admin" / "cache" / "terminal", home / "profiles" / "admin" / "browser-profile",
+                  local / "other"):
+        assert files.validate(str(scratch_file(other)), "admin") is None, other
+    # no recency trust, no scratch files
+    fresh = scratch_file(scratch, "fresh.png")
+    assert files.validate(str(fresh), "admin") is not None
+    write_config(home / "profiles" / "admin", "gateway:\n  trust_recent_files: false\n")
+    assert files.validate(str(fresh), "admin") is None
+
+
+def test_a_link_out_of_scratch_to_a_credential_file_is_refused(tmp_path, monkeypatch):
+    files, home, _ = scratch_setup(tmp_path, monkeypatch)
+    link = home / "profiles" / "admin" / "cache" / "scratch" / "innocent.txt"
+    link.parent.mkdir(parents=True)
+    secret = home / "profiles" / "admin" / ".env"
+    secret.write_text("KEY=1")
+    try:
+        os.symlink(secret, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links unavailable")
+    assert files.validate(str(link), "admin") is None
+
+
 def test_data_folders_fall_back_to_the_home_when_the_env_names_are_unset(tmp_path, monkeypatch):
     for name in ("APP" + "DATA", "LOCAL" + "APP" + "DATA"):
         monkeypatch.delenv(name, raising=False)

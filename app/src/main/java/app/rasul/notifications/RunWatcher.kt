@@ -164,7 +164,7 @@ class RunWatcher(
                     else chat.model.resolvedTarget != target || chat.model.resolvedSessionId != session
                 chat.currentTarget = target
                 chat.currentSession = session
-                val idle = state.run == null && state.queuedReplies == 0 && !state.preparingSend
+                val idle = state.isIdle()
                 if (!idle || (state.load !is ChatLoad.Failed && !changed)) {
                     if (title.isNotBlank() && chat.title != title) { chat.title = title; changes.value++ }
                     routes[route] = chat
@@ -172,7 +172,7 @@ class RunWatcher(
                 }
             }
             existing?.let(::remove)
-            routes[route]?.takeIf { old -> old !== existing && old.model.state.value.let { it.run == null && it.queuedReplies == 0 && !it.preparingSend } }?.let(::remove)
+            routes[route]?.takeIf { old -> old !== existing && old.model.state.value.isIdle() }?.let(::remove)
             val model = createModel(TargetLoader { loaded }, guardedMemory(memory, session, app.rasul.chat.StoredChatDrafts(
                 container.drafts, connectionId(route), target?.profile ?: target?.bridge?.profileId, container.draftWriter,
                 newSession = Uri.parse(route).getQueryParameter("newSession"),

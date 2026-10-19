@@ -1059,4 +1059,26 @@
         <item quantity="many">يراقب نتائج المهام على %1$d حاسوبًا</item>
         <item quantity="other">يراقب نتائج المهام على %1$d حاسوب</item>
     </plurals>
+    <string name="chat_attach_any_file">ملف</string>
+    <string name="chat_attach_needs_bridge">إرسال الملفات يحتاج إلى جسر رسول</string>
+    <string name="chat_uploading">جارٍ الرفع…</string>
+    <string name="chat_upload_progress">%2$d%% من %1$s</string>
+    <string name="chat_upload_failed">تعذّر الرفع. حاول مرة أخرى</string>
+    <string name="chat_upload_retry_named">أعد المحاولة: %1$s</string>
+    <string name="chat_upload_desc_uploading">%1$s، %2$s، جارٍ الرفع %3$d%%</string>
+    <string name="chat_upload_desc_ready">%1$s، %2$s، جاهز</string>
+    <string name="chat_upload_desc_failed">%1$s، %2$s، فشل الرفع</string>
+    <string name="chat_sent_file_desc">الملف %1$s، %2$s</string>
+    <string name="chat_err_upload_too_large">حجم %1$s أكبر من ٥٠ ميغابايت</string>
+    <string name="chat_err_upload_empty">الملف %1$s فارغ</string>
+    <string name="chat_err_upload_too_many">يمكنك إرسال ٤ ملفات كحد أقصى في المرة الواحدة</string>
+    <string name="chat_err_upload_mixed">أرسل صورًا أو ملفات، لا الاثنين معًا.</string>
+    <string name="chat_err_upload_old_bridge">حدّث جسر رسول على حاسوبك لتتمكن من إرسال الملفات</string>
+    <string name="chat_err_upload_disk_full">لا توجد مساحة كافية على قرص حاسوبك</string>
+    <string name="chat_err_upload_save_failed">تعذّر على حاسوبك حفظ الملف. حاول مرة أخرى.</string>
+    <string name="chat_err_upload_bot_missing">لم يعد هذا المساعد موجودًا على حاسوبك. عُد إلى قائمة المساعدين.</string>
+    <string name="chat_err_run_input_refused">تعذّر على حاسوبك قبول هذه الرسالة. جرّب مرة أخرى بدون الملفات.</string>
+    <string name="chat_err_upload_open_limit">هناك ملفات كثيرة قيد الرفع. انتظر حتى ينتهي أحدها ثم حاول مرة أخرى.</string>
+    <string name="chat_err_upload_gone">الملف %1$s لم يعد موجودًا على حاسوبك. أرفقه من جديد</string>
+    <string name="chat_err_upload_gone_many">هذه الملفات لم تعد موجودة على حاسوبك. أرفقها من جديد: %1$s</string>
 </resources>

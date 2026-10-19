@@ -32,6 +32,7 @@ import app.rasul.notifications.UpdateThrottle
 import app.rasul.notifications.notificationText
 import app.rasul.notifications.runNotice
 import app.rasul.notifications.hasActiveWork
+import app.rasul.notifications.isIdle
 import app.rasul.sessions.SessionMessageDto
 import app.rasul.sessions.SessionsApi
 import kotlinx.coroutines.CompletableDeferred
@@ -1621,4 +1622,18 @@ class RunNotificationsTest {
         assertEquals("session-b", coldStore.currentSessionId("a", null))
     }
 
+    @Test fun anUploadingFileIsActiveWorkAndKeepsTheChatFromBeingReplaced() {
+        fun withFile(state: app.rasul.data.UploadState) = ChatState(
+            load = app.rasul.chat.ChatLoad.Ready,
+            attachments = listOf(app.rasul.data.PendingAttachment.UploadFile(1, "a.pdf", 10, state)),
+        )
+        val uploading = withFile(app.rasul.data.UploadState.Uploading(1))
+        assertTrue(uploading.hasActiveWork())
+        assertFalse(uploading.isIdle())
+        assertEquals(RunNotice(true, "Uploading…"), runNotice(context, uploading))
+        val ready = withFile(app.rasul.data.UploadState.Ready("f"))
+        assertFalse(ready.hasActiveWork())
+        assertTrue(ready.isIdle())
+        assertTrue(ChatState(load = app.rasul.chat.ChatLoad.Ready).isIdle())
+    }
 }

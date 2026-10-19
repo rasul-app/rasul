@@ -56,6 +56,19 @@ interface RunsApi {
         sessionId: String?,
         idempotencyKey: String? = null,
     ): HermesResult<StartedRun>
+    /**
+     * Same as above with finished bridge uploads: [files] go in the body as `rasul_files` (1..4 ids). An API that
+     * cannot carry them refuses instead of sending the run without its files.
+     */
+    suspend fun startRun(
+        target: HermesTarget,
+        input: JsonElement,
+        sessionId: String?,
+        idempotencyKey: String?,
+        files: List<String>,
+    ): HermesResult<StartedRun> =
+        if (files.isEmpty()) startRun(target, input, sessionId, idempotencyKey)
+        else HermesResult.Err(HermesError.Incompatible(listOf("rasul_files")))
     suspend fun status(target: HermesTarget, runId: String): HermesResult<RunStatus>
     suspend fun stop(target: HermesTarget, runId: String): HermesResult<Unit>
     suspend fun steer(target: HermesTarget, runId: String, text: String): HermesResult<Unit>
@@ -147,6 +160,15 @@ class RunsClient(
         input: JsonElement,
         sessionId: String?,
         idempotencyKey: String?,
+    ): HermesResult<StartedRun> = startRun(target, input, sessionId, idempotencyKey, emptyList())
+
+    /** [files] are bridge upload ids; the bridge removes `rasul_files` and tells the agent where each file is. */
+    override suspend fun startRun(
+        target: HermesTarget,
+        input: JsonElement,
+        sessionId: String?,
+        idempotencyKey: String?,
+        files: List<String>,
     ): HermesResult<StartedRun> {
         modelsLoaded.await()
         val selectedNow = sessionId?.let(::selectedModelForChat)
@@ -160,6 +182,7 @@ class RunsClient(
         val body = buildJsonObject {
             put("input", input)
             if (sessionId != null) put("session_id", sessionId)
+            if (files.isNotEmpty()) put("rasul_files", kotlinx.serialization.json.JsonArray(files.map(::JsonPrimitive)))
             if (selection != null) {
                 put("provider", selection.provider)
                 put("model", selection.model)
@@ -359,7 +382,11 @@ class RunsClient(
                     .build()
                 if (target.bridge != null) return@withContext target.bridge.client.bridgeResponse(request) { resp ->
                     val err = bridgeStatus(resp.code, HermesError.NotFound)
-                    if (err != null) HermesResult.Err(err) else HermesResult.Ok(resp.body?.string().orEmpty())
+                    // The bridge refuses a run before sending anything when its uploaded files are gone (400 file_unavailable)
+                    // or its message body cannot take the file notes (400 invalid_run_input).
+                    val refusal = if (resp.code == 400) bridgeRefusal(resp.body?.string().orEmpty()) else null
+                    if (refusal != null) HermesResult.Err(HermesError.Server(400, null, refusal))
+                    else if (err != null) HermesResult.Err(err) else HermesResult.Ok(resp.body?.string().orEmpty())
                 }
                 http.newCall(request).execute().use { resp ->
                     val err = mapStatus(resp.code, resp.isRedirect)
@@ -371,6 +398,13 @@ class RunsClient(
                 HermesResult.Err(if (target.bridge != null) bridgeError(e) else HermesError.Unreachable(e.message ?: e.javaClass.simpleName))
             }
         }
+
+    private fun bridgeRefusal(body: String): String? = try {
+        (json.parseToJsonElement(body).jsonObject["error"] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf { it == "file_unavailable" || it == "invalid_run_input" }
+    } catch (_: Exception) {
+        null
+    }
 
     private suspend fun get(target: HermesTarget, path: String): HermesResult<String> =
         withContext(Dispatchers.IO) {

@@ -138,7 +138,7 @@ class RunWatchService : Service() {
                 throttles.remove(oldTag)
             }
             val state = chat.model.state.value
-            if (state.run != null || state.queuedReplies > 0 || state.preparingSend) watched += tag
+            if (state.run != null || state.queuedReplies > 0 || state.preparingSend || state.uploading) watched += tag
             if (tag !in watched) return@forEach
             if (state.run == null && state.finishedRunId != null && (state.terminal != null || state.terminalFailure != null)) return@forEach
             val notice = runNotice(this, state)

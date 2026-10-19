@@ -6,6 +6,7 @@ import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
 import app.rasul.data.REMOTE_PHOTO_OMITTED
 import app.rasul.data.RunInputLimits
+import app.rasul.data.SIZE_UNKNOWN
 import app.rasul.data.SentAttachment
 import app.rasul.data.dataUrlJpegThumb
 import app.rasul.data.isTextFile
@@ -79,7 +80,7 @@ data class SessionMessageDto(
      * file is sent as) keeps a short preview: the name is already on the file chip.
      */
     fun displayText(): String = when (val c = content) {
-        is JsonPrimitive -> c.contentOrNull.orEmpty()
+        is JsonPrimitive -> sentFiles()?.text ?: c.contentOrNull.orEmpty()
         is JsonArray -> c.mapNotNull {
             ((it as? JsonObject)?.get("text") as? JsonPrimitive)?.contentOrNull?.let(::filePreview)
         }.joinToString("\n")
@@ -104,8 +105,12 @@ data class SessionMessageDto(
                 else -> null
             }
         }
+        is JsonPrimitive -> sentFiles()?.names?.map { SentAttachment.SentFile(it, SIZE_UNKNOWN) }.orEmpty()
         else -> emptyList()
     }
+
+    /** The files of a message the user sent with files: the bridge put one note per file before the user's own text. */
+    private fun sentFiles(): SentFiles? = if (role == "user") splitFileNotes(text()) else null
 }
 
 /** `name:` prefix line of a sent file part (runInput builds `"$name:\n$text"`). */
@@ -120,6 +125,60 @@ private fun filePreview(part: String): String =
     fileName(part)?.let { part.substringAfter('\n').take(FILE_PREVIEW_CHARS) } ?: part
 
 private const val FILE_PREVIEW_CHARS = 600
+
+/** The files named by the notes at the start of a user message, and what the user wrote after them. */
+internal class SentFiles(val names: List<String>, val text: String)
+
+// The two notes the bridge writes in front of the user's text for a sent file (bridge/rasul_bridge/uploads.py document_note).
+private fun noteForm(kind: String, tail: String) =
+    Regex("^\\[The user sent a $kind: '([^\\n]+?)'\\. It is saved at: ([^\\n]+?)\\. " + Regex.escape(tail) + "\\]")
+
+private val FILE_NOTES = listOf(
+    noteForm(
+        "text document",
+        "Its content is not inlined here. Read the cached file yourself before answering when the user's request involves its contents.",
+    ),
+    noteForm(
+        "document",
+        "Its text is not inlined here (it's a binary format such as PDF or DOCX). To read it, extract the document's text " +
+            "yourself — for example with the terminal tool or the ocr-and-documents skill — before answering, instead " +
+            "of asking the user to paste the contents.",
+    ),
+)
+
+/** The bridge's file name rules (uploads.py clean_name) without the length cut and the reserved device names. */
+private fun bridgeFileName(raw: String): String {
+    val name = java.text.Normalizer.normalize(raw, java.text.Normalizer.Form.NFC)
+        .filter { it !in "/\\<>:\"|?*" && it !in '‪'..'‮' && it !in '⁦'..'⁩' && Character.getType(it) != Character.CONTROL.toInt() }
+        .map { if (it in "&%^\$`;") '_' else it }.joinToString("")
+        .trim('.', ' ')
+    return name.ifEmpty { "file" }
+}
+
+/**
+ * Notes that start a user message, one per sent file, each followed by a blank line or the end. Anything else (a
+ * message that only mentions such words, a note in the middle) is not a bridge note and returns null. A message of
+ * only files carries the file names as its text: that filler is dropped too.
+ */
+internal fun splitFileNotes(raw: String): SentFiles? {
+    val names = mutableListOf<String>()
+    var rest = raw
+    while (true) {
+        val m = FILE_NOTES.firstNotNullOfOrNull { it.find(rest) } ?: break
+        val name = m.groupValues[1]
+        if (!m.groupValues[2].endsWith("_$name")) break
+        val after = rest.substring(m.range.last + 1)
+        if (after.isNotEmpty() && !after.startsWith("\n\n")) return null
+        names += name
+        rest = after.removePrefix("\n\n")
+        if (after.isEmpty()) break
+    }
+    if (names.isEmpty()) return null
+    val pieces = rest.split(", ")
+    val filler = rest == names.joinToString(", ") ||
+        (pieces.size == names.size && pieces.zip(names).all { (piece, name) -> bridgeFileName(piece) == name })
+    return SentFiles(names, if (filler) "" else rest)
+}
 
 @Serializable
 data class SessionMessagesDto(val data: List<SessionMessageDto>)

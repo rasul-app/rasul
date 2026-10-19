@@ -14,6 +14,9 @@ from .http import HTTPError
 from .storage import atomic_write, protect
 
 
+PROBE_SECONDS = 3
+
+
 class Profiles:
     def __init__(self, store, config, upstream, run=None):
         self.store, self.config, self.upstream = store, config, upstream
@@ -91,16 +94,18 @@ class Profiles:
         if not key:
             return False
         try:
-            status, _ = await self.upstream.collect(self.target(profile, "/v1/models"), key)
+            # One limit for connect, headers and body: a busy profile must not hold up the list.
+            async with asyncio.timeout(PROBE_SECONDS):
+                status, _ = await self.upstream.collect(self.target(profile, "/v1/models"), key)
             return status == 200
         except (OSError, TimeoutError, HTTPError, EOFError):
             return False
 
     async def snapshot(self):
-        profiles = []
-        for name in self.directories():
-            profiles.append({"id": name, "name": name, "display_name": name,
-                             "ready": await self.ready(name), "default": name == "default"})
+        names = list(self.directories())
+        readiness = await asyncio.gather(*(self.ready(name) for name in names))
+        profiles = [{"id": name, "name": name, "display_name": name, "ready": ready, "default": name == "default"}
+                    for name, ready in zip(names, readiness)]
         with self.store.transaction("profile-snapshot.json") as value:
             if value.get("profiles") != profiles:
                 value.update(revision=value.get("revision", 0) + 1, profiles=profiles)

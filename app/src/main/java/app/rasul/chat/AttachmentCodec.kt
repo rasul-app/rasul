@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
+import app.rasul.data.FileUploadLimits
 import app.rasul.data.PendingAttachment
 import app.rasul.data.RunInputLimits
 import app.rasul.data.dataUrlBytes
@@ -33,11 +34,20 @@ sealed interface PhotoResult {
     data object TooLarge : PhotoResult
 }
 
+/** What the File picker knows about a document before any byte is read; [size] is -1 when the provider does not say. */
+data class PickedFile(val name: String, val size: Long, val mime: String)
+
 /** What the chat ViewModel needs to turn picked URIs into staged attachments (platform impl: [ChatAttachmentLoader]). */
 interface AttachmentLoader {
     /** [photoBudget] is the raw-byte cap each encoded photo must fit (RunInputLimits.photoBudget). */
     suspend fun loadPhotos(uris: List<Uri>, photoBudget: Int): AttachLoad
     suspend fun loadFile(uri: Uri): AttachLoad
+
+    /** Name, size and type of a picked document for the bridge upload; null when it cannot be read. */
+    suspend fun describeFile(uri: Uri): PickedFile? = null
+
+    /** A fresh stream of the picked document (the caller closes it); null when it cannot be opened. */
+    fun openFile(uri: Uri): InputStream? = null
 
     /** Re-encodes an already staged [photo] to fit [budget] raw bytes; null when it cannot. */
     suspend fun fit(photo: PendingAttachment.Photo, budget: Int): PendingAttachment.Photo?
@@ -154,6 +164,33 @@ private fun decodeUtf8(bytes: ByteArray): String? = try {
     null
 }
 
+/** How many bytes [input] holds, reading no further than [cap]. */
+internal fun countBytes(input: InputStream, cap: Long): Long {
+    val buffer = ByteArray(64 * 1024)
+    var total = 0L
+    while (total < cap) {
+        val read = input.read(buffer, 0, minOf(buffer.size.toLong(), cap - total).toInt())
+        if (read < 0) break
+        total += read
+    }
+    return total
+}
+
+/**
+ * The size of a picked file. A provider that reports a size above zero is believed; one that reports nothing, -1 or 0
+ * is asked by reading the file once, up to [limit] + 1 bytes (so a file over the limit is still seen as too big, and a
+ * really empty one as empty). Null when the file cannot be read.
+ */
+internal fun pickedSize(reported: Long?, limit: Long, open: () -> InputStream?): Long? {
+    if (reported != null && reported > 0) return reported
+    return try {
+        val input = open() ?: return null
+        input.use { countBytes(it, limit + 1) }
+    } catch (_: Exception) {
+        null // providers can also refuse with SecurityException or similar
+    }
+}
+
 /** Turns picker URIs into staged attachments on a worker dispatcher; never logs content. */
 class ChatAttachmentLoader(private val context: Context) : AttachmentLoader {
 
@@ -181,6 +218,32 @@ class ChatAttachmentLoader(private val context: Context) : AttachmentLoader {
         withContext(Dispatchers.IO) {
             (reencodePhoto(photo.jpeg, budget) as? PhotoResult.Ok)?.let { photo.copy(jpeg = it.jpeg) }
         }
+
+    override suspend fun describeFile(uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
+        val name = displayName(uri)
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
+            ?: "file"
+        val mime = try {
+            context.contentResolver.getType(uri)
+        } catch (_: Exception) {
+            null
+        } ?: "application/octet-stream"
+        val reported = try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (index >= 0 && cursor.moveToFirst() && !cursor.isNull(index)) cursor.getLong(index) else null
+            } ?: context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length.takeIf { n -> n >= 0 } }
+        } catch (_: Exception) {
+            null
+        }
+        pickedSize(reported, FileUploadLimits.MAX_FILE_BYTES) { openFile(uri) }?.let { PickedFile(name, it, mime) }
+    }
+
+    override fun openFile(uri: Uri): InputStream? = try {
+        context.contentResolver.openInputStream(uri)
+    } catch (_: Exception) {
+        null
+    }
 
     override suspend fun loadFile(uri: Uri): AttachLoad = withContext(Dispatchers.IO) {
         val name = displayName(uri)

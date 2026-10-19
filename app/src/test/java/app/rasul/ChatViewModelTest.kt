@@ -88,6 +88,14 @@ internal class FakeRuns : RunsApi {
         return onStart(text)
     }
 
+    /** The bridge file ids each send carried (empty for sends without files). */
+    val startFiles = mutableListOf<List<String>>()
+
+    override suspend fun startRun(target: HermesTarget, input: kotlinx.serialization.json.JsonElement, sessionId: String?, idempotencyKey: String?, files: List<String>): HermesResult<StartedRun> {
+        startFiles += files
+        return startRun(target, input, sessionId, idempotencyKey)
+    }
+
     override suspend fun status(target: HermesTarget, runId: String): HermesResult<RunStatus> {
         calls += "status $runId"
         return onStatus(runId)

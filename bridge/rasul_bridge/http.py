@@ -40,10 +40,15 @@ class Reader:
             return data
         return await self.source.read(size)
 
-    async def exact(self, size):
+    async def exact(self, size, idle=None):
+        """``size`` bytes; with ``idle``, the wait for each read may last that long at most."""
         result = bytearray()
         while len(result) < size:
-            data = await self.read(size - len(result))
+            if idle is None:
+                data = await self.read(size - len(result))
+            else:
+                async with asyncio.timeout(idle):
+                    data = await self.read(size - len(result))
             if not data:
                 raise EOFError
             result.extend(data)
@@ -64,8 +69,14 @@ def headers(raw):
     return result
 
 
-async def request(reader, maximum_body=None):
-    async with asyncio.timeout(30):
+HEAD_TIMEOUT = 30       # the request line and the headers (also the wait for a next request on a kept-open link)
+BODY_IDLE_TIMEOUT = 30  # the body may arrive slowly, but not stop for this long
+BODY_TIMEOUT = 600      # the whole body: a 768 KiB upload chunk at about 20 kbit/s takes roughly five minutes
+
+
+async def request(reader, maximum_body=None, head_timeout=HEAD_TIMEOUT, body_idle=BODY_IDLE_TIMEOUT,
+                  body_timeout=BODY_TIMEOUT):
+    async with asyncio.timeout(head_timeout):
         raw = (await reader.until(b"\r\n\r\n")).split(b"\r\n")
         try:
             method, target, version = raw[0].decode("ascii").split(" ")
@@ -83,7 +94,8 @@ async def request(reader, maximum_body=None):
         length = int(value)
         if length > (MAX_BODY if maximum_body is None else maximum_body):
             raise HTTPError(413, "Request body too large")
-        return method, target, head, await reader.exact(length)
+    async with asyncio.timeout(body_timeout):
+        return method, target, head, await reader.exact(length, body_idle)
 
 
 async def response(link, status, value):
@@ -91,6 +103,12 @@ async def response(link, status, value):
     await link.write((f"HTTP/1.1 {status} {HTTPStatus(status).phrase}\r\n"
                       f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
                       "X-Content-Type-Options: nosniff\r\n\r\n").encode() + body)
+
+
+async def no_content(link):
+    # Content-Length: 0 keeps clients that read a body by its length from waiting for one.
+    await link.write(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n"
+                     b"X-Content-Type-Options: nosniff\r\n\r\n")
 
 
 async def stream_start(link):

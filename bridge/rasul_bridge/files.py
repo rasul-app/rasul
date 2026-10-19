@@ -393,7 +393,7 @@ class Files:
     def _denied(self, resolved, temp_ok=False, fresh=False):
         """True for system state, credential stores and per-user data folders.
 
-        ``temp_ok`` lifts only the per-user data folders that contain the system temp folder."""
+        ``temp_ok`` lifts only the per-user data folders that contain a temp folder holding the file."""
         denied = [Path(p) for p in DENIED_PREFIXES]
         home = self._user_home()
         own = _resolve(home) if home is not None else None
@@ -429,9 +429,14 @@ class Files:
         appdata = [Path(env[name]) if env.get(name) else home / sub
                    for name, sub in (("appdata", "AppData/Roaming"), ("localappdata", "AppData/Local"))
                    if env.get(name) or own is not None]
-        temp = _resolve(Path(tempfile.gettempdir())) if temp_ok else None
-        if temp is not None and not _within(resolved, temp):
-            temp = None
+        # the temp folders: the system one and each agent's own (its TMPDIR, <home>/cache/scratch)
+        temp = None
+        if temp_ok:
+            for root in [Path(tempfile.gettempdir())] + [h / "cache" / "scratch" for h in self._homes()]:
+                root = _resolve(root)
+                if root is not None and _within(resolved, root):
+                    temp = root
+                    break
         for item in denied + appdata:
             target = _resolve(item)
             if target is None or target == own or not (resolved == target or _within(resolved, target)):

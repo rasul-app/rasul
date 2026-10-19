@@ -992,4 +992,26 @@
         <item quantity="one">Watching job results on %1$d PC</item>
         <item quantity="other">Watching job results on %1$d PCs</item>
     </plurals>
+    <string name="chat_attach_any_file">File</string>
+    <string name="chat_attach_needs_bridge">Sending files needs the Rasul Bridge</string>
+    <string name="chat_uploading">Uploading…</string>
+    <string name="chat_upload_progress">%2$d%% of %1$s</string>
+    <string name="chat_upload_failed">Upload failed. Try again</string>
+    <string name="chat_upload_retry_named">Try again: %1$s</string>
+    <string name="chat_upload_desc_uploading">%1$s, %2$s, uploading %3$d%%</string>
+    <string name="chat_upload_desc_ready">%1$s, %2$s, ready</string>
+    <string name="chat_upload_desc_failed">%1$s, %2$s, failed</string>
+    <string name="chat_sent_file_desc">File %1$s, %2$s</string>
+    <string name="chat_err_upload_too_large">%1$s is larger than 50 MB</string>
+    <string name="chat_err_upload_empty">%1$s is empty</string>
+    <string name="chat_err_upload_too_many">You can send up to 4 files at once</string>
+    <string name="chat_err_upload_mixed">Send photos or files, not both.</string>
+    <string name="chat_err_upload_old_bridge">Update the Rasul Bridge on your PC to send files</string>
+    <string name="chat_err_upload_disk_full">Your PC is out of disk space</string>
+    <string name="chat_err_upload_save_failed">The PC could not save the file. Try again.</string>
+    <string name="chat_err_upload_bot_missing">This bot is no longer on your PC. Go back to the bots list.</string>
+    <string name="chat_err_run_input_refused">The PC could not accept this message. Try again without the files.</string>
+    <string name="chat_err_upload_open_limit">Too many files are uploading. Wait for one to finish, then try again.</string>
+    <string name="chat_err_upload_gone">%1$s is no longer on your PC. Attach it again</string>
+    <string name="chat_err_upload_gone_many">These files are no longer on your PC. Attach them again: %1$s</string>
 </resources>

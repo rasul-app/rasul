@@ -106,6 +106,8 @@ private fun PendingAttachment.toPart(): JsonObject = when (this) {
         put("type", "text")
         put("text", "$name:\n$text")
     }
+    // Bridge files travel as ids in `rasul_files`, never as a part of `input`.
+    is PendingAttachment.UploadFile -> throw IllegalArgumentException("A bridge file has no input part")
 }
 
 /**
@@ -145,7 +147,7 @@ private fun runBodyBytes(input: JsonElement): Int =
  */
 fun planRunInput(text: String, attachments: List<PendingAttachment>): RunInputPlan {
     if (attachments.isEmpty()) return RunInputPlan.TextOnly
-    val parts = attachments.map { it.toPart() }
+    val parts = attachments.filterNot { it is PendingAttachment.UploadFile }.map { it.toPart() }
     val input = runInputElement(text, parts)
     return if (runBodyBytes(input) <= RunInputLimits.MAX_RUN_BODY_BYTES) {
         RunInputPlan.WithParts(parts, input)

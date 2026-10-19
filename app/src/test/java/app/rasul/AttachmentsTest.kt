@@ -9,6 +9,7 @@ import app.rasul.chat.reencodePhoto
 import app.rasul.data.PendingAttachment
 import app.rasul.data.RunInputLimits
 import app.rasul.data.RunInputPlan
+import app.rasul.data.SIZE_UNKNOWN
 import app.rasul.data.SentAttachment
 import app.rasul.data.isTextFile
 import app.rasul.data.planRunInput
@@ -154,6 +155,71 @@ class AttachmentsTest {
             add(buildJsonObject { put("type", "text"); put("text", "notes.md:\nline1\nline2") })
         })
         assertEquals(listOf(SentAttachment.NamedFile("notes.md")), dto.attachments())
+    }
+
+    // ---- notes the bridge puts in front of a sent file ----
+
+    private fun binaryNote(name: String, path: String = "C:\\Users\\x\\.hermes\\cache\\documents\\rasul_0a1b2c3d_$name") =
+        "[The user sent a document: '$name'. It is saved at: $path. Its text is not inlined here (it's a binary format " +
+            "such as PDF or DOCX). To read it, extract the document's text yourself — for example with the terminal tool " +
+            "or the ocr-and-documents skill — before answering, instead of asking the user to paste the contents.]"
+
+    private fun textNote(name: String, path: String = "/home/x/.hermes/cache/documents/rasul_0a1b2c3d_$name") =
+        "[The user sent a text document: '$name'. It is saved at: $path. Its content is not inlined here. Read the " +
+            "cached file yourself before answering when the user's request involves its contents.]"
+
+    private fun user(text: String, role: String = "user") = SessionMessageDto(role = role, content = JsonPrimitive(text))
+
+    @Test fun historyShowsOneSentFileAndTheUsersOwnText() {
+        val dto = user(binaryNote("report.pdf") + "\n\nsummarise this")
+        assertEquals("summarise this", dto.displayText())
+        assertEquals(listOf(SentAttachment.SentFile("report.pdf", SIZE_UNKNOWN)), dto.attachments())
+    }
+
+    @Test fun historyShowsTwoSentFilesInOrder() {
+        val dto = user(binaryNote("report.pdf") + "\n\n" + textNote("notes.txt") + "\n\ncompare them")
+        assertEquals("compare them", dto.displayText())
+        assertEquals(
+            listOf(SentAttachment.SentFile("report.pdf", SIZE_UNKNOWN), SentAttachment.SentFile("notes.txt", SIZE_UNKNOWN)),
+            dto.attachments(),
+        )
+    }
+
+    @Test fun historyOfOnlyFilesDropsTheNamesLine() {
+        val dto = user(binaryNote("report.pdf") + "\n\n" + textNote("notes.txt") + "\n\nreport.pdf, notes.txt")
+        assertEquals("", dto.displayText())
+        assertEquals(2, dto.attachments().size)
+        val one = user(textNote("a.txt") + "\n\na.txt")
+        assertEquals("", one.displayText())
+        assertEquals(listOf(SentAttachment.SentFile("a.txt", SIZE_UNKNOWN)), one.attachments())
+    }
+
+    @Test fun historyNamesLineMatchesTheNameAsThePhoneSentIt() {
+        // The bridge drops the colon of the picked "Q3: report.pdf"; the names line the phone sent keeps it.
+        val dto = user(binaryNote("Q3 report.pdf") + "\n\nQ3: report.pdf")
+        assertEquals("", dto.displayText())
+        assertEquals(listOf(SentAttachment.SentFile("Q3 report.pdf", SIZE_UNKNOWN)), dto.attachments())
+    }
+
+    @Test fun historyNoteWithOnlyTheNoteAndNoTextStillTurnsIntoAFile() {
+        val dto = user(binaryNote("report.pdf"))
+        assertEquals("", dto.displayText())
+        assertEquals(1, dto.attachments().size)
+    }
+
+    @Test fun historyLeavesMessagesThatOnlyQuoteTheNoteWordsAlone() {
+        val quoting = "I said [The user sent a document: 'x.pdf'. It is saved at: /tmp/rasul_0a1b2c3d_x.pdf. in a doc"
+        val inTheMiddle = "see this\n\n" + binaryNote("report.pdf")
+        val noSeparator = binaryNote("report.pdf") + " and then more"
+        val wrongPath = binaryNote("report.pdf", path = "/tmp/other.pdf")
+        for (text in listOf(quoting, inTheMiddle, noSeparator, wrongPath)) {
+            val dto = user(text)
+            assertEquals(text, dto.displayText())
+            assertTrue(dto.attachments().isEmpty())
+        }
+        val assistant = user(binaryNote("report.pdf") + "\n\nok", role = "assistant")
+        assertEquals(binaryNote("report.pdf") + "\n\nok", assistant.displayText())
+        assertTrue(assistant.attachments().isEmpty())
     }
 
     // ---- photo codec ----
