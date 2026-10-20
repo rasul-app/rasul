@@ -112,14 +112,28 @@ class BridgeBotsRepository(
     val state: StateFlow<BridgeBotsState> = mutable
     val activeSelection: Flow<BridgeSelection?> = store.activeSelection
     private val retries = MutableStateFlow(0L)
+
+    /** Bridges forget() removed while target() refreshes were still in flight; blocks those writes
+     *  from resurrecting the group. The value is whether a list emission without the bridge was seen since;
+     *  an id clears only when it reappears after that, so a re-emission of the old list (retry) keeps it. */
+    private val forgotten = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
     suspend fun setActiveSelection(selection: BridgeSelection?) = store.setActiveSelection(selection)
 
     /** Restarts every profile stream now (the approvals screen's Retry uses it after a dead one). */
     fun retry() { retries.update { it + 1 } }
 
     suspend fun forget(bridge: SavedBridge) {
+        forgotten.update { it + (bridge.bridgeId to false) }
         mutable.update { state -> state.copy(groups = state.groups.filterNot { it.id == bridge.bridgeId }) }
-        clients.forget(bridge)
+        try {
+            clients.forget(bridge)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            forgotten.update { it - bridge.bridgeId }
+            throw e
+        }
     }
 
     /** The UI follower (RESUMED) and the alerts service share one follower; the second caller waits. */
@@ -135,6 +149,12 @@ class BridgeBotsRepository(
             },
             retries,
         ) { bridges, _ -> bridges }.collectLatest { bridges ->
+            val listed = bridges.map { bridge -> bridge.bridgeId }.toSet()
+            forgotten.update { marks ->
+                marks.mapNotNull { (id, absentSeen) ->
+                    if (id !in listed) id to true else if (absentSeen) null else id to false
+                }.toMap()
+            }
             val cached = mutable.value.groups.associateBy { it.id }
             mutable.value = BridgeBotsState(bridges.map { bridge ->
                 cached[bridge.bridgeId]?.copy(name = bridge.name, loading = true)
@@ -176,7 +196,7 @@ class BridgeBotsRepository(
             catch (e: ProfileStreamException) { previous.copy(loading = false, error = e.error) }
             catch (e: Exception) { previous.copy(loading = false, error = bridgeError(e)) }
             mutable.update { state -> state.copy(
-                groups = if (state.groups.none { it.id == bridgeId }) state.groups + fresh
+                groups = if (state.groups.none { it.id == bridgeId } && bridgeId !in forgotten.value.keys) state.groups + fresh
                     else state.groups.map { if (it.id == bridgeId) fresh else it },
                 loaded = true,
             ) }

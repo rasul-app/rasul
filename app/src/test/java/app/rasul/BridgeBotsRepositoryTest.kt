@@ -1,6 +1,8 @@
 package app.rasul
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import app.rasul.bridge.*
 import app.rasul.data.*
 import app.rasul.ui.ActivePcHolder
@@ -21,6 +23,8 @@ class BridgeBotsRepositoryTest {
         override fun encrypt(plain: String) = plain.reversed()
         override fun decrypt(token: String) = token.reversed()
     }
+    // Ceiling only: each wait ends as soon as its condition holds.
+    private val WAIT_MS = 30_000L
     private fun bridge() = SavedBridge(UUID.randomUUID().toString(), "Bridge", listOf("wss://example.invalid"),
         Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32)), UUID.randomUUID().toString(), UUID.randomUUID().toString())
     private fun profile(id: String = "default", ready: Boolean = true) = BridgeProfile(id, id, id, ready, id == "default")
@@ -148,7 +152,7 @@ class BridgeBotsRepositoryTest {
         var following: Job? = null
         try {
             following = launch { repository.follow() }
-            val picker = withTimeout(5000) {
+            val picker = withTimeout(WAIT_MS) {
                 holder.state.first {
                     it.activeId == bridgeBotId(savedBridge.bridgeId, "default") &&
                         it.targetLoaded && it.bridgeNotice == app.rasul.ui.PcBridgeNotice.Unreachable(savedBridge.name)
@@ -189,7 +193,7 @@ class BridgeBotsRepositoryTest {
         var following: Job? = null
         try {
             following = launch { repository.follow() }
-            val picker = withTimeout(5000) { holder.state.first { it.bridgeNotice is app.rasul.ui.PcBridgeNotice.NoReadyBots } }
+            val picker = withTimeout(WAIT_MS) { holder.state.first { it.bridgeNotice is app.rasul.ui.PcBridgeNotice.NoReadyBots } }
 
             assertEquals(ActiveTarget.None, picker.target)
             assertEquals(Load.BridgeNoReadyBots(savedBridge.name), picker.pendingLoad())
@@ -224,11 +228,11 @@ class BridgeBotsRepositoryTest {
             firstStore.save(savedBridge)
             firstFollowing = launch { firstRepository.follow() }
             val firstHolder = ActivePcHolder(ConnectionStore(firstDs, cipher), firstScope, firstRepository)
-            withTimeout(5000) {
+            withTimeout(WAIT_MS) {
                 firstHolder.state.first { it.target is ActiveTarget.Ready && it.activeId == bridgeBotId(savedBridge.bridgeId, "default") }
             }
             firstHolder.selectBridge(savedBridge.bridgeId, "alternate")
-            withTimeout(5000) {
+            withTimeout(WAIT_MS) {
                 firstHolder.state.first { it.target is ActiveTarget.Ready && it.activeId == bridgeBotId(savedBridge.bridgeId, "alternate") }
             }
 
@@ -257,7 +261,7 @@ class BridgeBotsRepositoryTest {
             }
 
             assertEquals("alternate", (restored.target as ActiveTarget.Ready).target.bridge?.profileId)
-            assertEquals(BridgeSelection(savedBridge.bridgeId, "alternate"), withTimeout(5000) { secondRepository.activeSelection.first { it != null } })
+            assertEquals(BridgeSelection(savedBridge.bridgeId, "alternate"), withTimeout(WAIT_MS) { secondRepository.activeSelection.first { it != null } })
         } finally {
             firstFollowing?.cancelAndJoin()
             secondFollowing?.cancelAndJoin()
@@ -273,6 +277,8 @@ class BridgeBotsRepositoryTest {
     @Test fun groupedListReplacesAddedRemovedAndNotReadySnapshotsAndStopsOnCancel() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val ds = PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("bots.preferences_pb") }
+        // Reading a store file that does not exist yet can fail when a write creates it at that moment; create it first.
+        ds.edit { it[stringPreferencesKey("seed")] = "1" }
         val store = BridgeStore(ds, cipher)
         val transports = mutableListOf<BridgeTransport>()
         val clients = BridgeClients(store, scope, { _, urls, _ ->
@@ -300,36 +306,36 @@ class BridgeBotsRepositoryTest {
         try {
             store.save(a)
             following = launch { repository.follow() }
-            withTimeout(5000) { entered.await() }
-            val initial = withTimeout(5000) { repository.state.first { it.groups.singleOrNull()?.profiles?.size == 1 } }
+            withTimeout(WAIT_MS) { entered.await() }
+            val initial = withTimeout(WAIT_MS) { repository.state.first { it.groups.singleOrNull()?.profiles?.size == 1 } }
             assertEquals(a.name, initial.groups.single().name)
             val first = (repository.target(a.bridgeId, "default") as HermesResult.Ok).value
             assertSame(clients.client(a).client, first.bridge!!.client)
-            val initialTarget = withTimeout(5000) {
+            val initialTarget = withTimeout(WAIT_MS) {
                 holder.state.first { it.target is ActiveTarget.Ready && it.activeId == bridgeBotId(a.bridgeId, "default") }.target as ActiveTarget.Ready
             }
             assertEquals("default", initialTarget.target.bridge?.profileId)
             assertEquals(first, (holder.currentTarget() as ActiveTarget.Ready).target)
             val restarted = ActivePcHolder(ConnectionStore(ds, cipher), scope, repository)
-            val restartedTarget = withTimeout(5000) {
+            val restartedTarget = withTimeout(WAIT_MS) {
                 restarted.state.first { it.target is ActiveTarget.Ready && it.activeId == bridgeBotId(a.bridgeId, "default") }.target as ActiveTarget.Ready
             }
             assertEquals("default", restartedTarget.target.bridge?.profileId)
-            assertEquals(BridgeSelection(a.bridgeId, "default"), withTimeout(5000) { repository.activeSelection.first { it != null } })
+            assertEquals(BridgeSelection(a.bridgeId, "default"), withTimeout(WAIT_MS) { repository.activeSelection.first { it != null } })
             events.send(ProfileSnapshot(2, listOf(profile(), profile("new-profile"))))
-            withTimeout(5000) { repository.state.first { it.groups.single().profiles.size == 2 } }
+            withTimeout(WAIT_MS) { repository.state.first { it.groups.single().profiles.size == 2 } }
             events.send(ProfileSnapshot(3, listOf(profile("new-profile", false))))
-            val changed = withTimeout(5000) { repository.state.first { it.groups.single().profiles.singleOrNull()?.id == "new-profile" } }
+            val changed = withTimeout(WAIT_MS) { repository.state.first { it.groups.single().profiles.singleOrNull()?.id == "new-profile" } }
             assertFalse(changed.groups.single().profiles.single().ready)
             assertEquals(HermesError.ProfileUnknown("default"), (repository.target(a.bridgeId, "default") as HermesResult.Err).error)
             assertEquals(HermesError.ProfileNotReady, (repository.target(a.bridgeId, "new-profile") as HermesResult.Err).error)
             following.cancelAndJoin()
-            withTimeout(5000) { cancelled.await() }
+            withTimeout(WAIT_MS) { cancelled.await() }
             assertEquals(1, transports.size)
             assertSame(first.bridge!!.client, clients.client(a).client)
             resuming = true
             following = launch { repository.follow() }
-            withTimeout(5000) { resumedList.await() }
+            withTimeout(WAIT_MS) { resumedList.await() }
             assertEquals(changed.groups.single().profiles, repository.state.value.groups.single().profiles)
             following.cancelAndJoin()
             assertSame(first.bridge!!.client, clients.client(a).client)
@@ -361,15 +367,15 @@ class BridgeBotsRepositoryTest {
         try {
             store.save(bridge)
             following = launch { repository.follow() }
-            withTimeout(5000) { repository.state.first { it.groups.singleOrNull()?.profiles?.isNotEmpty() == true } }
+            withTimeout(WAIT_MS) { repository.state.first { it.groups.singleOrNull()?.profiles?.isNotEmpty() == true } }
             val holder = ActivePcHolder(connections, scope, repository)
             holder.selectBridge(bridge.bridgeId, "default")
-            withTimeout(5000) { holder.state.first { it.activeId == bridgeBotId(bridge.bridgeId, "default") && it.target is ActiveTarget.Ready } }
+            withTimeout(WAIT_MS) { holder.state.first { it.activeId == bridgeBotId(bridge.bridgeId, "default") && it.target is ActiveTarget.Ready } }
 
             clients.forget(bridge)
 
-            assertNull(withTimeout(5000) { repository.activeSelection.first { it == null } })
-            withTimeout(5000) { holder.state.first { it.activeId == directId && it.target is ActiveTarget.Ready } }
+            assertNull(withTimeout(WAIT_MS) { repository.activeSelection.first { it == null } })
+            withTimeout(WAIT_MS) { holder.state.first { it.activeId == directId && it.target is ActiveTarget.Ready } }
             Unit
         } finally {
             following?.cancelAndJoin()
@@ -403,15 +409,15 @@ class BridgeBotsRepositoryTest {
             } }
             val following = launch { repository.follow() }
             try {
-                withTimeout(5000) { repository.state.first { it.groups.size == 2 && it.groups.all { g -> !g.loading } } }
+                withTimeout(WAIT_MS) { repository.state.first { it.groups.size == 2 && it.groups.all { g -> !g.loading } } }
                 forbidden = true
                 revoked.close(ProfileStreamException(HermesError.DeviceRevoked))
-                val state = withTimeout(5000) { repository.state.first { it.groups.first { g -> g.id == a.bridgeId }.error == HermesError.DeviceRevoked } }
+                val state = withTimeout(WAIT_MS) { repository.state.first { it.groups.first { g -> g.id == a.bridgeId }.error == HermesError.DeviceRevoked } }
                 assertNull(state.groups.first { it.id == b.bridgeId }.error)
                 assertEquals(HermesError.DeviceRevoked, (repository.target(a.bridgeId, "default") as HermesResult.Err).error)
                 assertTrue(repository.target(b.bridgeId, "default") is HermesResult.Ok)
                 store.delete(a.bridgeId)
-                withTimeout(5000) { repository.state.first { it.groups.size == 1 && it.groups.single().id == b.bridgeId } }
+                withTimeout(WAIT_MS) { repository.state.first { it.groups.size == 1 && it.groups.single().id == b.bridgeId } }
                 assertEquals(HermesError.ConnectionChanged, (repository.target(a.bridgeId, "default") as HermesResult.Err).error)
             } finally { following.cancelAndJoin() }
         } finally { transports.forEach { it.close() }; scope.cancel(); scope.coroutineContext[Job]!!.join() }
@@ -436,5 +442,89 @@ class BridgeBotsRepositoryTest {
             assertNull(otherProfile.activeRun())
             assertNull(otherBridge.activeRun())
         } finally { scope.cancel(); scope.coroutineContext[Job]!!.join() }
+    }
+
+    @Test fun targetInFlightDuringForgetDoesNotResurrectTheBridge() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val ds = PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("forget-resurrect.preferences_pb") }
+        val store = BridgeStore(ds, cipher)
+        val saved = bridge()
+        val transports = mutableListOf<BridgeTransport>()
+        val clients = BridgeClients(store, scope, { _, urls, _ ->
+            BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }).also { transports.add(it) }
+        }, {})
+        val listStarted = CompletableDeferred<Unit>()
+        val releaseList = CompletableDeferred<Unit>()
+        val repository = BridgeBotsRepository(store, clients) { object : ProfilesApi {
+            override suspend fun list(): ProfileSnapshot {
+                listStarted.complete(Unit)
+                releaseList.await()
+                return ProfileSnapshot(1, listOf(profile()))
+            }
+            override fun events(): Flow<ProfileSnapshot> = flow { awaitCancellation() }
+        } }
+        try {
+            store.save(saved)
+            val target = launch { repository.target(saved.bridgeId, "default") }
+            listStarted.await()
+            repository.forget(saved)
+            releaseList.complete(Unit)
+            target.join()
+            assertTrue(repository.state.value.groups.none { it.id == saved.bridgeId })
+        } finally {
+            transports.forEach { it.close() }
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+        }
+    }
+
+    @Test fun retryDuringForgetKeepsTheBridgeForgottenUntilItIsSavedAgain() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val ds = PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("forget-retry.preferences_pb") }
+        val store = BridgeStore(ds, cipher)
+        val saved = bridge()
+        val transports = mutableListOf<BridgeTransport>()
+        val deleteGate = java.util.concurrent.CountDownLatch(1)
+        val clients = BridgeClients(store, scope, { _, urls, _ ->
+            BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }).also { transports.add(it) }
+        }, { deleteGate.await() })
+        val lists = MutableStateFlow(0)
+        val releaseList = CompletableDeferred<Unit>()
+        val repository = BridgeBotsRepository(store, clients) { object : ProfilesApi {
+            override suspend fun list(): ProfileSnapshot {
+                lists.update { it + 1 }
+                releaseList.await()
+                return ProfileSnapshot(1, listOf(profile()))
+            }
+            override fun events(): Flow<ProfileSnapshot> = flow { awaitCancellation() }
+        } }
+        try {
+            store.save(saved)
+            val following = launch { repository.follow() }
+            withTimeout(WAIT_MS) { repository.state.first { state -> state.groups.any { it.id == saved.bridgeId } } }
+            val target = launch { repository.target(saved.bridgeId, "default") }
+            withTimeout(WAIT_MS) { lists.first { it >= 2 } }
+
+            val forgetting = launch { repository.forget(saved) }
+            withTimeout(WAIT_MS) { repository.state.first { state -> state.groups.none { it.id == saved.bridgeId } } }
+            repository.retry() // re-emits the old list while the store delete is still held
+            withTimeout(WAIT_MS) { repository.state.first { state -> state.groups.any { it.id == saved.bridgeId } } }
+
+            deleteGate.countDown()
+            forgetting.join()
+            withTimeout(WAIT_MS) { repository.state.first { state -> state.groups.none { it.id == saved.bridgeId } } }
+            releaseList.complete(Unit)
+            target.join()
+            assertTrue(repository.state.value.groups.none { it.id == saved.bridgeId })
+
+            store.save(saved)
+            withTimeout(WAIT_MS) { repository.state.first { state -> state.groups.any { it.id == saved.bridgeId } } }
+            following.cancelAndJoin()
+        } finally {
+            deleteGate.countDown()
+            transports.forEach { it.close() }
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+        }
     }
 }

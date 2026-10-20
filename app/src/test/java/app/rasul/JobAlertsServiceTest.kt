@@ -170,9 +170,16 @@ class JobAlertsServiceTest {
 
     // The saved-bridge lookups hop to Dispatchers.IO, which the test scheduler does not drive: give them real time.
     private fun TestScope.settle() { repeat(25) { runCurrent(); Thread.sleep(8) } }
+    // Waits in real time without suspending the test body: a suspended body lets the scheduler skip virtual time, which
+    // fires the service's own timeouts while the IO work they guard is still running. The ceiling only bounds a hang.
+    private fun TestScope.awaitUntil(ceilingMs: Long = 30_000, condition: () -> Boolean): Boolean {
+        val end = System.currentTimeMillis() + ceilingMs
+        while (!condition() && System.currentTimeMillis() < end) { runCurrent(); Thread.sleep(5) }
+        runCurrent()
+        return condition()
+    }
     private fun TestScope.awaitPolls(w: Wired, n: Int) {
-        val end = System.currentTimeMillis() + 10_000
-        while (w.jobs.lists < n && System.currentTimeMillis() < end) settle()
+        awaitUntil { w.jobs.lists >= n }
         settle()
     }
     private fun TestScope.pump() { advanceTimeBy(400); settle() }
@@ -183,7 +190,7 @@ class JobAlertsServiceTest {
 
     private suspend fun TestScope.started(wired: Wired): org.robolectric.android.controller.ServiceController<ApprovalWatchService> {
         val controller = Robolectric.buildService(ApprovalWatchService::class.java).create()
-        container.bridgeBots.state.first { it.groups.any { g -> g.profiles.isNotEmpty() } }
+        assertTrue("the bots never loaded", awaitUntil { container.bridgeBots.state.value.groups.any { g -> g.profiles.isNotEmpty() } })
         pump()
         if (container.settings.values.first().jobAlerts) awaitPolls(wired, 1)
         return controller
@@ -260,7 +267,7 @@ class JobAlertsServiceTest {
         w.jobs.jobs = listOf(job("j1", "2030-01-01T00:00:00+00:00"))
         val controller = started(w)
         try {
-            w.approvals.opened.await()
+            assertTrue("the approvals stream never opened", awaitUntil { w.approvals.opened.isCompleted })
             tick(); tick()
             assertEquals(0, w.jobs.lists)
             val requestId = "a".repeat(32)
@@ -277,7 +284,7 @@ class JobAlertsServiceTest {
         w.jobs.jobs = listOf(job("j1", "2030-01-01T00:00:00+00:00"))
         val controller = started(w)
         try {
-            w.approvals.opened.await()
+            assertTrue("the approvals stream never opened", awaitUntil { w.approvals.opened.isCompleted })
             assertEquals(1, w.jobs.lists)
             container.settings.setJobAlerts(false)
             pump()

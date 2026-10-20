@@ -46,6 +46,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.resetMain
@@ -119,7 +120,17 @@ class RunNotificationsTest {
     private fun model(loader: TargetLoader = this.loader, memory: RunMemory = this.memory): ChatViewModel = ChatViewModel(loader, api, sessions, memory, OrderedWriter(scope),
         follow = { _, _, _ -> followers++; frames }, scope = scope)
     private fun idle() = scheduler.runCurrent()
-    private fun start(model: ChatViewModel) { model.onDraft("first"); model.send(); idle() }
+    private fun start(model: ChatViewModel) {
+        model.onDraft("first"); model.send(); idle()
+        // A resolved chat prepares through the real store on other threads: wait for the send to settle.
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (model.state.value.preparingSend || (model.state.value.run != null && model.state.value.run?.runId == null) ||
+                    (model.state.value.run != null && frames.subscriptionCount.value == 0)) { idle(); kotlinx.coroutines.delay(1) }
+            }
+        }
+        idle()
+    }
     private fun emit(event: RunEvent) { assertTrue(frames.tryEmit(RunUpdate.Event(event))); idle() }
 
     private val container get() = (context.applicationContext as RasulApp).container
@@ -132,6 +143,7 @@ class RunNotificationsTest {
 
     private fun completeReply(service: RunWatchService) {
         val field = service.javaClass.getDeclaredField("replyInFlight").apply { isAccessible = true }
+        idle() // lets the reply coroutine start and count itself in
         kotlinx.coroutines.runBlocking {
             kotlinx.coroutines.withTimeout(5_000) {
                 while (field.getInt(service) != 0) { idle(); kotlinx.coroutines.delay(1) }
@@ -166,10 +178,17 @@ class RunNotificationsTest {
         Dispatchers.setMain(dispatcher)
         val data = kotlinx.coroutines.flow.MutableStateFlow<androidx.datastore.preferences.core.Preferences>(androidx.datastore.preferences.core.emptyPreferences())
         val store = object : androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
+            private val writeLock = kotlinx.coroutines.sync.Mutex()
             override val data: Flow<androidx.datastore.preferences.core.Preferences> = data
-            override suspend fun updateData(transform: suspend (androidx.datastore.preferences.core.Preferences) -> androidx.datastore.preferences.core.Preferences): androidx.datastore.preferences.core.Preferences {
-                val next = transform(data.value); data.value = next; return next
-            }
+            /** Serialised like a real DataStore: writers on other threads never overwrite each other's read-modify-write. */
+            override suspend fun updateData(transform: suspend (androidx.datastore.preferences.core.Preferences) -> androidx.datastore.preferences.core.Preferences): androidx.datastore.preferences.core.Preferences =
+                writeLock.withLock {
+                    val current = data.value
+                    val next = transform(current)
+                    if (next == current) return@withLock current // a real DataStore skips a write that changes nothing
+                    data.value = next
+                    next
+                }
         }
         dataStore = store
         connectionStore = app.rasul.data.ConnectionStore(store, object : app.rasul.data.SecretCipher {
@@ -339,7 +358,7 @@ class RunNotificationsTest {
         historyGate = CompletableDeferred()
         historyEntered = CompletableDeferred()
         model.replyFromNotification("captured"); idle()
-        assertTrue(historyEntered!!.isCompleted)
+        awaitEntered(historyEntered!!)
         model.onDraft("changed")
         historyGate!!.complete(Unit); idle()
         assertEquals("captured" to "session-a", starts.single())
@@ -431,7 +450,7 @@ class RunNotificationsTest {
         historyGate = CompletableDeferred()
         historyEntered = CompletableDeferred()
         model.onDraft("first"); model.send(); idle()
-        assertTrue(historyEntered!!.isCompleted)
+        awaitEntered(historyEntered!!)
         assertTrue(model.state.value.preparingSend)
         assertFalse(model.state.value.canChooseModel)
         assertTrue(starts.isEmpty())
@@ -461,18 +480,18 @@ class RunNotificationsTest {
 
     @Test fun newSessionKeepsActiveChatAndPreviousRunProtection() = kotlinx.coroutines.test.runTest(dispatcher) {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val original = watcher.resolve("chat/a")!!; idle(); start(original)
-        val next = watcher.resolve("chat/a?newSession=session-b")!!; idle()
+        val original = watcher.resolve("chat/a")!!; awaitLoadSettled(original); start(original)
+        val next = watcher.resolve("chat/a?newSession=session-b")!!; awaitLoadSettled(next)
         assertNotSame(original, next)
         assertEquals("session-b", next.resolvedSessionId)
-        next.onDraft("second"); next.send(); idle()
+        next.onDraft("second"); next.send(); awaitLoadSettled(next)
         assertEquals(1, starts.size)
         assertEquals(ChatFailure.PreviousRunActive, next.state.value.messages.last().error)
         assertSame(original, watcher.resolve("chat/a"))
         assertSame(next, watcher.resolve("chat/a?newSession=session-b"))
         assertEquals(1, followers)
         emit(RunEvent.Cancelled())
-        next.send(); idle()
+        next.send(); awaitLoadSettled(next)
         assertEquals("second" to "session-b", starts.last())
         // The new chat's first run write claims the pointer once: the plain route opens the new chat again.
         assertSame(next, watcher.resolve("chat/a"))
@@ -481,30 +500,31 @@ class RunNotificationsTest {
 
     @Test fun newChatClaimedPointerSurvivesProcessDeath() = kotlinx.coroutines.test.runTest(dispatcher) {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val original = watcher.resolve("chat/a")!!; idle(); start(original)
-        val next = watcher.resolve("chat/a?newSession=session-b")!!; idle()
+        val original = watcher.resolve("chat/a")!!; awaitLoadSettled(original); start(original)
+        val next = watcher.resolve("chat/a?newSession=session-b")!!; awaitLoadSettled(next)
         emit(RunEvent.Cancelled())
-        next.onDraft("second"); next.send(); idle()
+        next.onDraft("second"); next.send(); awaitLoadSettled(next)
         assertEquals("second" to "session-b", starts.last())
         // The claim landed inside the same store edit as the run write, so a cold watcher sees it too.
+        awaitUntil { connectionStore.currentSessionId("a", null) == "session-b" }
         assertEquals("session-b", connectionStore.currentSessionId("a", null))
         val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val reopened = cold.resolve("chat/a")!!; idle()
+        val reopened = cold.resolve("chat/a")!!; awaitLoadSettled(reopened)
         assertEquals("session-b", reopened.resolvedSessionId)
     }
 
     @Test fun queuedReplyAfterOwnFinishedRunIsNotRefusedByOwnStaleKey() = kotlinx.coroutines.test.runTest(dispatcher) {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        watcher.resolve("chat/a")!!; idle()
+        awaitLoadSettled(watcher.resolve("chat/a")!!)
         val next = watcher.resolve("chat/a?newSession=session-b")!!; awaitLoadSettled(next)
         // B's own stored run key still waits for its background clear-write: it is not another session busy.
         connectionStore.setActiveRun("a", null, "session-b", "stale-run")
-        next.replyFromNotification("second"); idle()
+        next.replyFromNotification("second"); awaitLoadSettled(next)
         assertEquals("second" to "session-b", starts.lastOrNull())
         // A real refusal (another session holding a run) keeps the reply text in the composer.
         connectionStore.setActiveRun("a", null, "session-c", "run-c")
         val third = watcher.resolve("chat/a?newSession=session-d")!!; awaitLoadSettled(third)
-        third.replyFromNotification("third"); idle()
+        third.replyFromNotification("third"); awaitLoadSettled(third)
         assertEquals(ChatFailure.PreviousRunActive, third.state.value.messages.last().error)
         assertEquals("third", third.state.value.draft)
     }
@@ -516,7 +536,7 @@ class RunNotificationsTest {
         val next = watcher.resolve("chat/a?newSession=session-b")!!; awaitLoadSettled(next)
         assertEquals(ChatFailure.Api(HermesError.BridgeTimeout), next.state.value.historyFailure)
         connectionStore.setActiveRun("a", null, "session-c", "run-c")
-        next.replyFromNotification("third"); idle()
+        next.replyFromNotification("third"); awaitLoadSettled(next)
         assertEquals(ChatFailure.PreviousRunActive, next.state.value.messages.last().error)
         assertEquals("third", next.state.value.draft)
         assertTrue(starts.isEmpty())
@@ -598,7 +618,7 @@ class RunNotificationsTest {
     @Test fun newSessionAndRunProfileKeepOriginalProfileBinding() = kotlinx.coroutines.test.runTest(dispatcher) {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
         val route = "chat/a?run_profile=profile-a&newSession=session-b"
-        val first = watcher.resolve(route)!!; idle(); start(first)
+        val first = watcher.resolve(route)!!; awaitLoadSettled(first); start(first)
         assertEquals("profile-a", first.resolvedTarget?.profile)
         assertEquals("session-b", first.resolvedSessionId)
         assertSame(first, watcher.resolve(route))
@@ -701,16 +721,17 @@ class RunNotificationsTest {
 
     @Test fun lockOffMatchingReplySendsToOriginalSession() {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
-        val model = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); idle()
+        val model = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); awaitLoadSettled(model)
         val controller = Robolectric.buildService(RunWatchService::class.java).create()
         controller.get().onStartCommand(replyIntent(controller.get(), model), 0, 1); completeReply(controller.get())
+        awaitRunStarted(model)
         assertEquals(listOf("second" to model.resolvedSessionId), starts)
         controller.destroy()
     }
 
     @Test fun lockSettingStillLoadingWaitsAndPreservesDisabledReplyPath() {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
-        val model = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); idle()
+        val model = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); awaitLoadSettled(model)
         val controller = Robolectric.buildService(RunWatchService::class.java).create()
         val field = container.appLock.javaClass.getDeclaredField("_state").apply { isAccessible = true }
         @Suppress("UNCHECKED_CAST")
@@ -719,13 +740,14 @@ class RunNotificationsTest {
         controller.get().onStartCommand(replyIntent(controller.get(), model), 0, 1); idle()
         assertTrue(starts.isEmpty())
         setLock(false); completeReply(controller.get())
+        awaitRunStarted(model)
         assertEquals(listOf("second" to model.resolvedSessionId), starts)
         controller.destroy()
     }
 
     @Test fun oldProfileIntentKeepsItsBindingAfterNotificationReplacement() {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
-        val first = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); idle()
+        val first = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); awaitLoadSettled(first)
         val controller = Robolectric.buildService(RunWatchService::class.java).create()
         val old = replyIntent(controller.get(), first)
         kotlinx.coroutines.runBlocking { connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-b"), null) }
@@ -856,7 +878,7 @@ class RunNotificationsTest {
     @Test fun profileChangeClearsRestorePointerAndKeepsExistingFollower() = kotlinx.coroutines.test.runTest(dispatcher) {
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-a"), null)
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
-        val model = watcher.resolve("chat/a")!!; idle(); start(model)
+        val model = watcher.resolve("chat/a")!!; awaitLoadSettled(model); start(model)
         val session = connectionStore.sessionId("a", "profile-a")
         connectionStore.activeRun("a", "profile-a", session).let { assertEquals("run-1", it) }
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-b"), null)
@@ -942,10 +964,10 @@ class RunNotificationsTest {
     @Test fun profileEditDoesNotReuseRestoredModel() = kotlinx.coroutines.test.runTest(dispatcher) {
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-b"), null)
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val idleModel = watcher.resolve("chat/a")!!; idle()
+        val idleModel = watcher.resolve("chat/a")!!; awaitLoadSettled(idleModel)
         val restoredSession = connectionStore.sessionId("a", "profile-a")
         connectionStore.setActiveRun("a", "profile-a", restoredSession, "run-1")
-        val restored = watcher.resolve("chat/a?run_profile=profile-a", "run-1")!!; idle()
+        val restored = watcher.resolve("chat/a?run_profile=profile-a", "run-1")!!; awaitLoadSettled(restored)
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid", "profile-a"), null)
         val current = watcher.resolve("chat/a")!!; awaitLoadSettled(current)
         assertNotSame(restored, current)
@@ -1010,7 +1032,7 @@ class RunNotificationsTest {
 
     private fun assertReplyRepostsOrigin(refused: Boolean) {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) }); install(watcher)
-        val model = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); idle(); start(model)
+        val model = get(watcher, memory = app.rasul.chat.chatRunMemory(container, "a")); awaitLoadSettled(model); start(model)
         val controller = Robolectric.buildService(RunWatchService::class.java).create()
         val service = controller.get(); service.onStartCommand(null, 0, 1); idle()
         val manager = context.getSystemService(android.app.NotificationManager::class.java)
@@ -1130,11 +1152,11 @@ class RunNotificationsTest {
 
     private suspend fun assertCompletedNotificationKeepsSession(route: String) {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val original = watcher.resolve(route)!!; idle(); start(original)
+        val original = watcher.resolve(route)!!; awaitLoadSettled(original); start(original)
         val session = original.resolvedSessionId
         emit(RunEvent.Completed("answer"))
         val notification = notificationRoute()
-        val next = watcher.resolve("$route?newSession=session-b")!!; idle(); start(next)
+        val next = watcher.resolve("$route?newSession=session-b")!!; awaitLoadSettled(next); start(next)
         assertEquals("first" to "session-b", starts.last())
         assertSame(original, watcher.resolve(notification)); idle()
         assertEquals(session, watcher.resolve(notification)!!.resolvedSessionId)
@@ -1142,7 +1164,7 @@ class RunNotificationsTest {
         history = listOf(SessionMessageDto(role = "user", content = JsonPrimitive("first")),
             SessionMessageDto(role = "assistant", content = JsonPrimitive("answer")))
         val cold = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val reopened = cold.resolve(notification)!!; idle()
+        val reopened = cold.resolve(notification)!!; awaitLoadSettled(reopened)
         assertEquals(session, reopened.resolvedSessionId)
         assertEquals("session-b", next.resolvedSessionId)
     }
@@ -1159,15 +1181,15 @@ class RunNotificationsTest {
     @Test fun deletedNewChatNotificationCannotRestoreOrSendItsSession() = kotlinx.coroutines.test.runTest(dispatcher) {
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
         val route = "chat/a?newSession=session-a"
-        val original = watcher.resolve(route)!!; idle(); start(original)
+        val original = watcher.resolve(route)!!; awaitLoadSettled(original); start(original)
         emit(RunEvent.Completed("answer"))
         val notification = notificationRoute()
-        val alias = watcher.resolve("chat/a?run_profile=profile-a&newSession=session-a")!!; idle()
+        val alias = watcher.resolve("chat/a?run_profile=profile-a&newSession=session-a")!!; awaitLoadSettled(alias)
         assertNotSame(original, alias)
         historyGate = CompletableDeferred()
         historyEntered = CompletableDeferred()
         original.onDraft("second"); original.send(); idle()
-        assertTrue(historyEntered!!.isCompleted)
+        awaitEntered(historyEntered!!)
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid"), java.util.UUID.randomUUID().toString())
         val holder = app.rasul.ui.ActivePcHolder(connectionStore, scope)
         idle()
@@ -1264,7 +1286,20 @@ class RunNotificationsTest {
         found!!
     }
 
+    private fun awaitUntil(condition: suspend () -> Boolean) = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (!condition()) { idle(); kotlinx.coroutines.delay(1) }
+        }
+    }
+
+    private fun awaitEntered(gate: CompletableDeferred<Unit>) = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (!gate.isCompleted) { idle(); kotlinx.coroutines.delay(1) }
+        }
+    }
+
     private fun awaitLoadSettled(model: ChatViewModel) = kotlinx.coroutines.runBlocking {
+        idle()
         kotlinx.coroutines.withTimeout(10_000) {
             while (model.state.value.load == app.rasul.chat.ChatLoad.Loading || model.state.value.preparingSend) {
                 idle(); kotlinx.coroutines.delay(1)
@@ -1333,7 +1368,7 @@ class RunNotificationsTest {
         val old = warm.resolve("chat/a?newSession=session-a")!!; awaitLoadSettled(old)
         historyGate = CompletableDeferred(); historyEntered = CompletableDeferred()
         old.onDraft("first"); old.send(); idle()
-        assertTrue(historyEntered!!.isCompleted)
+        awaitEntered(historyEntered!!)
         connectionStore.save(app.rasul.data.Connection("a", "Bot", "https://example.invalid/changed"), null)
         historyGate!!.complete(Unit); awaitRunStarted(old)
         assertTrue(requests.none { it.first.endsWith("/changed") })
@@ -1354,6 +1389,7 @@ class RunNotificationsTest {
         val (_, route) = continuedRoute()
         val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
         val old = warm.resolve(route)!!; awaitLoadSettled(old); start(old); awaitRunStarted(old)
+        awaitUntil { connectionStore.persistedRuns().isNotEmpty() }
         val field = container.transcriptSources.javaClass.getDeclaredField("byToken").apply { isAccessible = true }
         @Suppress("UNCHECKED_CAST")
         (field.get(container.transcriptSources) as MutableMap<String, *>).clear()
@@ -1373,7 +1409,7 @@ class RunNotificationsTest {
         val session = old.resolvedSessionId!!
         historyGate = CompletableDeferred(); historyEntered = CompletableDeferred()
         old.onDraft("first"); old.send(); idle()
-        assertTrue(historyEntered!!.isCompleted)
+        awaitEntered(historyEntered!!)
         val target = old.resolvedTarget!!
         assertEquals(app.rasul.data.ConnectionStore.ContinueResult.Selected, connectionStore.continueSession("a", null, target.revision, session))
         val continued = watcher.resolve(app.rasul.ui.continueChatRoute(app.rasul.data.ActiveTarget.Ready("a", "Bot", target)))!!
@@ -1435,7 +1471,7 @@ class RunNotificationsTest {
         val session = model.resolvedSessionId!!
         historyGate = CompletableDeferred(); historyEntered = CompletableDeferred()
         model.onDraft("first"); model.send(); idle()
-        assertTrue(historyEntered!!.isCompleted)
+        awaitEntered(historyEntered!!)
         assertTrue(model.state.value.preparingSend)
         val source = app.rasul.data.ActiveTarget.Ready("a", "Bot", model.resolvedTarget!!.copy(apiKey = "key-a"))
         assertEquals(session, watcher.busySession("a", null))
@@ -1537,7 +1573,7 @@ class RunNotificationsTest {
             }
         }
         val watcher = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val model = watcher.get("chat/a", "Bot", loader, app.rasul.chat.newChatRunMemory(persistent, session)); idle()
+        val model = watcher.get("chat/a", "Bot", loader, app.rasul.chat.newChatRunMemory(persistent, session)); awaitLoadSettled(model)
         start(model)
         kotlinx.coroutines.runBlocking {
             kotlinx.coroutines.withTimeout(10_000) {
@@ -1593,7 +1629,7 @@ class RunNotificationsTest {
             }
         }
         val warm = RunWatcher(container, context, scope, createModel = { l, m -> model(l, m) })
-        val model = warm.get("chat/a", "Bot", loader, app.rasul.chat.newChatRunMemory(persistent, session)); idle()
+        val model = warm.get("chat/a", "Bot", loader, app.rasul.chat.newChatRunMemory(persistent, session)); awaitLoadSettled(model)
         start(model); awaitRunStarted(model)
         kotlinx.coroutines.runBlocking {
             kotlinx.coroutines.withTimeout(10_000) {

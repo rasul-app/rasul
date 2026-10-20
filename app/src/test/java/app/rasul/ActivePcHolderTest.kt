@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModelStore
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.stringPreferencesKey
 import app.rasul.data.Connection
 import app.rasul.data.ConnectionStore
 import app.rasul.data.ActiveTarget
@@ -13,6 +15,7 @@ import app.rasul.data.SecretCipher
 import app.rasul.bridge.BridgeBotsRepository
 import app.rasul.bridge.BridgeClients
 import app.rasul.bridge.BridgeProfile
+import app.rasul.bridge.BridgeSelection
 import app.rasul.bridge.BridgeStore
 import app.rasul.bridge.BridgeTransport
 import app.rasul.bridge.ProfileSnapshot
@@ -35,11 +38,19 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -49,6 +60,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -259,9 +271,204 @@ class ActivePcHolderTest {
         assertEquals(idA, holder.state.value.activeId)
     }
 
+    /** A bridge-bot pick written before the holder's first store emission must not be overridden by the
+     *  auto-pick of the default bot: the user's pick is the later write only if the holder does not
+     *  enqueue a default behind it. */
+    @Test fun autoDefaultDoesNotOverrideAnEarlyPick() = runBlocking {
+        val ds = FakeDataStore()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val connections = ConnectionStore(ds, cipher)
+        val store = BridgeStore(ds, cipher)
+        val saved = SavedBridge(
+            "bridge-b", "Bridge B", listOf("wss://example.invalid"),
+            Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32)), "device", "key",
+        )
+        val clients = BridgeClients(store, scope, { _, urls, _ ->
+            BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") })
+        }, {})
+        val releaseProfiles = CompletableDeferred<Unit>()
+        val repository = BridgeBotsRepository(store, clients) { object : ProfilesApi {
+            override suspend fun list(): ProfileSnapshot {
+                releaseProfiles.await()
+                return ProfileSnapshot(1, listOf(
+                    BridgeProfile("default", "default", "Default", true, true),
+                    BridgeProfile("alt", "alt", "Alt", true, false),
+                ))
+            }
+            override fun events(): Flow<ProfileSnapshot> = flow { awaitCancellation() }
+        } }
+        val following = scope.launch { repository.follow() }
+        try {
+            store.save(saved)
+            // The follower reads the list on IO; a holder created before it sees the group would treat the pick's bridge as removed.
+            withTimeout(5000) { repository.state.first { state -> state.groups.any { it.id == saved.bridgeId } } }
+            val holder = ActivePcHolder(connections, scope, repository)
+            ds.holdEmissions = true
+            holder.selectBridge(saved.bridgeId, "alt")
+            ds.writes.first { it >= 2 }
+            releaseProfiles.complete(Unit)
+            withTimeoutOrNull(3000) { ds.writes.first { it >= 3 } }
+            ds.holdEmissions = false
+            ds.releaseQueued()
+            assertEquals("alt", ds.current[stringPreferencesKey("active_bridge_profile")])
+            val picker = withTimeout(5000) {
+                holder.state.first { it.activeId == bridgeBotId(saved.bridgeId, "alt") && it.loaded }
+            }
+            assertEquals(BridgeSelection(saved.bridgeId, "alt"), picker.bridgeSelection)
+        } finally {
+            following.cancelAndJoin()
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+        }
+    }
+
+    /** A pick whose store write lands but whose emission never reaches the holder (a first read racing
+     *  the write can miss it) must still become and stay the active one. */
+    @Test fun pickWhoseStoreEmissionIsMissedStaysActive() = runBlocking {
+        val ds = FakeDataStore()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val connections = ConnectionStore(ds, cipher)
+        val store = BridgeStore(ds, cipher)
+        val saved = SavedBridge(
+            "bridge-b", "Bridge B", listOf("wss://example.invalid"),
+            Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32)), "device", "key",
+        )
+        val clients = BridgeClients(store, scope, { _, urls, _ ->
+            BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") })
+        }, {})
+        val releaseProfiles = CompletableDeferred<Unit>()
+        val repository = BridgeBotsRepository(store, clients) { object : ProfilesApi {
+            override suspend fun list(): ProfileSnapshot {
+                releaseProfiles.await()
+                return ProfileSnapshot(1, listOf(
+                    BridgeProfile("default", "default", "Default", true, true),
+                    BridgeProfile("alt", "alt", "Alt", true, false),
+                ))
+            }
+            override fun events(): Flow<ProfileSnapshot> = flow { awaitCancellation() }
+        } }
+        val following = scope.launch { repository.follow() }
+        try {
+            store.save(saved)
+            // The follower reads the list on IO; a holder created before it sees the group would treat the pick's bridge as removed.
+            withTimeout(5000) { repository.state.first { state -> state.groups.any { it.id == saved.bridgeId } } }
+            val holder = ActivePcHolder(connections, scope, repository)
+            // Profiles are gated, so nothing else can write before the pick and consume the drop.
+            ds.dropNextEmission = true
+            holder.selectBridge(saved.bridgeId, "alt")
+            ds.writes.first { it >= 2 }
+            releaseProfiles.complete(Unit)
+            val picker = withTimeoutOrNull(5000) {
+                holder.state.first { it.activeId == bridgeBotId(saved.bridgeId, "alt") && it.loaded && it.targetLoaded }
+            }
+            assertNotNull(
+                "pick never became active (persisted profile=" +
+                    ds.current[stringPreferencesKey("active_bridge_profile")] + ")",
+                picker,
+            )
+        } finally {
+            following.cancelAndJoin()
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+        }
+    }
+
+    /** With a selection already saved, a pick taken before the holder's first emission must survive when
+     *  the store emission for it is missed and the first read is the stale saved selection. */
+    @Test fun earlyPickOverSavedSelectionSurvivesMissedStoreEmission() = runBlocking {
+        val ds = FakeDataStore()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val connections = ConnectionStore(ds, cipher)
+        val store = BridgeStore(ds, cipher)
+        val saved = SavedBridge(
+            "bridge-b", "Bridge B", listOf("wss://example.invalid"),
+            Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32)), "device", "key",
+        )
+        val clients = BridgeClients(store, scope, { _, urls, _ ->
+            BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") })
+        }, {})
+        val repository = BridgeBotsRepository(store, clients) { object : ProfilesApi {
+            override suspend fun list() = ProfileSnapshot(1, listOf(
+                BridgeProfile("default", "default", "Default", true, true),
+                BridgeProfile("alt", "alt", "Alt", true, false),
+            ))
+            override fun events(): Flow<ProfileSnapshot> = flow { awaitCancellation() }
+        } }
+        val following = scope.launch { repository.follow() }
+        try {
+            store.save(saved)
+            withTimeout(5000) { repository.state.first { state -> state.groups.any { it.id == saved.bridgeId } } }
+            store.setActiveSelection(BridgeSelection(saved.bridgeId, "default"))
+            val gate = CompletableDeferred<Unit>()
+            ds.subscriptionGate = gate
+            val holder = ActivePcHolder(connections, scope, repository)
+            val written = ds.writes.value
+            ds.dropNextEmission = true
+            holder.selectBridge(saved.bridgeId, "alt")
+            ds.writes.first { it > written }
+            gate.complete(Unit)
+            val picker = withTimeoutOrNull(5000) {
+                holder.state.first { it.activeId == bridgeBotId(saved.bridgeId, "alt") && it.loaded && it.targetLoaded }
+            }
+            assertNotNull(
+                "pick never became active (persisted profile=" +
+                    ds.current[stringPreferencesKey("active_bridge_profile")] + ")",
+                picker,
+            )
+            assertEquals(BridgeSelection(saved.bridgeId, "alt"), picker!!.bridgeSelection)
+        } finally {
+            following.cancelAndJoin()
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+        }
+    }
+
     private fun waitFor(cond: () -> Boolean) {
         val end = System.currentTimeMillis() + 5000
         while (!cond() && System.currentTimeMillis() < end) Thread.sleep(20)
         assertTrue("timed out", cond())
+    }
+}
+
+/** In-memory DataStore stand-in: collectors replay the last emitted value; [holdEmissions] queues new
+ *  values for a later [releaseQueued], and [dropNextEmission] lets a write land without any emission —
+ *  the write-applied/collector-missed split a file DataStore can hit when a first read races a write. */
+private class FakeDataStore : DataStore<Preferences> {
+    private val emitted = MutableSharedFlow<Preferences>(replay = 1)
+    private val queued = ArrayDeque<Preferences>()
+    var holdEmissions = false
+    var dropNextEmission = false
+    var current: Preferences = emptyPreferences()
+        private set
+    val writes = MutableStateFlow(0)
+
+    init { emitted.tryEmit(current) }
+
+    /** While set, new collectors of [data] wait for it before seeing any value. */
+    var subscriptionGate: CompletableDeferred<Unit>? = null
+
+    override val data: Flow<Preferences> = flow {
+        subscriptionGate?.await()
+        emitAll(emitted)
+    }
+
+    private val writeLock = Mutex()
+
+    /** Serialised like a real DataStore: a read-modify-write never sees a value another write is replacing. */
+    override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences = writeLock.withLock {
+        val next = transform(current)
+        if (next == current) return@withLock current // a real DataStore skips a write that changes nothing
+        current = next
+        when {
+            dropNextEmission -> dropNextEmission = false
+            holdEmissions -> queued.add(next)
+            else -> emitted.emit(next)
+        }
+        writes.update { it + 1 }
+        next
+    }
+
+    suspend fun releaseQueued() {
+        while (queued.isNotEmpty()) emitted.emit(queued.removeFirst())
     }
 }

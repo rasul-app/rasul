@@ -40,6 +40,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.combine
 import app.rasul.bridge.BridgeBotsRepository
+import app.rasul.bridge.BridgeBotsState
 import app.rasul.bridge.BridgeGroup
 import app.rasul.bridge.BridgeSelection
 import app.rasul.bridge.bridgeBotId
@@ -99,9 +100,31 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
         data class Bridge(val selection: BridgeSelection) : PickRequest
     }
 
+    /** A saved selection the observation has emitted; distinguishes "observed none" from "not observed yet". */
+    private data class Seen(val selection: BridgeSelection?)
+
+    /** A pick dequeued for writing but not yet seen on the store flows. [baseline] is the selection the
+     *  observation last emitted when the pick was dequeued, or null when nothing was emitted yet (the first
+     *  emission then becomes the baseline); once the flow moves off it the store is
+     *  authoritative again. While a pick is pending it wins over a stale first read (which can miss the
+     *  write entirely) and blocks the auto-default — last pick wins. */
+    private data class PendingPick(val pick: PickRequest, val baseline: Seen?)
+
+    /** One combine snapshot: the store values plus the pick still awaiting flow confirmation. */
+    private data class Observed(
+        val s: ConnectionStore.Snapshot,
+        val bots: BridgeBotsState,
+        val savedSelection: BridgeSelection?,
+        val pending: PendingPick?,
+    )
+
+    private val pendingPick = MutableStateFlow<PendingPick?>(null)
+    private val lastFlowSelection = MutableStateFlow<Seen?>(null)
+
     init {
         scope.launch {
             for (pick in picks) {
+                pendingPick.value = PendingPick(pick, lastFlowSelection.value)
                 try {
                     when (pick) {
                         is PickRequest.Direct -> {
@@ -114,6 +137,7 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    pendingPick.update { if (it?.pick === pick) null else it }
                     _state.update { it.copy(writeError = e.message ?: e.javaClass.simpleName) }
                 }
             }
@@ -126,21 +150,44 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
         observing = scope.launch {
             try {
                 if (bridges == null) {
-                    store.snapshots.collect { s ->
-                        _state.update { PcPicker(s.pcs, s.activeId, s.target, writeError = it.writeError, loaded = true, targetLoaded = true) }
+                    combine(store.snapshots, pendingPick) { s, p -> s to p }.collect { (s, pendingRaw) ->
+                        val directPick = (pendingRaw?.pick as? PickRequest.Direct)?.id
+                        val pending = pendingRaw?.takeIf { directPick != null && s.activeId != directPick && s.pcs.any { pc -> pc.id == directPick } }
+                        if (pendingRaw != null && pending == null) pendingPick.compareAndSet(pendingRaw, null)
+                        _state.update {
+                            PcPicker(s.pcs, directPick?.takeIf { pending != null } ?: s.activeId, s.target,
+                                writeError = it.writeError, loaded = true, targetLoaded = true)
+                        }
                     }
                 } else {
                     var pendingDefault: BridgeSelection? = null
-                    combine(store.snapshots, bridges.state, bridges.activeSelection) { s, bots, selected ->
-                        Triple(s, bots, selected)
-                    }.collect { (s, bots, savedSelection) ->
+                    combine(store.snapshots, bridges.state, bridges.activeSelection, pendingPick) { s, bots, selected, pending ->
+                        Observed(s, bots, selected, pending)
+                    }.collect { (s, bots, savedSelection, pendingRaw) ->
+                    lastFlowSelection.value = Seen(savedSelection)
+                    // A pick taken before the first emission adopts that emission as its baseline.
+                    val adopted = pendingRaw?.takeIf { it.baseline == null }?.copy(baseline = Seen(savedSelection))
+                    if (pendingRaw != null && adopted != null) pendingPick.compareAndSet(pendingRaw, adopted)
+                    val current = adopted ?: pendingRaw
+                    val pending = current?.takeIf { p ->
+                        val baseline = p.baseline?.selection
+                        when (val pick = p.pick) {
+                            is PickRequest.Bridge -> savedSelection != pick.selection && savedSelection == baseline &&
+                                !(bots.loaded && bots.groups.none { it.id == pick.selection.bridgeId })
+                            is PickRequest.Direct -> (baseline == null || savedSelection == baseline) &&
+                                s.activeId != pick.id && s.pcs.any { it.id == pick.id }
+                        }
+                    }
+                    if (current != null && pending == null) pendingPick.compareAndSet(current, null)
+                    val pendingBridge = (pending?.pick as? PickRequest.Bridge)?.selection
+                    val pendingDirect = (pending?.pick as? PickRequest.Direct)?.id
                     val choices = bots.groups.flatMap { group -> group.profiles.map { profile ->
                         Connection(bridgeBotId(group.id, profile.id), bridgeTargetName(group, profile.id), "", profile.id)
                     } }
-                    val selection = savedSelection
-                    val directActive = s.target !is ActiveTarget.None
-                    pendingDefault = pendingDefault?.takeIf { pending -> bots.groups.any { it.id == pending.bridgeId } }
-                    if (savedSelection != null || directActive) pendingDefault = null
+                    val selection = pendingBridge ?: if (pendingDirect != null) null else savedSelection
+                    val directActive = pendingDirect != null || s.target !is ActiveTarget.None
+                    pendingDefault = pendingDefault?.takeIf { p -> bots.groups.any { it.id == p.bridgeId } }
+                    if (selection != null || directActive) pendingDefault = null
                     val readyProfiles = bots.groups.flatMap { group ->
                         group.profiles.filter { it.ready && group.error == null }.map { profile -> BridgeSelection(group.id, profile.id) to profile }
                     }
@@ -197,7 +244,7 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
                         }
                     }
                     _state.update {
-                        PcPicker((s.pcs + choices + listOfNotNull(missingSelection)).distinctBy { pc -> pc.id }, selectedId ?: s.activeId, target,
+                        PcPicker((s.pcs + choices + listOfNotNull(missingSelection)).distinctBy { pc -> pc.id }, selectedId ?: pendingDirect ?: s.activeId, target,
                             writeError = it.writeError, loaded = true, targetLoaded = targetLoaded,
                             bridgeNotice = bridgeNotice, bridgeGroups = bots.groups, bridgeSelection = effectiveSelection)
                     }
