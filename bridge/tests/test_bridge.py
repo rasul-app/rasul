@@ -950,6 +950,28 @@ async def test_profile_snapshot_probes_together_and_keeps_order(tmp_path):
 
 
 @asynchronous
+async def test_probe_timeout_preserves_previous_readiness(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        first = await bridge.profiles.snapshot()
+        assert first["profiles"][0]["ready"]
+        upstream.delays[models_target("default")] = 3.5
+        second = await bridge.profiles.snapshot()
+        assert second == first
+        upstream.delays.clear()
+        upstream.expected_key = lambda target: ""
+        third = await bridge.profiles.snapshot()
+        assert not third["profiles"][0]["ready"]
+        assert third["revision"] == first["revision"] + 1
+        upstream.expected_key = lambda target: bridge.profiles.key("default")
+        upstream.delays[models_target("default")] = None
+        assert await bridge.profiles.snapshot() == third
+        upstream.delays.clear()
+        assert (await bridge.profiles.snapshot())["profiles"][0]["ready"]
+        bridge.store.write("profile-keys.json", {})
+        assert not (await bridge.profiles.snapshot())["profiles"][0]["ready"]
+
+
+@asynchronous
 async def test_one_hanging_profile_is_not_ready_without_slowing_the_list(tmp_path):
     async with running(tmp_path) as (bridge, upstream):
         names = many_profiles(bridge)

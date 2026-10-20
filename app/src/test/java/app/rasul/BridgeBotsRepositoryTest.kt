@@ -25,6 +25,107 @@ class BridgeBotsRepositoryTest {
         Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32)), UUID.randomUUID().toString(), UUID.randomUUID().toString())
     private fun profile(id: String = "default", ready: Boolean = true) = BridgeProfile(id, id, id, ready, id == "default")
 
+    @Test fun targetRefreshesMissingAndStaleStateWithoutFollower() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val ds = PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("refresh.preferences_pb") }
+        val store = BridgeStore(ds, cipher)
+        val saved = bridge()
+        val transports = mutableListOf<BridgeTransport>()
+        val clients = BridgeClients(store, scope, { _, urls, _ ->
+            BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }).also { transports.add(it) }
+        }, {})
+        var snapshot = ProfileSnapshot(1, listOf(profile(ready = false)))
+        var failure: HermesError? = null
+        var lists = 0
+        val profilesApi = object : ProfilesApi {
+            override suspend fun list(): ProfileSnapshot {
+                lists++
+                failure?.let { throw ProfileStreamException(it) }
+                return snapshot
+            }
+            override fun events(): Flow<ProfileSnapshot> = flow { awaitCancellation() }
+        }
+        val repository = BridgeBotsRepository(store, clients) { profilesApi }
+        try {
+            store.save(saved)
+            val following = launch { repository.follow() }
+            try {
+                withTimeout(5000) { repository.state.first { it.groups.singleOrNull()?.loading == false } }
+            } finally { following.cancelAndJoin() }
+            lists = 0
+            assertEquals(HermesError.ProfileNotReady, (repository.target(saved.bridgeId, "default") as HermesResult.Err).error)
+            snapshot = ProfileSnapshot(2, listOf(profile()))
+            val target = (repository.target(saved.bridgeId, "default") as HermesResult.Ok).value
+            assertSame(clients.client(saved).client, target.bridge!!.client)
+            assertTrue(repository.state.value.groups.single().profiles.single().ready)
+            assertEquals(2, lists)
+            assertTrue(repository.target(saved.bridgeId, "default") is HermesResult.Ok)
+            assertEquals(2, lists)
+            assertEquals(HermesError.ProfileUnknown("alternate"), (repository.target(saved.bridgeId, "alternate") as HermesResult.Err).error)
+            snapshot = ProfileSnapshot(3, listOf(profile(), profile("alternate")))
+            assertTrue(repository.target(saved.bridgeId, "alternate") is HermesResult.Ok)
+            for (error in listOf(HermesError.ProfileNotReady, HermesError.DeviceRevoked, HermesError.BridgeUnreachable)) {
+                failure = error
+                assertEquals(error, (repository.target(saved.bridgeId, "missing") as HermesResult.Err).error)
+                assertEquals(error, repository.state.value.groups.single().error)
+            }
+            failure = null
+            assertTrue(repository.target(saved.bridgeId, "default") is HermesResult.Ok)
+            assertNull(repository.state.value.groups.single().error)
+            val uncached = BridgeBotsRepository(store, clients) { profilesApi }
+            assertTrue(uncached.target(saved.bridgeId, "default") is HermesResult.Ok)
+            assertTrue(uncached.state.value.groups.single().profiles.first { it.id == "default" }.ready)
+        } finally {
+            transports.forEach { it.close() }
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+        }
+    }
+
+    @Test fun cancellingFollowerClearsLoadingAndResolvesSelection() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val ds = PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("cancel-loading.preferences_pb") }
+        val store = BridgeStore(ds, cipher)
+        val saved = bridge()
+        val listStarted = CompletableDeferred<Unit>()
+        var lists = 0
+        val transports = mutableListOf<BridgeTransport>()
+        val clients = BridgeClients(store, scope, { _, urls, _ ->
+            BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }).also { transports.add(it) }
+        }, {})
+        val repository = BridgeBotsRepository(store, clients) { object : ProfilesApi {
+            override suspend fun list(): ProfileSnapshot {
+                if (++lists == 1) {
+                    listStarted.complete(Unit)
+                    awaitCancellation()
+                }
+                return ProfileSnapshot(1, listOf(profile()))
+            }
+            override fun events(): Flow<ProfileSnapshot> = flow { awaitCancellation() }
+        } }
+        var following: Job? = null
+        try {
+            store.save(saved)
+            store.setActiveSelection(BridgeSelection(saved.bridgeId, "default"))
+            following = launch { repository.follow() }
+            withTimeout(5000) { repository.state.first { it.groups.singleOrNull()?.loading == true } }
+            withTimeout(5000) { listStarted.await() }
+            val holder = ActivePcHolder(ConnectionStore(ds, cipher), scope, repository)
+            withTimeout(5000) { holder.state.first { it.target == ActiveTarget.None } }
+
+            following.cancelAndJoin()
+
+            assertFalse(repository.state.value.groups.single().loading)
+            withTimeout(5000) { holder.state.first { it.target is ActiveTarget.Ready } }
+            assertEquals(2, lists)
+        } finally {
+            following?.cancelAndJoin()
+            transports.forEach { it.close() }
+            scope.cancel()
+            scope.coroutineContext[Job]!!.join()
+        }
+    }
+
     @Test fun offlineSavedSelectionStaysInSwitcherAlongsideWorkingDirectPc() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val ds = PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("offline.preferences_pb") }
@@ -178,18 +279,19 @@ class BridgeBotsRepositoryTest {
             BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }).also { transports.add(it) }
         }, {})
         val events = Channel<ProfileSnapshot>(Channel.UNLIMITED)
-        var lists = 0
+        var snapshot = ProfileSnapshot(1, listOf(profile()))
+        var resuming = false
         val resumedList = CompletableDeferred<Unit>()
         val entered = CompletableDeferred<Unit>()
         val cancelled = CompletableDeferred<Unit>()
         val repository = BridgeBotsRepository(store, clients) { object : ProfilesApi {
             override suspend fun list(): ProfileSnapshot {
-                if (++lists > 1) { resumedList.complete(Unit); awaitCancellation() }
-                return ProfileSnapshot(1, listOf(profile()))
+                if (resuming) { resumedList.complete(Unit); awaitCancellation() }
+                return snapshot
             }
             override fun events(): Flow<ProfileSnapshot> = flow {
                 entered.complete(Unit)
-                try { events.receiveAsFlow().collect { emit(it) } } finally { cancelled.complete(Unit) }
+                try { events.receiveAsFlow().collect { snapshot = it; emit(it) } } finally { cancelled.complete(Unit) }
             }
         } }
         val a = bridge()
@@ -225,6 +327,7 @@ class BridgeBotsRepositoryTest {
             withTimeout(5000) { cancelled.await() }
             assertEquals(1, transports.size)
             assertSame(first.bridge!!.client, clients.client(a).client)
+            resuming = true
             following = launch { repository.follow() }
             withTimeout(5000) { resumedList.await() }
             assertEquals(changed.groups.single().profiles, repository.state.value.groups.single().profiles)
@@ -284,6 +387,7 @@ class BridgeBotsRepositoryTest {
         val b = bridge()
         val transports = mutableListOf<BridgeTransport>()
         val revoked = Channel<ProfileSnapshot>()
+        var forbidden = false
         val clients = BridgeClients(store, scope, { _, urls, _ ->
             BridgeTransport(urls, ByteArray(32), null, newContext = { javax.net.ssl.SSLContext.getInstance("TLSv1.3") }).also { transports.add(it) }
         }, {})
@@ -291,12 +395,16 @@ class BridgeBotsRepositoryTest {
             store.save(a); store.save(b)
             val firstClient = clients.client(a).client
             val repository = BridgeBotsRepository(store, clients) { http -> object : ProfilesApi {
-                override suspend fun list() = ProfileSnapshot(1, listOf(profile()))
+                override suspend fun list(): ProfileSnapshot {
+                    if (http === firstClient && forbidden) throw ProfileStreamException(HermesError.DeviceRevoked)
+                    return ProfileSnapshot(1, listOf(profile()))
+                }
                 override fun events(): Flow<ProfileSnapshot> = if (http === firstClient) revoked.receiveAsFlow() else flow { awaitCancellation() }
             } }
             val following = launch { repository.follow() }
             try {
                 withTimeout(5000) { repository.state.first { it.groups.size == 2 && it.groups.all { g -> !g.loading } } }
+                forbidden = true
                 revoked.close(ProfileStreamException(HermesError.DeviceRevoked))
                 val state = withTimeout(5000) { repository.state.first { it.groups.first { g -> g.id == a.bridgeId }.error == HermesError.DeviceRevoked } }
                 assertNull(state.groups.first { it.id == b.bridgeId }.error)

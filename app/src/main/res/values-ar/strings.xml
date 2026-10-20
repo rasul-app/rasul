@@ -1059,7 +1059,6 @@
         <item quantity="many">يراقب نتائج المهام على %1$d حاسوبًا</item>
         <item quantity="other">يراقب نتائج المهام على %1$d حاسوب</item>
     </plurals>
-    <string name="chat_attach_any_file">ملف</string>
     <string name="chat_attach_needs_bridge">إرسال الملفات يحتاج إلى جسر رسول</string>
     <string name="chat_uploading">جارٍ الرفع…</string>
     <string name="chat_upload_progress">%2$d%% من %1$s</string>
@@ -1081,4 +1080,54 @@
     <string name="chat_err_upload_open_limit">هناك ملفات كثيرة قيد الرفع. انتظر حتى ينتهي أحدها ثم حاول مرة أخرى.</string>
     <string name="chat_err_upload_gone">الملف %1$s لم يعد موجودًا على حاسوبك. أرفقه من جديد</string>
     <string name="chat_err_upload_gone_many">هذه الملفات لم تعد موجودة على حاسوبك. أرفقها من جديد: %1$s</string>
+    <string name="chat_attach_sheet_title">إضافة إلى الرسالة</string>
+    <string name="chat_attach_close">إغلاق</string>
+    <string name="chat_attach_camera">الكاميرا</string>
+    <string name="chat_attach_files">الملفات</string>
+    <string name="chat_attach_camera_cd">التقاط صورة</string>
+    <string name="chat_attach_photos_cd">اختيار صور</string>
+    <string name="chat_attach_files_cd">اختيار ملفات</string>
+    <string name="chat_err_camera_denied">رُفض الوصول إلى الكاميرا. اسمح به من إعدادات التطبيق لالتقاط صورة.</string>
+    <string name="chat_err_camera_missing">لا يوجد تطبيق كاميرا على هذا الهاتف.</string>
+    <string name="bg_working">يعمل… ·</string>
+    <plurals name="bg_running_tasks">
+        <item quantity="zero">لا مهام قيد التشغيل</item>
+        <item quantity="one">مهمة واحدة قيد التشغيل</item>
+        <item quantity="two">مهمتان قيد التشغيل</item>
+        <item quantity="few">%1$d مهام قيد التشغيل</item>
+        <item quantity="many">%1$d مهمة قيد التشغيل</item>
+        <item quantity="other">%1$d مهمة قيد التشغيل</item>
+    </plurals>
+    <plurals name="bg_still_running">
+        <item quantity="zero">لا مهام ما زالت تعمل</item>
+        <item quantity="one">مهمة واحدة ما زالت تعمل</item>
+        <item quantity="two">مهمتان ما زالتا تعملان</item>
+        <item quantity="few">%1$d مهام ما زالت تعمل</item>
+        <item quantity="many">%1$d مهمة ما زالت تعمل</item>
+        <item quantity="other">%1$d مهمة ما زالت تعمل</item>
+    </plurals>
+    <string name="bg_open_cd">عرض المهام في الخلفية</string>
+    <string name="bg_title">المهام في الخلفية</string>
+    <string name="bg_empty">لا شيء يعمل في الخلفية.</string>
+    <string name="bg_started_now">بدأت الآن</string>
+    <plurals name="bg_started_minutes">
+        <item quantity="one">بدأت قبل دقيقة واحدة</item>
+        <item quantity="two">بدأت قبل دقيقتين</item>
+        <item quantity="few">بدأت قبل %1$s دقائق</item>
+        <item quantity="many">بدأت قبل %1$s دقيقة</item>
+        <item quantity="other">بدأت قبل %1$s دقيقة</item>
+    </plurals>
+    <plurals name="bg_started_hours">
+        <item quantity="one">بدأت قبل ساعة واحدة</item>
+        <item quantity="two">بدأت قبل ساعتين</item>
+        <item quantity="few">بدأت قبل %1$s ساعات</item>
+        <item quantity="many">بدأت قبل %1$s ساعة</item>
+        <item quantity="other">بدأت قبل %1$s ساعة</item>
+    </plurals>
+    <string name="bg_started_unknown">وقت البدء غير معروف</string>
+    <string name="bg_status_running">قيد التشغيل</string>
+    <string name="bg_status_finished">انتهت</string>
+    <string name="bg_status_failed">فشلت</string>
+    <string name="bg_kind_process">عملية</string>
+    <string name="bg_kind_helper">وكيل مساعد</string>
 </resources>

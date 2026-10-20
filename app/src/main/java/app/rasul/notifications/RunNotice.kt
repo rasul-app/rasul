@@ -114,6 +114,8 @@ fun failureText(context: Context, failure: ChatFailure): String {
         ChatFailure.AttachmentTooManyPhotos -> text(R.string.chat_err_attach_too_many)
         ChatFailure.AttachmentRunActive -> text(R.string.chat_err_attach_run_active)
         ChatFailure.FilesNeedBridge -> text(R.string.chat_attach_needs_bridge)
+        ChatFailure.CameraDenied -> text(R.string.chat_err_camera_denied)
+        ChatFailure.CameraMissing -> text(R.string.chat_err_camera_missing)
         is ChatFailure.UploadTooLarge -> text(R.string.chat_err_upload_too_large, failure.name)
         is ChatFailure.UploadEmpty -> text(R.string.chat_err_upload_empty, failure.name)
         ChatFailure.TooManyFiles -> text(R.string.chat_err_upload_too_many)

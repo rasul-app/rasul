@@ -992,7 +992,6 @@
         <item quantity="one">Watching job results on %1$d PC</item>
         <item quantity="other">Watching job results on %1$d PCs</item>
     </plurals>
-    <string name="chat_attach_any_file">File</string>
     <string name="chat_attach_needs_bridge">Sending files needs the Rasul Bridge</string>
     <string name="chat_uploading">Uploading…</string>
     <string name="chat_upload_progress">%2$d%% of %1$s</string>
@@ -1014,4 +1013,40 @@
     <string name="chat_err_upload_open_limit">Too many files are uploading. Wait for one to finish, then try again.</string>
     <string name="chat_err_upload_gone">%1$s is no longer on your PC. Attach it again</string>
     <string name="chat_err_upload_gone_many">These files are no longer on your PC. Attach them again: %1$s</string>
+    <string name="chat_attach_sheet_title">Add to message</string>
+    <string name="chat_attach_close">Close</string>
+    <string name="chat_attach_camera">Camera</string>
+    <string name="chat_attach_files">Files</string>
+    <string name="chat_attach_camera_cd">Take a photo</string>
+    <string name="chat_attach_photos_cd">Choose photos</string>
+    <string name="chat_attach_files_cd">Choose files</string>
+    <string name="chat_err_camera_denied">Camera access was denied. Allow it in the app settings to take a photo.</string>
+    <string name="chat_err_camera_missing">No camera app was found on this phone.</string>
+    <string name="bg_working">Working… ·</string>
+    <plurals name="bg_running_tasks">
+        <item quantity="one">%1$d running task</item>
+        <item quantity="other">%1$d running tasks</item>
+    </plurals>
+    <plurals name="bg_still_running">
+        <item quantity="one">%1$d task still running</item>
+        <item quantity="other">%1$d tasks still running</item>
+    </plurals>
+    <string name="bg_open_cd">Show background tasks</string>
+    <string name="bg_title">Background tasks</string>
+    <string name="bg_empty">Nothing is running in the background.</string>
+    <string name="bg_started_now">Started just now</string>
+    <plurals name="bg_started_minutes">
+        <item quantity="one">Started %1$s min ago</item>
+        <item quantity="other">Started %1$s min ago</item>
+    </plurals>
+    <plurals name="bg_started_hours">
+        <item quantity="one">Started %1$s h ago</item>
+        <item quantity="other">Started %1$s h ago</item>
+    </plurals>
+    <string name="bg_started_unknown">Start time unknown</string>
+    <string name="bg_status_running">Running</string>
+    <string name="bg_status_finished">Finished</string>
+    <string name="bg_status_failed">Failed</string>
+    <string name="bg_kind_process">Process</string>
+    <string name="bg_kind_helper">Helper agent</string>
 </resources>

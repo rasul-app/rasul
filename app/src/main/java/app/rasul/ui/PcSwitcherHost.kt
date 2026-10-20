@@ -154,7 +154,9 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
                     }
                     val selectedGroup = effectiveSelection?.let { picked -> bots.groups.firstOrNull { it.id == picked.bridgeId } }
                     val selectedId = effectiveSelection?.let { bridgeBotId(it.bridgeId, it.profileId) }
-                    val target = if (effectiveSelection == null) s.target else when (val result = bridges.target(effectiveSelection.bridgeId, effectiveSelection.profileId)) {
+                    val target = if (effectiveSelection == null) s.target
+                        else if (selectedGroup?.loading == true) ActiveTarget.None
+                        else when (val result = bridges.target(effectiveSelection.bridgeId, effectiveSelection.profileId)) {
                         is HermesResult.Ok -> ActiveTarget.Ready(
                             selectedId.orEmpty(),
                             bridgeTargetName(selectedGroup, effectiveSelection.profileId),

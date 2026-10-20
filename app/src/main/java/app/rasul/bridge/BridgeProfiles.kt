@@ -81,16 +81,17 @@ fun followProfiles(
     var attempt = 0
     var listed = false
     while (currentCoroutineContext().isActive) {
-        var failure: HermesError = HermesError.BridgeUnreachable
+        var failure: HermesError? = null
         try {
-            if (!listed) { emit(BridgeGroupUpdate.Snapshot(api.list())); listed = true }
+            if (!listed) { emit(BridgeGroupUpdate.Snapshot(api.list())); listed = true; attempt = 0 }
             api.events().collect {
+                attempt = 0
                 emit(BridgeGroupUpdate.Snapshot(it))
             }
         } catch (e: CancellationException) { throw e }
         catch (e: ProfileStreamException) { failure = e.error }
         catch (e: Exception) { failure = bridgeError(e) }
-        emit(BridgeGroupUpdate.Failed(failure))
+        failure?.let { emit(BridgeGroupUpdate.Failed(it)) }
         if (failure == HermesError.DeviceRevoked || failure == HermesError.DeviceKeyRepair) return@flow
         attempt = (attempt + 1).coerceAtMost(4)
         wait(reconnectBackoffMs(attempt))
@@ -159,11 +160,28 @@ class BridgeBotsRepository(
         }
     } catch (e: CancellationException) { throw e }
     catch (_: Exception) { mutable.update { it.copy(storageError = true, loaded = true) } }
+    finally { mutable.update { state -> state.copy(groups = state.groups.map { group ->
+        if (group.loading) group.copy(loading = false) else group
+    }) } }
 
     suspend fun target(bridgeId: String, profileId: String): HermesResult<HermesTarget> {
         val bridge = store.get(bridgeId) ?: return HermesResult.Err(HermesError.ConnectionChanged)
-        val group = state.value.groups.firstOrNull { it.id == bridgeId }
-            ?: return HermesResult.Err(HermesError.BridgeUnreachable)
+        val cached = state.value.groups.firstOrNull { it.id == bridgeId }
+        val group = cached?.takeIf { it.error == null && it.profiles.any { p -> p.id == profileId && p.ready } } ?: run {
+            val previous = (cached ?: BridgeGroup(bridgeId, bridge.name)).copy(name = bridge.name)
+            val fresh = try {
+                val snapshot = api(clients.client(bridge).client).list()
+                previous.copy(profiles = snapshot.profiles, loading = false, error = null)
+            } catch (e: CancellationException) { throw e }
+            catch (e: ProfileStreamException) { previous.copy(loading = false, error = e.error) }
+            catch (e: Exception) { previous.copy(loading = false, error = bridgeError(e)) }
+            mutable.update { state -> state.copy(
+                groups = if (state.groups.none { it.id == bridgeId }) state.groups + fresh
+                    else state.groups.map { if (it.id == bridgeId) fresh else it },
+                loaded = true,
+            ) }
+            fresh
+        }
         group.error?.let { return HermesResult.Err(it) }
         val profile = group.profiles.firstOrNull { it.id == profileId }
             ?: return HermesResult.Err(HermesError.ProfileUnknown(profileId))

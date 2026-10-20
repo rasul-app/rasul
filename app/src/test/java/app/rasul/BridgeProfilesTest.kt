@@ -64,6 +64,31 @@ class BridgeProfilesTest {
         assertEquals(2L, (values.last() as BridgeGroupUpdate.Snapshot).value.revision)
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun normalCompletionKeepsSnapshotsAndResetsBackoff() = runTest {
+        var opens = 0
+        val waits = mutableListOf<Long>()
+        val updates = mutableListOf<BridgeGroupUpdate>()
+        val api = object : ProfilesApi {
+            override suspend fun list() = parseProfiles(body)
+            override fun events(): Flow<ProfileSnapshot> = flow {
+                opens++
+                if (opens <= 2) throw IOException()
+                emit(parseProfiles(body))
+            }
+        }
+        val consumer = launch {
+            followProfiles(api) { waits.add(it); if (waits.size == 4) awaitCancellation() }
+                .collect { updates.add(it) }
+        }
+        runCurrent()
+        consumer.cancelAndJoin()
+        assertEquals(4, opens)
+        assertEquals(2, updates.filterIsInstance<BridgeGroupUpdate.Failed>().size)
+        assertEquals(3, updates.filterIsInstance<BridgeGroupUpdate.Snapshot>().size)
+        assertEquals(listOf(1000L, 2000L, 1000L, 1000L), waits)
+    }
+
     @Test fun forbiddenPublishesRevokedAndDoesNotReconnect() = runTest {
         var opens = 0
         val api = object : ProfilesApi {

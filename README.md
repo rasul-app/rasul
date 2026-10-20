@@ -15,7 +15,8 @@ English | [العربية](#العربية)
 ## What it does
 
 - **Chat with your agent.** Send a task and see at once that it arrived. A live card then shows what the agent is doing now, how long it has run and how many steps are done. Press and hold any message to copy it.
-- **Photos and files.** Attach up to 4 photos to a message; photos are downscaled and stripped of location metadata before sending. With the Rasul Bridge, send up to 4 files of any type (50 MB each); with a direct connection, attach one small text file.
+- **Photos and files.** Attach up to 4 photos to a message; photos are downscaled and stripped of location metadata before sending. With the Rasul Bridge, send up to 4 files of any type (50 MB each); with a direct connection, attach one small text file. The paperclip opens one sheet for Camera, Photos and Files.
+- **Background tasks.** With the Rasul Bridge, a line above the message box shows how many tasks are still running on the computer; tap it to see each one, when it started and whether it finished or failed.
 - **Steer or stop a running task.** A message sent while the agent works is added to the running task. Stop ends it.
 - **Approvals.** When the agent asks before running something, approve once or deny from the phone.
 - **Answer from the notification.** Approve or deny straight from the alert; the phone must be unlocked first.
@@ -37,7 +38,7 @@ There is no Rasul server. The app talks to your own computer, plus (optional, ca
 
 ## Status
 
-Early development (version 0.2.10). Pre-release APKs are on the Releases page.
+Early development (version 0.2.11). Pre-release APKs are on the Releases page.
 
 ## Requirements
 
@@ -153,7 +154,8 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 - **أكثر من حاسوب وملف تعريف:** احفظ كل حاسوب مرة واحدة وبدّل بينها، مع دعم ملفات تعريف Hermes.
 - **العربية والإنجليزية:** اختر اللغة من داخل التطبيق، والواجهة العربية من اليمين إلى اليسار بالكامل.
 - **سمة فاتحة وداكنة.**
-- **إرسال الصور والملفات:** أرفق حتى 4 صور بالرسالة، وتُصغَّر الصور وتُحذف منها بيانات الموقع قبل الإرسال. ومع جسر رسول أرسل حتى 4 ملفات من أي نوع (50 ميغابايت لكل ملف)، أما مع الاتصال المباشر فأرفق ملفًا نصيًا صغيرًا واحدًا.
+- **إرسال الصور والملفات:** أرفق حتى 4 صور بالرسالة، وتُصغَّر الصور وتُحذف منها بيانات الموقع قبل الإرسال. ومع جسر رسول أرسل حتى 4 ملفات من أي نوع (50 ميغابايت لكل ملف)، أما مع الاتصال المباشر فأرفق ملفًا نصيًا صغيرًا واحدًا. ويفتح مشبك الورق لوحة واحدة فيها الكاميرا والصور والملفات.
+- **المهام في الخلفية:** مع جسر رسول يظهر سطر فوق مربع الرسالة بعدد المهام التي ما زالت تعمل على الحاسوب؛ اضغط عليه لترى كل مهمة ومتى بدأت وهل انتهت أو فشلت.
 - **ملفات من الوكيل:** عندما يرسل لك الوكيل ملفًا من الحاسوب يظهر كبطاقة في المحادثة. اضغط عليها لتنزيله ثم افتحه أو احفظه أو شاركه. وتظهر الصور داخل المحادثة مباشرة. الملفات من نوع الويب ومثبّتات التطبيقات لا تُفتح داخل التطبيق أبدًا.
 - **المشاركة إلى رسول:** شارك الصور أو النصوص من أي تطبيق آخر إلى محادثة مباشرة.
 - **فحص الاتصال:** اعرف ما يعمل في جهة الحاسوب وما يجب إصلاحه.
@@ -166,7 +168,7 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 
 ### الحالة
 
-قيد التطوير المبكر (الإصدار 0.2.10). ملفات APK التجريبية متاحة في صفحة الإصدارات.
+قيد التطوير المبكر (الإصدار 0.2.11). ملفات APK التجريبية متاحة في صفحة الإصدارات.
 
 ### جسر رسول (موصى به)
 

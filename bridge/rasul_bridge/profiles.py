@@ -98,7 +98,10 @@ class Profiles:
             async with asyncio.timeout(PROBE_SECONDS):
                 status, _ = await self.upstream.collect(self.target(profile, "/v1/models"), key)
             return status == 200
-        except (OSError, TimeoutError, HTTPError, EOFError):
+        except TimeoutError:
+            previous = self.store.read("profile-snapshot.json", {}).get("profiles", [])
+            return next((item["ready"] for item in previous if item["id"] == profile), False)
+        except (OSError, HTTPError, EOFError):
             return False
 
     async def snapshot(self):

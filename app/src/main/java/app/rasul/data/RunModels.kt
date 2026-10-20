@@ -22,16 +22,23 @@ sealed interface RunEvent {
     data class MessageInterim(val text: String, val alreadyStreamed: Boolean) : RunEvent
 
     /** `tool.started` (api_server_runs.py:94). */
-    data class ToolStarted(val tool: String, val preview: String?) : RunEvent
+    data class ToolStarted(val tool: String, val preview: String?, val atMillis: Long? = null) : RunEvent
 
     /** `tool.completed` (api_server_runs.py:95-96, preview added at :333-335). */
-    data class ToolCompleted(val tool: String, val durationSeconds: Double?, val error: Boolean, val preview: String?) : RunEvent
+    data class ToolCompleted(val tool: String, val durationSeconds: Double?, val error: Boolean, val preview: String?, val atMillis: Long? = null) : RunEvent
 
     /** `reasoning.available` (api_server_runs.py:97). */
     data class Reasoning(val text: String) : RunEvent
 
     /** `subagent.start` / `subagent.complete` (api_server_runs.py:337-346). */
-    data class Subagent(val started: Boolean, val goal: String?, val summary: String?, val status: String?) : RunEvent
+    data class Subagent(
+        val started: Boolean,
+        val goal: String?,
+        val summary: String?,
+        val status: String?,
+        val subagentId: String? = null,
+        val atMillis: Long? = null,
+    ) : RunEvent
 
     /** `approval.request` (api_server.py:113-126; command/description from tools/approval.py:838-841). */
     data class ApprovalRequest(
@@ -156,6 +163,10 @@ private val eventJson = Json { ignoreUnknownKeys = true }
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
+/** The event's `timestamp` (unix seconds, api_server_runs.py:178) in milliseconds; null when absent. */
+private fun JsonObject.stamp(): Long? =
+    (this["timestamp"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() && it > 0 }?.let { (it * 1000).toLong() }
+
 /** `pending_steer`: a string, or a list of strings joined by newlines; blank = none. */
 internal fun JsonObject.steer(): String? = when (val v = this["pending_steer"]) {
     is JsonPrimitive -> v.takeIf { it.isString }?.contentOrNull
@@ -176,13 +187,16 @@ fun parseRunFrame(frame: SseFrame): RunFrame {
         "message.delta" -> RunEvent.MessageDelta(obj.str("delta").orEmpty())
         "message.interim" -> RunEvent.MessageInterim(
             obj.str("text").orEmpty(), (obj["already_streamed"] as? JsonPrimitive)?.booleanOrNull == true)
-        "tool.started" -> RunEvent.ToolStarted(obj.str("tool").orEmpty(), obj.str("preview"))
+        "tool.started" -> RunEvent.ToolStarted(obj.str("tool").orEmpty(), obj.str("preview"), obj.stamp())
         "tool.completed" -> RunEvent.ToolCompleted(
             obj.str("tool").orEmpty(), (obj["duration"] as? JsonPrimitive)?.doubleOrNull,
-            (obj["error"] as? JsonPrimitive)?.booleanOrNull == true, obj.str("preview"))
+            (obj["error"] as? JsonPrimitive)?.booleanOrNull == true, obj.str("preview"), obj.stamp())
         "reasoning.available" -> RunEvent.Reasoning(obj.str("text").orEmpty())
         "subagent.start", "subagent.complete" ->
-            RunEvent.Subagent(name == "subagent.start", obj.str("goal"), obj.str("summary"), obj.str("status"))
+            RunEvent.Subagent(
+                name == "subagent.start", obj.str("goal"), obj.str("summary"), obj.str("status"),
+                obj.str("subagent_id"), obj.stamp(),
+            )
         "approval.request" -> RunEvent.ApprovalRequest(
             requestId = obj.str("request_id"),
             command = obj.str("command").orEmpty(),

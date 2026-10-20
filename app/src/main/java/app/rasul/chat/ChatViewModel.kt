@@ -4,11 +4,15 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.rasul.data.ApprovalChoice
+import app.rasul.data.BridgeProcess
 import app.rasul.data.ConnectionStore
 import app.rasul.data.HermesError
 import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
 import app.rasul.data.PendingAttachment
+import app.rasul.data.ProcessesApi
+import app.rasul.data.ProcessesResult
+import app.rasul.data.processesApi
 import app.rasul.data.RunEvent
 import app.rasul.data.RunInputLimits
 import app.rasul.data.RunInputPlan
@@ -118,6 +122,12 @@ sealed interface ChatFailure {
 
     /** The File option was used on a direct connection. */
     data object FilesNeedBridge : ChatFailure
+
+    /** The camera permission was refused, or the capture intent was refused for lack of it. */
+    data object CameraDenied : ChatFailure
+
+    /** No app on the phone can take a photo. */
+    data object CameraMissing : ChatFailure
 
     /** [name] is over the 50 MB a file may have. */
     data class UploadTooLarge(val name: String) : ChatFailure
@@ -241,6 +251,10 @@ data class ChatState(
     val forkTitle: String? = null,
     /** Last fork or model-change failure, shown in a dismissible row. */
     val actionFailure: ChatFailure? = null,
+    /** Background processes and helpers seen on the run events; kept after the run ends, reset by the next run. */
+    val background: BackgroundTasks = BackgroundTasks(),
+    /** This chat's processes the bridge says still run; null = not asked, unknown, or an old bridge (the line stays hidden). */
+    val remoteProcesses: List<BridgeProcess>? = null,
 ) {
     val canChooseModel: Boolean get() = load == ChatLoad.Ready && sessionId != null &&
         run == null && !preparingSend && queuedReplies == 0 && !forking
@@ -358,6 +372,8 @@ class ChatViewModel(
     private val uploadApiFor: (HermesTarget) -> UploadApi? = { it.uploadApi() },
     /** Pause between chunk retries; tests replace it. */
     private val uploadPause: suspend (Long) -> Unit = { delay(it) },
+    /** The bridge's list of background processes; null (direct connection) means the line never shows after a run. */
+    private val processesApiFor: (HermesTarget) -> ProcessesApi? = { it.processesApi() },
 ) : ViewModel() {
     private val chatScope = kotlinx.coroutines.CoroutineScope((scope ?: viewModelScope).coroutineContext + kotlinx.coroutines.SupervisorJob((scope ?: viewModelScope).coroutineContext[Job]))
     internal var onFinished: ((String, ChatState) -> Unit)? = null
@@ -486,6 +502,7 @@ class ChatViewModel(
                     }
                     sessionId?.let { loadHistory(r.value, it) }
                     if (stored != null) startStatusCheck(r.value, stored, attach = true)
+                    pollProcesses()
                 }
                 is HermesResult.Err -> _state.update {
                     // The loader reports a missing connection as NotFound and an unreadable key as InvalidKey.
@@ -623,8 +640,11 @@ class ChatViewModel(
                         attachments = emptyList(),
                         forkTitle = null,
                         actionFailure = null,
+                        background = BackgroundTasks(),
+                        remoteProcesses = null,
                     )
                 }
+                pollJob?.cancel()
             }
             sessionId = current
             _state.update { it.copy(sessionId = current) }
@@ -651,6 +671,48 @@ class ChatViewModel(
     }
 
     fun dismissActionFailure() = _state.update { it.copy(actionFailure = null) }
+
+    // ---- background processes after a run ----
+
+    private var pollJob: Job? = null
+    private var screenActive = false
+
+    /** The chat screen is in front (or not): the bridge is asked about background processes only while it is. */
+    fun onScreenActive(active: Boolean) {
+        screenActive = active
+        if (active) pollProcesses() else pollJob?.cancel()
+    }
+
+    /**
+     * Asks the bridge which of this chat's processes still run, now and every [PROCESS_POLL_MS] while there are some.
+     * Only bridge chats with a known session, only while the screen is open and no run is live. An old bridge (404)
+     * clears the answer and ends it quietly; a failed ask keeps the last answer and tries again.
+     */
+    private fun pollProcesses() {
+        pollJob?.cancel()
+        val t = target ?: return
+        val session = sessionId ?: return
+        val api = processesApiFor(t) ?: return
+        if (!screenActive || _state.value.run != null || _state.value.load != ChatLoad.Ready) return
+        pollJob = chatScope.launch {
+            while (true) {
+                when (val r = api.list()) {
+                    ProcessesResult.Unsupported -> {
+                        _state.update { it.copy(remoteProcesses = null) }
+                        return@launch
+                    }
+                    ProcessesResult.Failed -> Unit
+                    is ProcessesResult.Ok -> {
+                        if (sessionId != session) return@launch
+                        val mine = r.items.filter { it.owner == session }
+                        _state.update { it.copy(remoteProcesses = mine) }
+                        if (mine.isEmpty()) return@launch
+                    }
+                }
+                delay(PROCESS_POLL_MS)
+            }
+        }
+    }
 
     /**
      * POST /api/sessions/{id}/fork. Runs in the chat's own scope, so leaving the screen does not cancel it and the
@@ -791,7 +853,10 @@ class ChatViewModel(
             stepCount = run.progress.stepCount,
             steps = run.progress.steps,
         )
-        var finished = changed.copy(run = null, finishedRunId = id, summary = summary, approvals = emptyList(), answering = emptySet())
+        var finished = changed.copy(
+            run = null, finishedRunId = id, summary = summary, approvals = emptyList(), answering = emptySet(),
+            background = changed.background.runEnded(),
+        )
         if (!pendingSteer.isNullOrBlank()) {
             finished = finished.copy(draft = joinDraft(pendingSteer, finished.draft)).msg(MessageKind.Info, INFO_STEER_RETURNED)
         }
@@ -799,6 +864,7 @@ class ChatViewModel(
         onFinished?.invoke(id, terminalState)
         _state.value = terminalState
         persist(null)
+        pollProcesses()
         if (reloadHistory) {
             val t = target
             val session = sessionId
@@ -1077,14 +1143,14 @@ class ChatViewModel(
      * The photo picker's result. Loading runs on this ViewModel's scope — not the screen's — so a
      * recreation cannot drop it, and [ChatState.pendingAttachments] keeps Send off until it lands.
      */
-    fun loadPhotos(uris: List<Uri>) {
-        val loader = attachLoader ?: return
-        if (uris.isEmpty()) return
+    fun loadPhotos(uris: List<Uri>, afterLoad: () -> Unit = {}) {
+        val loader = attachLoader ?: return afterLoad()
+        if (uris.isEmpty()) return afterLoad()
         // Photos already staged and photos still loading share the same request: count both.
         val total = (_state.value.attachments.size + inFlightPhotos + uris.size).coerceIn(1, RunInputLimits.MAX_PHOTOS)
         val budget = RunInputLimits.photoBudget(total)
         inFlightPhotos += uris.size
-        pendingAttachmentLoad({ inFlightPhotos -= uris.size }) { loader.loadPhotos(uris, budget) }
+        pendingAttachmentLoad({ inFlightPhotos -= uris.size; afterLoad() }) { loader.loadPhotos(uris, budget) }
     }
 
     private var inFlightPhotos = 0
@@ -1279,8 +1345,9 @@ class ChatViewModel(
             typedDraft = null
         }
         _state.update {
-            it.copy(draft = if (clearDraft) "" else it.draft, terminal = null, terminalFailure = null, finishedRunId = null, run = ActiveRun(null, now(), StatusLabel.Starting)).display()
+            it.copy(draft = if (clearDraft) "" else it.draft, terminal = null, terminalFailure = null, finishedRunId = null, run = ActiveRun(null, now(), StatusLabel.Starting), background = BackgroundTasks(), remoteProcesses = null).display()
         }
+        pollJob?.cancel()
         val session = sessionId
         chatScope.launch {
             when (val r = if (fileIds.isEmpty()) runs.startRun(t, input, session, key) else runs.startRun(t, input, session, key, fileIds)) {
@@ -1598,10 +1665,12 @@ class ChatViewModel(
                 updateRun(id) { it.withRun { r -> r.copy(draftId = null) } }
                 setStatus(id, StatusLabel.Tool(e.tool))
                 progress(id) { toolStarted(e.tool, e.preview, now()) }
+                _state.update { it.copy(background = it.background.toolStarted(e.tool, e.preview, e.atMillis ?: now())) }
             }
             is RunEvent.ToolCompleted -> {
                 setStatus(id, StatusLabel.Thinking)
                 progress(id) { toolCompleted(e.tool, e.durationSeconds, e.error, e.preview, now()) }
+                _state.update { it.copy(background = it.background.toolCompleted(e.tool, e.error, e.preview, e.atMillis ?: now())) }
             }
             is RunEvent.Reasoning -> {
                 setStatus(id, StatusLabel.Thinking)
@@ -1610,6 +1679,7 @@ class ChatViewModel(
             is RunEvent.Subagent -> {
                 setStatus(id, StatusLabel.Helper)
                 progress(id) { thinking() }
+                _state.update { it.copy(background = it.background.subagent(e, now())) }
             }
             is RunEvent.ApprovalRequest -> updateRun(id) { addApproval(it, e, replace = true) }
             // Without an id the event cannot be matched to a pending approval, so it removes nothing.
@@ -1653,6 +1723,8 @@ class ChatViewModel(
     companion object {
         /** Typing must pause this long before the composer text is saved. */
         const val DRAFT_SAVE_DELAY_MS = 500L
+        /** Pause between two asks of the bridge about background processes. */
+        const val PROCESS_POLL_MS = 15_000L
         /** Markers for Info messages; the screen maps them to string resources. */
         const val INFO_STOPPED = "stopped"
         const val INFO_REPLAY_TRUNCATED = "replay_truncated"

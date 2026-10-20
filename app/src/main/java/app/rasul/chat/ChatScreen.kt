@@ -221,6 +221,45 @@ fun ChatScreen(
     val anyFilePicker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris -> vm.addFiles(uris) }
+    // Camera: a photo goes into a private cache file shared through the FileProvider and is attached like a picked photo.
+    val cameraPending = androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val cameraBox = remember { arrayOfNulls<CameraCapture>(1) }
+    val takePicture = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.TakePicture(),
+    ) { taken -> cameraBox[0]?.result(taken) }
+    val requestCamera = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> cameraBox[0]?.permissionResult(granted) }
+    val camera = remember(context, vm) {
+        CameraCapture(
+            folder = java.io.File(context.cacheDir, "camera"),
+            uriFor = { file -> androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", file) },
+            pendingPath = { cameraPending.value },
+            setPendingPath = { cameraPending.value = it },
+            hasPermission = {
+                androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            },
+            askPermission = { requestCamera.launch(android.Manifest.permission.CAMERA) },
+            openCamera = { uri -> takePicture.launch(uri) },
+            onPhoto = { uri, afterLoad -> vm.loadPhotos(listOf(uri), afterLoad) },
+            onFailure = vm::attachError,
+        )
+    }
+    cameraBox[0] = camera
+    // The bridge's task list is asked for only while this chat is on screen.
+    val screenOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(screenOwner, vm) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_START) vm.onScreenActive(true)
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) vm.onScreenActive(false)
+        }
+        screenOwner.lifecycle.addObserver(observer)
+        onDispose {
+            screenOwner.lifecycle.removeObserver(observer)
+            vm.onScreenActive(false)
+        }
+    }
     ChatScreenContent(
         state = state,
         title = title,
@@ -251,6 +290,7 @@ fun ChatScreen(
                 ),
             )
         },
+        onCamera = camera::start,
         onPickFile = { filePicker.launch(arrayOf("*/*")) },
         onPickAnyFile = { anyFilePicker.launch(arrayOf("*/*")) },
         onRetryUpload = vm::retryUpload,
@@ -354,6 +394,7 @@ internal fun ChatScreenContent(
     onAnswerApproval: (String?, ApprovalChoice) -> Unit,
     onRetryHistory: () -> Unit,
     onPickPhotos: () -> Unit = {},
+    onCamera: () -> Unit = {},
     onPickFile: () -> Unit = {},
     onPickAnyFile: () -> Unit = {},
     onRetryUpload: (Long) -> Unit = {},
@@ -390,6 +431,7 @@ internal fun ChatScreenContent(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     var hiddenFor by remember { mutableStateOf<ApprovalUi?>(null) }
+    var tasksOpen by remember(state.sessionId) { mutableStateOf(false) }
     var modelPickerOpen by remember(state.sessionId) { mutableStateOf(false) }
     var tokenUsageOpen by remember { mutableStateOf(false) }
     var modelRequestVersion by remember(state.sessionId) { mutableIntStateOf(0) }
@@ -509,13 +551,26 @@ internal fun ChatScreenContent(
                     attachments = state.attachments,
                     preparing = state.pendingAttachments > 0,
                     onPickPhotos = onPickPhotos,
+                    onCamera = onCamera,
                     onPickFile = onPickFile,
                     onPickAnyFile = onPickAnyFile,
                     onRetryUpload = onRetryUpload,
                     filesViaBridge = filesViaBridge,
                     onRemoveAttachment = onRemoveAttachment,
+                    tasksPill = tasksPill(state),
+                    onOpenTasks = { tasksOpen = true },
                 )
             }
+        }
+        if (tasksOpen) {
+            val live = state.run != null
+            TasksSheet(
+                items = state.background.sheetItems(live, state.remoteProcesses),
+                runLive = live,
+                stopEnabled = state.run?.let { it.runId != null && !it.stopRequested } == true,
+                onStop = onStop,
+                onDismiss = { tasksOpen = false },
+            )
         }
         ChatTopBar(
             title = title,
@@ -916,11 +971,14 @@ private fun Composer(
     attachments: List<PendingAttachment>,
     preparing: Boolean,
     onPickPhotos: () -> Unit,
+    onCamera: () -> Unit,
     onPickFile: () -> Unit,
     onPickAnyFile: () -> Unit,
     onRetryUpload: (Long) -> Unit,
     filesViaBridge: Boolean,
     onRemoveAttachment: (Long) -> Unit,
+    tasksPill: TasksPill?,
+    onOpenTasks: () -> Unit,
 ) {
     val colors = Rasul.colors
     val uploading = attachments.any { it is PendingAttachment.UploadFile && it.state is UploadState.Uploading }
@@ -952,6 +1010,8 @@ private fun Composer(
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // The pill sits at the screen margin (16 dp): this column already has 12 dp.
+        if (tasksPill != null) TasksPillRow(tasksPill, onOpenTasks, Modifier.padding(start = 4.dp))
         if (voiceState == VoiceInputState.Listening || voiceState == VoiceInputState.Stopping || voiceLiveText.isNotBlank()) {
             Row(
                 Modifier.fillMaxWidth()
@@ -1045,12 +1105,14 @@ private fun Composer(
                             modifier = Modifier.size(22.dp),
                         )
                     }
-                    DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                        AttachMenuItems(
+                    if (attachMenu) {
+                        AttachSheet(
                             filesViaBridge = filesViaBridge,
-                            onPickPhotos = { attachMenu = false; onPickPhotos() },
-                            onPickAnyFile = { attachMenu = false; onPickAnyFile() },
-                            onPickFile = { attachMenu = false; onPickFile() },
+                            onCamera = { attachMenu = false; onCamera() },
+                            onPhotos = { attachMenu = false; onPickPhotos() },
+                            onFiles = { attachMenu = false; onPickAnyFile() },
+                            onTextFile = { attachMenu = false; onPickFile() },
+                            onDismiss = { attachMenu = false },
                         )
                     }
                 }
@@ -1159,47 +1221,6 @@ private fun Composer(
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             )
         }
-    }
-}
-
-/**
- * The rows of the attach menu. A bridge chat gets Photos and File (any type); a direct connection keeps Photos and the
- * text file, and shows File switched off with the reason.
- */
-@Composable
-internal fun AttachMenuItems(
-    filesViaBridge: Boolean,
-    onPickPhotos: () -> Unit,
-    onPickAnyFile: () -> Unit,
-    onPickFile: () -> Unit,
-) {
-    val colors = Rasul.colors
-    DropdownMenuItem(
-        text = { Text(stringResource(R.string.chat_attach_photos)) },
-        onClick = onPickPhotos,
-    )
-    if (filesViaBridge) {
-        DropdownMenuItem(
-            text = { Text(stringResource(R.string.chat_attach_any_file)) },
-            onClick = onPickAnyFile,
-            modifier = Modifier.testTag("chat_attach_any_file"),
-        )
-    } else {
-        DropdownMenuItem(
-            text = { Text(stringResource(R.string.chat_attach_file)) },
-            onClick = onPickFile,
-        )
-        DropdownMenuItem(
-            text = {
-                Column {
-                    Text(stringResource(R.string.chat_attach_any_file))
-                    Text(stringResource(R.string.chat_attach_needs_bridge), style = RasulType.bodySmall, color = colors.muted)
-                }
-            },
-            enabled = false,
-            onClick = {},
-            modifier = Modifier.testTag("chat_attach_any_file"),
-        )
     }
 }
 
@@ -1531,6 +1552,8 @@ internal fun failureText(failure: ChatFailure): String = when (failure) {
     ChatFailure.AttachmentRunActive -> stringResource(R.string.chat_err_attach_run_active)
     ChatFailure.ReplyKept -> stringResource(R.string.chat_err_reply_kept)
     ChatFailure.FilesNeedBridge -> stringResource(R.string.chat_attach_needs_bridge)
+    ChatFailure.CameraDenied -> stringResource(R.string.chat_err_camera_denied)
+    ChatFailure.CameraMissing -> stringResource(R.string.chat_err_camera_missing)
     is ChatFailure.UploadTooLarge -> stringResource(R.string.chat_err_upload_too_large, failure.name)
     is ChatFailure.UploadEmpty -> stringResource(R.string.chat_err_upload_empty, failure.name)
     ChatFailure.TooManyFiles -> stringResource(R.string.chat_err_upload_too_many)

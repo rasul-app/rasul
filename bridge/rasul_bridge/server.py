@@ -24,6 +24,7 @@ from .desktop import Desktop, RULES as DESKTOP_RULES
 from .http import HTTPError, Reader, chunk, no_content, request, response, stream_start
 from .limits import Limits, MAX_BODY
 from .instructions import Instructions
+from .processes import running as running_processes
 from .network import extra_plan, lan_addresses, tailscale_addresses
 from .status import Status
 from .pairing import Pairing
@@ -399,6 +400,14 @@ class Bridge:
                 value = self.instructions.call(profile, value)
                 status = 200
                 await response(link, status, value)
+            elif method == "GET" and re.fullmatch(r"/v1/profiles/[a-z0-9][a-z0-9_-]{0,63}/processes", target):
+                route = "/v1/profiles/{id}/processes"
+                directory = self.profiles.directories().get(target.split("/")[3])
+                if directory is None:
+                    raise HTTPError(404, "Profile not found")
+                profile = target.split("/")[3]
+                status = 200
+                await response(link, status, running_processes(directory))
             elif method == "POST" and re.fullmatch(r"/v1/profiles/[a-z0-9][a-z0-9_-]{0,63}/uploads", target):
                 route, profile = "/v1/profiles/{id}/uploads", target.split("/")[3]
                 value = self.uploads.start(device, profile, body)

@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -554,7 +555,13 @@ fun NoticeDialog(text: String, okText: String, onDismiss: () -> Unit) {
 /** Language sheet shell with a grabber and title. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RasulSheet(title: String, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+fun RasulSheet(
+    title: String,
+    onDismiss: () -> Unit,
+    /** A control at the end of the title row (a close button); the title row then leaves 16 dp below it. */
+    titleAction: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     val c = Rasul.colors
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -565,12 +572,25 @@ fun RasulSheet(title: String, onDismiss: () -> Unit, content: @Composable Column
             Box(Modifier.padding(top = 12.dp, bottom = 12.dp).width(36.dp).height(5.dp).background(c.hairline, RoundedCornerShape(3.dp)))
         },
     ) {
-        app.rasul.WindowHapticFeedbackProvider {
-            Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 34.dp)) {
-                Text(title, style = RasulType.sheetTitle, color = c.ink, modifier = Modifier.padding(bottom = 6.dp))
-                content()
+        app.rasul.WindowHapticFeedbackProvider { RasulSheetBody(title, titleAction, content) }
+    }
+}
+
+/** The part of a sheet under the grabber; the screenshot tests draw it without the window the real sheet lives in. */
+@Composable
+internal fun RasulSheetBody(title: String, titleAction: (@Composable () -> Unit)?, content: @Composable ColumnScope.() -> Unit) {
+    val c = Rasul.colors
+    Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 34.dp)) {
+        if (titleAction == null) {
+            Text(title, style = RasulType.sheetTitle, color = c.ink, modifier = Modifier.padding(bottom = 6.dp))
+        } else {
+            Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = RasulType.sheetTitle, color = c.ink, modifier = Modifier.weight(1f))
+                titleAction()
             }
+            Spacer(Modifier.height(16.dp))
         }
+        content()
     }
 }
 

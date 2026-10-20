@@ -3,19 +3,9 @@ package app.rasul.screens
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Surface
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import app.rasul.chat.AttachMenuItems
-import app.rasul.ui.theme.Rasul
 import androidx.compose.ui.unit.LayoutDirection
 import app.rasul.chat.ChatFailure
 import app.rasul.chat.ChatLoad
@@ -42,8 +32,8 @@ import org.robolectric.annotation.GraphicsMode
 import java.util.TimeZone
 
 /**
- * Chat goldens for sending files through the bridge, numbered from 180: the attach menu on a bridge chat (180) and on a
- * direct one (181), chips uploading (182), ready (183) and failed (184), the old-bridge error (185) and sent file cards (186).
+ * Chat goldens for sending files through the bridge, numbered from 182: chips uploading (182), ready (183) and failed (184),
+ * the old-bridge error (185) and sent file cards (186). The attach sheet (190, 191) is in ContextSheetsScreenshotTest.
  */
 @OptIn(com.github.takahirom.roborazzi.ExperimentalRoborazziApi::class)
 @RunWith(ParameterizedRobolectricTestRunner::class)
@@ -111,33 +101,18 @@ class FileSendScreenshotTest(private val language: String, private val dark: Boo
                         onRefresh = {},
                         onAnswerApproval = { _, _ -> },
                         onRetryHistory = {},
-                        filesViaBridge = kind != "menudirect",
+                        filesViaBridge = true,
                         modelOptionsLoader = { HermesResult.Err(HermesError.NotFound) },
                         selectedModel = null,
                         tokenUsage = null,
                         onSelectModel = {},
                     )
-                    // The real menu is a popup window, which the JVM renders unreliably this close to the screen
-                    // edge; its rows are drawn in place, above the attach button, in the same card the popup uses.
-                    if (kind == "menu" || kind == "menudirect") {
-                        Surface(
-                            Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 96.dp).width(240.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            color = Rasul.colors.bg,
-                            border = BorderStroke(1.dp, Rasul.colors.cardBorder),
-                            shadowElevation = 4.dp,
-                        ) {
-                            Column(Modifier.padding(vertical = 8.dp)) {
-                                AttachMenuItems(kind == "menu", {}, {}, {})
-                            }
-                        }
-                    }
                   }
                 }
             }
         }
         compose.waitForIdle()
-        val number = mapOf("menu" to 180, "menudirect" to 181, "uploading" to 182, "ready" to 183, "failed" to 184, "oldbridge" to 185, "sent" to 186)
+        val number = mapOf("uploading" to 182, "ready" to 183, "failed" to 184, "oldbridge" to 185, "sent" to 186)
         captureScreenRoboImage(
             "src/test/screenshots/${number.getValue(kind)}-sendfile${kind}-$language${if (dark) "-dark" else ""}.png",
         )
@@ -147,7 +122,7 @@ class FileSendScreenshotTest(private val language: String, private val dark: Boo
         @JvmStatic @Parameters(name = "{0}, dark={1}, {2}")
         fun cases(): List<Array<Any>> = listOf("en", "ar").flatMap { language ->
             listOf(false, true).flatMap { dark ->
-                listOf("menu", "menudirect", "uploading", "ready", "failed", "oldbridge", "sent").map { arrayOf(language, dark, it) }
+                listOf("uploading", "ready", "failed", "oldbridge", "sent").map { arrayOf(language, dark, it) }
             }
         }
     }
