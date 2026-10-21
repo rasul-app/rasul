@@ -14,12 +14,15 @@ android {
         applicationId = "app.rasul"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.2.11"
+        versionCode = 14
+        versionName = "0.2.12"
+        buildConfigField("boolean", "RASUL_V2", "false")
     }
 
     buildTypes {
+        debug { buildConfigField("boolean", "RASUL_V2", "false") }
         release {
+            buildConfigField("boolean", "RASUL_V2", "false")
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

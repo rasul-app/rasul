@@ -5,10 +5,19 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.rasul.data.ApprovalChoice
 import app.rasul.data.BridgeProcess
+import app.rasul.data.BusyChatsApi
+import app.rasul.data.BusyChatsResult
+import app.rasul.data.BusyWhere
+import app.rasul.data.busyApi
 import app.rasul.data.ConnectionStore
 import app.rasul.data.HermesError
 import app.rasul.data.HermesResult
 import app.rasul.data.HermesTarget
+import app.rasul.data.LiveApi
+import app.rasul.data.LiveError
+import app.rasul.data.LiveEvent
+import app.rasul.data.LiveStreamException
+import app.rasul.data.liveApi
 import app.rasul.data.PendingAttachment
 import app.rasul.data.ProcessesApi
 import app.rasul.data.ProcessesResult
@@ -42,6 +51,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -214,6 +224,27 @@ data class ActiveRun(
 
 data class ApprovalUi(val requestId: String?, val command: String, val description: String?, val canDeny: Boolean = true)
 
+/**
+ * A reply the PC is writing into this chat right now, mirrored read-only over the bridge live stream
+ * (docs/bridge-protocol.md, "Watching a chat live"). Rendered with the same composables as a local run:
+ * [segments] append to the transcript rows (the open one grows on `message.delta`), [progress] feeds the
+ * same card, [statusText] is the latest `status.update` line. [stream] is a nonce so a closing older
+ * stream cannot clear a newer one's card.
+ */
+data class PcLive(
+    val stream: Int,
+    val segments: List<ChatMessage> = emptyList(),
+    /** The bubble `message.delta` still appends to; closed by `message.complete` or `tool.start`. */
+    val openId: Long? = null,
+    val progress: RunProgress,
+    val statusText: String? = null,
+    /** The backend's `turn_started_at` in ms (snapshot); null when the backend did not say it. */
+    val turnStartedAtMs: Long? = null,
+) {
+    /** The card's clock start: the backend's start on the PC's clock, never later than this phone's snapshot time. */
+    val startedAtMs: Long get() = turnStartedAtMs?.coerceAtMost(progress.receivedAt) ?: progress.receivedAt
+}
+
 sealed interface ChatLoad {
     data object Loading : ChatLoad
     data object Ready : ChatLoad
@@ -255,6 +286,10 @@ data class ChatState(
     val background: BackgroundTasks = BackgroundTasks(),
     /** This chat's processes the bridge says still run; null = not asked, unknown, or an old bridge (the line stays hidden). */
     val remoteProcesses: List<BridgeProcess>? = null,
+    /** The desktop is answering this chat right now (bridge turn lease); the thin banner above the composer reads it. */
+    val busyOnPc: Boolean = false,
+    /** The reply the PC is writing into this chat, mirrored live; null when no stream is attached. */
+    val pcLive: PcLive? = null,
 ) {
     val canChooseModel: Boolean get() = load == ChatLoad.Ready && sessionId != null &&
         run == null && !preparingSend && queuedReplies == 0 && !forking
@@ -374,6 +409,12 @@ class ChatViewModel(
     private val uploadPause: suspend (Long) -> Unit = { delay(it) },
     /** The bridge's list of background processes; null (direct connection) means the line never shows after a run. */
     private val processesApiFor: (HermesTarget) -> ProcessesApi? = { it.processesApi() },
+    /** The bridge's turn-lease list; null (direct connection) means the "replying on PC" banner never shows. */
+    private val busyApiFor: (HermesTarget) -> BusyChatsApi? = { it.busyApi() },
+    /** The bridge's live mirror of a PC reply; null (direct connection) means the live view never opens. */
+    private val liveApiFor: (HermesTarget) -> LiveApi? = { it.liveApi() },
+    /** Pause between turn-lease asks; tests inject a virtual scheduler. */
+    private val busyPollMs: Long = BUSY_POLL_MS,
 ) : ViewModel() {
     private val chatScope = kotlinx.coroutines.CoroutineScope((scope ?: viewModelScope).coroutineContext + kotlinx.coroutines.SupervisorJob((scope ?: viewModelScope).coroutineContext[Job]))
     internal var onFinished: ((String, ChatState) -> Unit)? = null
@@ -467,6 +508,7 @@ class ChatViewModel(
         chatScope.launch {
             when (val r = loader.load()) {
                 is HermesResult.Ok -> {
+                    if (target != r.value) liveRouteMissing = false
                     target = r.value
                     readSessionId()
                     // Reading the draft never holds up the chat becoming ready.
@@ -503,6 +545,7 @@ class ChatViewModel(
                     sessionId?.let { loadHistory(r.value, it) }
                     if (stored != null) startStatusCheck(r.value, stored, attach = true)
                     pollProcesses()
+                    syncBusyPoll()
                 }
                 is HermesResult.Err -> _state.update {
                     // The loader reports a missing connection as NotFound and an unreadable key as InvalidKey.
@@ -554,7 +597,8 @@ class ChatViewModel(
     }
 
     private fun ChatState.display(): ChatState {
-        val messages = shown().map { it.second }
+        // The mirrored PC reply sits after the transcript rows, where a running reply would be.
+        val messages = shown().map { it.second } + pcLive?.segments.orEmpty()
         check(messages.map { it.id }.toSet().size == messages.size)
         return copy(messages = messages)
     }
@@ -642,8 +686,14 @@ class ChatViewModel(
                         actionFailure = null,
                         background = BackgroundTasks(),
                         remoteProcesses = null,
+                        busyOnPc = false,
+                        pcLive = null,
                     )
                 }
+                wasBusyOnPc = false
+                liveIdleHoldoff = false
+                liveUnsupported = false
+                stopLive()
                 pollJob?.cancel()
             }
             sessionId = current
@@ -677,10 +727,18 @@ class ChatViewModel(
     private var pollJob: Job? = null
     private var screenActive = false
 
-    /** The chat screen is in front (or not): the bridge is asked about background processes only while it is. */
+    /** The chat screen is in front (or not): the bridge is asked about background processes and busy chats only while it is. */
     fun onScreenActive(active: Boolean) {
         screenActive = active
-        if (active) pollProcesses() else pollJob?.cancel()
+        if (active) {
+            pollProcesses()
+            syncBusyPoll()
+        } else {
+            pollJob?.cancel()
+            busyJob?.cancel()
+            busyJob = null
+            stopLive()
+        }
     }
 
     /**
@@ -713,6 +771,305 @@ class ChatViewModel(
             }
         }
     }
+
+    // ---- busy elsewhere (bridge turn leases) ----
+
+    private var busyJob: Job? = null
+    /** The last busy answer that was shown; a drop from busy to idle fires exactly one history reload. */
+    private var wasBusyOnPc = false
+    /** A bridge that answered 404 keeps the feature off for this chat's lifetime. */
+    private var busyUnsupported = false
+
+    /**
+     * Runs while the chat is on screen on a bridge target: every [busyPollMs], but only while THIS phone
+     * has no run of its own in it, the bridge is asked which chats are replying. This chat busy on the
+     * desktop shows [ChatState.busyOnPc]; a busy -> idle edge reloads history once so the reply appears.
+     * An old bridge (404) clears the flag and ends it quietly; a failed ask keeps the last known answer.
+     */
+    private fun syncBusyPoll() {
+        val api = target?.let(busyApiFor)
+        if (!screenActive || api == null || busyUnsupported) {
+            busyJob?.cancel()
+            busyJob = null
+            return
+        }
+        if (busyJob?.isActive == true) return
+        busyJob = chatScope.launch {
+            while (true) {
+                val t = target
+                val session = sessionId
+                if (t == null || !screenActive) break
+                if (session == null || _state.value.run != null) {
+                    // This phone's own run owns the screen: no banner, no ask.
+                    wasBusyOnPc = false
+                    liveIdleHoldoff = false
+                    if (_state.value.busyOnPc) _state.update { it.copy(busyOnPc = false) }
+                    dropLive()
+                } else {
+                    when (val r = api.list()) {
+                        BusyChatsResult.Unsupported -> {
+                            busyUnsupported = true
+                            wasBusyOnPc = false
+                            if (sessionId == session) _state.update { it.copy(busyOnPc = false) }
+                            return@launch
+                        }
+                        BusyChatsResult.Failed -> Unit
+                        is BusyChatsResult.Ok -> {
+                            if (sessionId != session) continue
+                            applyBusy(t, session, r.busy[session] == BusyWhere.Desktop)
+                        }
+                    }
+                }
+                delay(busyPollMs)
+            }
+        }
+    }
+
+    private suspend fun applyBusy(t: HermesTarget, session: String, busy: Boolean) {
+        if (sessionId != session) return
+        val was = wasBusyOnPc
+        wasBusyOnPc = busy
+        _state.update { it.copy(busyOnPc = busy) }
+        if (busy) {
+            if (_state.value.run == null) startLive(t, session)
+        } else {
+            stopLive(dropCard = false)
+            liveIdleHoldoff = false
+            // The PC finished: this edge is the only place a turn's history is reloaded. The mirrored
+            // reply leaves in the same update that brings the saved one in.
+            if (was && _state.value.run == null) loadHistory(t, session, dropLive = true)
+            dropLive()
+        }
+    }
+
+    // ---- the live mirror of a reply the PC is writing (bridge live route) ----
+
+    private var liveJob: Job? = null
+    /** An `unavailable` event ends the live view for this chat; polling + banner stay. A chat switch clears it. */
+    private var liveUnsupported = false
+    /** A 404 (a bridge without the live route) ends the live view on this PC; polling + banner stay. */
+    private var liveRouteMissing = false
+    /** A stream that ended in `idle` is not reopened while the chat stays busy; cleared when busy ends. */
+    private var liveIdleHoldoff = false
+    /** Monotonic nonce per stream; a closing older stream only clears its own card. */
+    private var liveSeq = 0
+
+    /** How one live connection ended. */
+    private sealed interface LiveEnd {
+        /** `idle`: no stream to mirror — closed, not reopened while the chat stays busy; the busy poll reloads. */
+        data object Idle : LiveEnd
+
+        /** `unavailable`: the live view is off for this chat. */
+        data object Unavailable : LiveEnd
+
+        /** A 404: the live view is off for this PC. */
+        data object RouteMissing : LiveEnd
+
+        /** The stream broke or ended early: reconnect WITH the last `id:` as Last-Event-ID. */
+        data object Dropped : LiveEnd
+
+        /** 429 `live_stream_limited`: wait Retry-After, then try again. */
+        data class Limited(val retryAfterMs: Long) : LiveEnd
+    }
+
+    private data class LiveAttempt(val end: LiveEnd, val lastEventId: String?, val sawEvents: Boolean)
+
+    /** All the conditions a live stream needs: busy on PC, on screen, no own run, feature still on. */
+    private fun liveWanted(t: HermesTarget, session: String): Boolean =
+        sessionId == session && target == t && screenActive && !liveUnsupported && !liveRouteMissing && !liveIdleHoldoff &&
+            _state.value.run == null && _state.value.busyOnPc
+
+    private fun startLive(t: HermesTarget, session: String) {
+        if (!liveWanted(t, session) || liveJob?.isActive == true) return
+        val api = liveApiFor(t) ?: return
+        val stream = ++liveSeq
+        liveJob = chatScope.launch {
+            var keepCard = false
+            try {
+                keepCard = liveLoop(t, session, api, stream)
+            } finally {
+                if (liveJob == coroutineContext[Job]) {
+                    liveJob = null
+                    if (!keepCard) dropLive(stream)
+                }
+            }
+        }
+    }
+
+    /** Cancels the stream (the bridge detaches from the backend session) and, unless told otherwise, drops the mirrored reply. */
+    private fun stopLive(dropCard: Boolean = true) {
+        liveJob?.cancel()
+        liveJob = null
+        if (dropCard) dropLive()
+    }
+
+    /** Drops the mirrored reply (of one stream, or whichever is there) and rebuilds the rows in the same update. */
+    private fun dropLive(stream: Int? = null) {
+        _state.update { s ->
+            if (s.pcLive == null || (stream != null && s.pcLive.stream != stream)) s else s.copy(pcLive = null).display()
+        }
+    }
+
+    /**
+     * Keeps one live mirror attached while the chat stays busy on the PC. Reconnect rules
+     * (docs/bridge-protocol.md): a `reset` event is handled on the same stream (the mirror is
+     * cleared, the transcript reloaded once, reading goes on); a dropped connection or an HTTP
+     * failure reopens WITH the stream's last `id:` (the bridge replays only with one); a 429 waits
+     * `Retry-After`. Reconnects back off 1 s, 2 s, 4 s ... capped at 30 s; a stream that relayed an
+     * event with an `id:` restarts the backoff. Returns whether the mirrored reply stays on screen
+     * (an `idle`: the busy poll swaps it for the saved one).
+     */
+    private suspend fun liveLoop(t: HermesTarget, session: String, api: LiveApi, stream: Int): Boolean {
+        var lastEventId: String? = null
+        var resume = false
+        var failures = 0
+        while (liveWanted(t, session)) {
+            val result = runLive(t, session, api, stream, if (resume) lastEventId else null) ?: return false
+            lastEventId = result.lastEventId
+            if (result.sawEvents) failures = 0
+            when (result.end) {
+                LiveEnd.Idle -> {
+                    // Nothing to mirror: no reopen while the chat stays busy. The busy poll's
+                    // busy -> idle edge is what reloads the turn.
+                    liveIdleHoldoff = true
+                    return true
+                }
+                LiveEnd.Unavailable -> {
+                    liveUnsupported = true
+                    return false
+                }
+                LiveEnd.RouteMissing -> {
+                    liveRouteMissing = true
+                    return false
+                }
+                LiveEnd.Dropped -> {
+                    resume = true
+                    failures++
+                }
+                is LiveEnd.Limited -> {
+                    delay(result.end.retryAfterMs)
+                    continue
+                }
+            }
+            delay(liveBackoffMs(failures))
+        }
+        return false
+    }
+
+    /**
+     * One SSE connection: applies each frame to [ChatState.pcLive] for as long as this stream is still
+     * the live one. Returns how it ended; null when the guards tripped mid-stream (the loop's own
+     * while-check then decides).
+     */
+    private suspend fun runLive(
+        t: HermesTarget,
+        session: String,
+        api: LiveApi,
+        stream: Int,
+        lastEventId: String?,
+    ): LiveAttempt? {
+        var end: LiveEnd? = null
+        var lastSeen = lastEventId
+        var sawEvents = false
+        var stale = false
+        try {
+            api.events(session, lastEventId)
+                .transformWhile { frame ->
+                    if (sessionId != session || target != t || _state.value.run != null) {
+                        stale = true
+                        false
+                    } else {
+                        emit(frame)
+                        when (frame.event) {
+                            LiveEvent.Idle -> { end = LiveEnd.Idle; false }
+                            is LiveEvent.Unavailable -> { end = LiveEnd.Unavailable; false }
+                            else -> true
+                        }
+                    }
+                }
+                .collect { frame ->
+                    when (frame.event) {
+                        LiveEvent.Reset -> {
+                            // The bridge keeps relaying after a reset: forget the id, reload once, read on.
+                            lastSeen = null
+                            chatScope.launch { loadHistory(t, session) }
+                        }
+                        is LiveEvent.Snapshot, LiveEvent.Idle, is LiveEvent.Unavailable -> Unit
+                        else -> if (frame.id != null) sawEvents = true
+                    }
+                    if (frame.event != LiveEvent.Reset) frame.id?.let { lastSeen = it }
+                    onLiveEvent(t, session, stream, frame.event)
+                }
+            // A clean end without a terminal event is a dropped connection.
+            if (end == null && !stale) end = LiveEnd.Dropped
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: LiveStreamException) {
+            end = when (e.error) {
+                LiveError.Unsupported -> LiveEnd.RouteMissing
+                is LiveError.Limited -> LiveEnd.Limited(e.error.retryAfterMs)
+                is LiveError.Failed -> LiveEnd.Dropped
+            }
+        }
+        if (stale) return null
+        return LiveAttempt(end ?: LiveEnd.Dropped, lastSeen, sawEvents)
+    }
+
+    /** Applies one live event to [ChatState.pcLive]; a stale stream (chat or PC switched, own run, banner off) touches nothing. */
+    private fun onLiveEvent(t: HermesTarget, session: String, stream: Int, event: LiveEvent) {
+        if (sessionId != session || target != t) return
+        val at = now()
+        _state.update { s ->
+            if (s.run != null || !s.busyOnPc) return@update s
+            val live = s.pcLive?.takeIf { it.stream == stream }
+            // A card appears with a running snapshot or the first message / tool event.
+            val opens = when (event) {
+                is LiveEvent.Snapshot -> event.running
+                is LiveEvent.MessageStart, is LiveEvent.MessageDelta, is LiveEvent.MessageComplete,
+                is LiveEvent.ToolStart, is LiveEvent.ToolComplete -> true
+                else -> false
+            }
+            val current = live ?: PcLive(stream = stream, progress = RunProgress(receivedAt = at)).takeIf { opens }
+            val next = when (event) {
+                is LiveEvent.Snapshot -> current?.copy(turnStartedAtMs = event.turnStartedAtMs ?: current.turnStartedAtMs)
+                is LiveEvent.MessageStart -> current?.copy(openId = null)
+                is LiveEvent.MessageDelta -> current?.let { l ->
+                    if (l.openId != null) {
+                        l.copy(
+                            segments = l.segments.map { if (it.id == l.openId) it.copy(text = it.text + event.text) else it },
+                            progress = l.progress.writing(),
+                        )
+                    } else {
+                        val message = ChatMessage(nextId++, MessageKind.Assistant, event.text, atMillis = System.currentTimeMillis())
+                        l.copy(segments = l.segments + message, openId = message.id, progress = l.progress.writing())
+                    }
+                }
+                is LiveEvent.MessageComplete -> current?.let { l ->
+                    val open = l.openId
+                    when {
+                        open != null -> l.copy(
+                            segments = l.segments.map { if (it.id == open && event.text != null) it.copy(text = event.text) else it },
+                            openId = null,
+                        )
+                        event.text != null -> l.copy(
+                            segments = l.segments + ChatMessage(nextId++, MessageKind.Assistant, event.text, atMillis = System.currentTimeMillis()),
+                        )
+                        else -> l.copy(openId = null)
+                    }
+                }
+                is LiveEvent.ToolStart -> current?.copy(openId = null, progress = current.progress.toolStarted(event.name, null, at))
+                is LiveEvent.ToolComplete -> current?.copy(progress = current.progress.toolCompleted(event.name, null, false, event.summary, at))
+                is LiveEvent.StatusUpdate -> live?.copy(statusText = event.text)
+                is LiveEvent.Reset -> null
+                is LiveEvent.Idle, is LiveEvent.Unavailable -> live
+            }
+            if (event is LiveEvent.Reset) return@update if (live == null) s else s.copy(pcLive = null).display()
+            if (next == null || next == live) s else s.copy(pcLive = next.copy(progress = next.progress.alive(at))).display()
+        }
+    }
+
+    /** 1 s, 2 s, 4 s, ... capped at 30 s (docs/bridge-protocol.md "Watching a chat live"). */
+    private fun liveBackoffMs(failures: Int): Long = minOf(1000L shl (failures - 1).coerceIn(0, 5), 30_000L)
 
     /**
      * POST /api/sessions/{id}/fork. Runs in the chat's own scope, so leaving the screen does not cancel it and the
@@ -776,7 +1133,7 @@ class ChatViewModel(
         chatScope.launch { readSessionId()?.let { loadHistory(t, it) } }
     }
 
-    private suspend fun loadHistory(t: HermesTarget, id: String): Boolean {
+    private suspend fun loadHistory(t: HermesTarget, id: String, dropLive: Boolean = false): Boolean {
         val sequence = ++historySequence
         val result = sessions.messages(t, id)
         // A newer applied load already settled history; a session reset leaves nothing to send against.
@@ -808,7 +1165,7 @@ class ChatViewModel(
         }
         resolvePending(sequence)
         _state.update {
-            it.copy(historyFailure = null).display()
+            it.copy(historyFailure = null, pcLive = if (dropLive) null else it.pcLive).display()
         }
         resolveMissingRunAfterHistory()
         return true
@@ -1344,6 +1701,8 @@ class ChatViewModel(
             draftSaveJob?.cancel()
             typedDraft = null
         }
+        // This phone's own run owns the screen now: the PC mirror closes and never answers for it.
+        stopLive()
         _state.update {
             it.copy(draft = if (clearDraft) "" else it.draft, terminal = null, terminalFailure = null, finishedRunId = null, run = ActiveRun(null, now(), StatusLabel.Starting), background = BackgroundTasks(), remoteProcesses = null).display()
         }
@@ -1725,6 +2084,8 @@ class ChatViewModel(
         const val DRAFT_SAVE_DELAY_MS = 500L
         /** Pause between two asks of the bridge about background processes. */
         const val PROCESS_POLL_MS = 15_000L
+        /** Pause between two asks of the bridge about chats replying elsewhere. */
+        const val BUSY_POLL_MS = 5_000L
         /** Markers for Info messages; the screen maps them to string resources. */
         const val INFO_STOPPED = "stopped"
         const val INFO_REPLAY_TRUNCATED = "replay_truncated"

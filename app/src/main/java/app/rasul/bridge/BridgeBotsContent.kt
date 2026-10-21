@@ -35,11 +35,12 @@ fun LazyListScope.bridgeBotItems(
         item(key = "group:" + group.id) {
             androidx.compose.foundation.layout.Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 16.dp)) {
                 Text(group.name, style = RasulType.rowTitle, color = Rasul.colors.ink)
-                SecondaryButton(stringResource(R.string.create_on_bridge, group.name), { onCreate(group.id) }, modifier = Modifier.fillMaxWidth(), enabled = group.error != HermesError.DeviceRevoked && group.error != HermesError.DeviceKeyRepair)
+                SecondaryButton(stringResource(R.string.create_on_bridge, group.name), { onCreate(group.id) }, modifier = Modifier.fillMaxWidth(), enabled = !group.newerHost && group.error != HermesError.DeviceRevoked && group.error != HermesError.DeviceKeyRepair)
             }
         }
         item(key = "status:" + group.id) {
             when {
+                group.newerHost -> Text(stringResource(R.string.pair_newer_host), color = Rasul.colors.danger, style = RasulType.body, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
                 group.error != null -> Text(group.error.text(), color = Rasul.colors.danger, style = RasulType.body, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
                 group.loading -> Text(stringResource(R.string.bridge_loading), color = Rasul.colors.muted, modifier = Modifier.padding(20.dp))
                 group.profiles.isEmpty() -> Text(stringResource(R.string.bridge_empty), color = Rasul.colors.muted, modifier = Modifier.padding(20.dp))
@@ -79,7 +80,7 @@ fun LazyListScope.bridgeBotItems(
 }
 
 private fun sampleBridge(error: HermesError? = null, ready: Boolean = true) = BridgeBotsState(listOf(
-    BridgeGroup("sample", "Bridge", listOf(BridgeProfile("default", "default", "default", ready, true)), false, error),
+    BridgeGroup("sample", "Studio PC", listOf(BridgeProfile("default", "default", "default", ready, true)), false, error),
 ))
 
 @Composable private fun BridgePreview(error: HermesError? = null, ready: Boolean = true) = RasulTheme(false) {

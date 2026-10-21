@@ -81,7 +81,7 @@ class LogsUiTest {
 
     @Test fun missingLogHasItsOwnMessageAndRetry() {
         show(LogsState(error = DesktopError.LogsNotFound))
-        compose.onNodeWithText("This log does not exist on your PC yet. It appears once Hermes writes to it.").assertExists()
+        compose.onNodeWithText("This log does not exist on your PC yet. It appears once Rasul writes to it.").assertExists()
         compose.onNodeWithText("Retry").performClick()
         assertEquals(1, retries)
     }
@@ -93,7 +93,7 @@ class LogsUiTest {
 
     @Test fun directConnectionShowsOnlyTheBridgeNotice() {
         show(LogsState(direct = true))
-        compose.onNodeWithText("Hermes logs need Rasul Bridge on the PC.").assertExists()
+        compose.onNodeWithText("Logs need Rasul on your PC.").assertExists()
         compose.onAllNodesWithText("Gateway").assertCountEquals(0)
     }
 }

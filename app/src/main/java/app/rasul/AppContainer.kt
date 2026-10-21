@@ -54,7 +54,7 @@ class AppContainer(
     /** Files the agent sends (rasul-file:// links): downloads into cacheDir/received, one source per saved bridge. */
     val fileDownloads = app.rasul.files.FileDownloads(
         java.io.File(context.cacheDir, "received"), appScope,
-        { bridgeId -> bridges.get(bridgeId)?.let { app.rasul.files.BridgeFileSource(bridgeClients.client(it).client) } },
+        { bridgeId -> bridges.get(bridgeId)?.takeIf { it.protocol == 1 }?.let { app.rasul.files.BridgeFileSource(bridgeClients.client(it).client) } },
     )
     val activePc = ActivePcHolder(connections, appScope, bridgeBots)
     val transcriptSources = app.rasul.sessions.TranscriptSources()

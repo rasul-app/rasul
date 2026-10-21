@@ -126,15 +126,18 @@ private fun rememberNow(clock: () -> Long): Long {
 /**
  * The live card of a running task: what it is doing now, how long it ran, how many steps are done.
  * Built only from [ActiveRun.progress]. After the first reply text it shrinks to one line.
+ * A mirrored PC run passes [onStop] = null (nothing to stop on the phone) and [statusLine] =
+ * the backend's own status text, which then stands in for the phase-derived headline.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun RunProgressCard(
     run: ActiveRun,
-    onStop: () -> Unit,
+    onStop: (() -> Unit)?,
     onReconnect: () -> Unit,
     onRefresh: () -> Unit,
     onReview: (() -> Unit)?,
+    statusLine: String? = null,
     clock: () -> Long = System::currentTimeMillis,
 ) {
     val colors = Rasul.colors
@@ -146,7 +149,7 @@ internal fun RunProgressCard(
     val unavailable = run.status == StatusLabel.LiveUpdatesUnavailable
     val collapsed = phase == RunPhase.Writing && !run.stopRequested && !lost && !unavailable
     val waiting = phase == RunPhase.WaitingApproval && !run.stopRequested && !lost
-    val headline = headlineText(run)
+    val headline = statusLine ?: headlineText(run)
     val headlineColor = when {
         waiting -> colors.warn
         lost -> colors.muted
@@ -209,7 +212,7 @@ internal fun RunProgressCard(
                             )
                         }
                     }
-                    StopButton(run, onStop)
+                    if (onStop != null) StopButton(run, onStop)
                 }
             } else {
                 Row(
@@ -285,13 +288,13 @@ internal fun RunProgressCard(
                 StepsToggle(showSteps) { showSteps = !showSteps }
             }
             if (canList && showSteps) StepList(progress.steps, now)
-            if (!collapsed) {
+            if (!collapsed && (onStop != null || run.status == StatusLabel.LiveUpdatesUnavailable || onReview != null)) {
                 Row(
                     Modifier.fillMaxWidth().padding(top = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    StopButton(run, onStop)
+                    if (onStop != null) StopButton(run, onStop)
                     if (run.status == StatusLabel.LiveUpdatesUnavailable) {
                         TextButton(onClick = onRefresh) {
                             Text(stringResource(R.string.chat_refresh), style = RasulType.buttonSmall)

@@ -121,6 +121,9 @@ data class ModelCapabilityDto(
 /** Specific failure causes. No generic case on purpose. */
 sealed interface HermesError {
     data object BridgeUnreachable : HermesError
+
+    /** The saved PC speaks a newer protocol than this app can use. */
+    data object NewerHost : HermesError
     data object DeviceRevoked : HermesError
     data object DeviceKeyRepair : HermesError
     data object BridgeTimeout : HermesError

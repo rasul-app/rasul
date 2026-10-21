@@ -2,11 +2,11 @@
 <resources>
     <string name="chan_wa_connect">Set up WhatsApp</string>
     <string name="chan_wa_title">Connect WhatsApp</string>
-    <string name="chan_wa_mode_label">How should Hermes use WhatsApp?</string>
+    <string name="chan_wa_mode_label">How should Rasul use WhatsApp?</string>
     <string name="chan_wa_mode_bot">Bot</string>
-    <string name="chan_wa_mode_bot_help">Hermes answers messages that people send to the linked WhatsApp number.</string>
+    <string name="chan_wa_mode_bot_help">Rasul answers messages that people send to the linked WhatsApp number.</string>
     <string name="chan_wa_mode_self">Self-chat</string>
-    <string name="chan_wa_mode_self_help">You talk to Hermes in your own \"Message yourself\" chat.</string>
+    <string name="chan_wa_mode_self_help">You talk to Rasul in your own \"Message yourself\" chat.</string>
     <string name="chan_wa_numbers_label">Allowed phone numbers (optional)</string>
     <string name="chan_wa_numbers_help">Up to %1$d numbers separated by commas. Digits only, with an optional + at the start.</string>
     <string name="chan_wa_numbers_invalid">Use digits only, with an optional + at the start, like +10000000000. Separate several numbers with commas.</string>
@@ -30,13 +30,13 @@
     <string name="chan_wa_connected_title">WhatsApp is linked</string>
     <string name="chan_wa_connected_account">Account: %1$s</string>
     <string name="chan_wa_connected_last4">Number ending in %1$s</string>
-    <string name="chan_wa_connected_body">Apply saves this connection in Hermes. Hermes may need a restart afterwards.</string>
+    <string name="chan_wa_connected_body">Apply saves this connection in Rasul on your PC. It may need a restart afterwards.</string>
     <string name="chan_wa_apply">Apply</string>
     <string name="chan_wa_done_title">WhatsApp is connected</string>
-    <string name="chan_wa_busy_body">Hermes is busy; apply anyway? Applying restarts Hermes and stops any work in progress.</string>
+    <string name="chan_wa_busy_body">The agent is busy; apply anyway? Applying restarts the agent and stops any work in progress.</string>
     <string name="chan_wa_busy_now">Apply anyway</string>
     <string name="chan_wa_expired">The code expired. Start again.</string>
-    <string name="chan_wa_err_bridge_missing">The WhatsApp connector is missing from Hermes on the computer. Update Hermes, then try again.</string>
+    <string name="chan_wa_err_bridge_missing">The WhatsApp connector is missing from Rasul on the computer. Update Rasul, then try again.</string>
     <string name="chan_wa_err_install_failed">The WhatsApp connector could not be installed on the computer. Check its internet connection, then try again.</string>
     <string name="chan_wa_err_timeout">Installing the WhatsApp connector took too long. Try again.</string>
     <string name="chan_wa_err_logged_out">WhatsApp logged this device out. Start again to link it.</string>
@@ -66,6 +66,6 @@
     <string name="chan_set_p_masked">This looks like a hidden preview, not a real value. Paste the full value.</string>
     <string name="chan_set_too_many">Change at most %1$d settings at a time.</string>
     <string name="chan_set_err_unknown">This channel has no such setting. Refresh the list and try again.</string>
-    <string name="chan_set_err_invalid">Hermes refused one of the values. Check them and try again.</string>
+    <string name="chan_set_err_invalid">Rasul refused one of the values. Check them and try again.</string>
     <string name="chan_set_err_redacted">A value looks like a hidden preview, for example it contains ****. Paste the full value instead.</string>
 </resources>

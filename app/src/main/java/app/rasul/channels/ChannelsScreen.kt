@@ -499,16 +499,16 @@ private fun row(id: String, name: String, description: String, state: String?, e
 
 private val mixed = listOf(
     row("telegram", "Telegram", "Chat with your agent in Telegram.", ChannelState.NOT_CONFIGURED, enabled = false, configured = false),
-    row("discord", "Discord", "Talk to Hermes from a Discord server.", ChannelState.CONNECTED, enabled = true),
-    row("slack", "Slack", "Use Hermes in a Slack workspace.", ChannelState.DISABLED, enabled = false),
-    row("matrix", "Matrix", "Reach Hermes over a Matrix room.", ChannelState.STARTUP_FAILED, enabled = true, error = "Login was refused by the server."),
-    row("signal", "Signal", "Message Hermes on Signal.", ChannelState.GATEWAY_STOPPED, enabled = true),
+    row("discord", "Discord", "Talk to Rasul from a Discord server.", ChannelState.CONNECTED, enabled = true),
+    row("slack", "Slack", "Use Rasul in a Slack workspace.", ChannelState.DISABLED, enabled = false),
+    row("matrix", "Matrix", "Reach Rasul over a Matrix room.", ChannelState.STARTUP_FAILED, enabled = true, error = "Login was refused by the server."),
+    row("signal", "Signal", "Message Rasul on Signal.", ChannelState.GATEWAY_STOPPED, enabled = true),
     row("irc", "IRC", "Join an IRC channel.", "reconnecting", enabled = true),
 )
 
 private val withRestart = listOf(
-    row("discord", "Discord", "Talk to Hermes from a Discord server.", ChannelState.CONNECTED, enabled = true),
-    row("slack", "Slack", "Use Hermes in a Slack workspace.", ChannelState.PENDING_RESTART, enabled = true),
+    row("discord", "Discord", "Talk to Rasul from a Discord server.", ChannelState.CONNECTED, enabled = true),
+    row("slack", "Slack", "Use Rasul in a Slack workspace.", ChannelState.PENDING_RESTART, enabled = true),
 )
 
 private val previewActions = ChannelsActions()
@@ -555,8 +555,8 @@ private fun ChannelsBusyAr() = RasulTheme(false) { BusyPreview() }
 private fun SetupPreview(setup: TelegramSetup) =
     ChannelsContent(ChannelsState(channels = mixed, setup = setup), "My PC", previewActions)
 
-private val setupWaiting = TelegramSetup.Waiting("pair_abcdef123456", "https://t.me/hermes_helper_bot?start=abc", "hermes_helper_bot", null)
-private val setupReady = TelegramSetup.Ready("pair_abcdef123456", "hermes_helper_bot", "123456789, 987654321")
+private val setupWaiting = TelegramSetup.Waiting("pair_abcdef123456", "https://t.me/rasul_helper_bot?start=abc", "rasul_helper_bot", null)
+private val setupReady = TelegramSetup.Ready("pair_abcdef123456", "rasul_helper_bot", "123456789, 987654321")
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 640, name = "TelegramSetupWaiting")
 @Composable

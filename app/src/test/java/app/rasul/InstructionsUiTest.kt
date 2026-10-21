@@ -22,7 +22,7 @@ class InstructionsUiTest {
     )
     @Test fun directBotExplainsBridgeRequirementWithoutAnEditor() {
         compose.setContent { RasulTheme(false) { InstructionsContent(InstructionsState(direct = true, loading = false), "Sample") } }
-        compose.onNodeWithText("Editing instructions needs Rasul Bridge on the PC. Connect this bot through a paired bridge to edit them here.").assertExists()
+        compose.onNodeWithText("Editing instructions needs Rasul on your PC. Connect this bot through a paired PC to edit them here.").assertExists()
         compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
         compose.onNodeWithText("Save").assertDoesNotExist()
     }

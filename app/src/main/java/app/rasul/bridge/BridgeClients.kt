@@ -17,7 +17,9 @@ class BridgeClients(
 ) {
     private val mutex = Mutex()
     private val clients = mutableMapOf<String, BridgeTransport>()
+    /** Every protocol-1 route builds its transport here, so a protocol-2 PC can never be sent a /v1 request. */
     suspend fun client(bridge: SavedBridge): BridgeTransport = mutex.withLock {
+        if (bridge.protocol != 1) throw NewerHostException()
         clients.getOrPut(bridge.bridgeId) {
             val urls = listOfNotNull(bridge.lastWorkingUrl).plus(bridge.urls).distinct()
             create(bridge, urls) { url -> scope.launch {
@@ -36,6 +38,9 @@ class BridgeClients(
         }
     }
 }
+
+/** The saved PC speaks a newer protocol than the routes behind [BridgeClients.client]. */
+class NewerHostException : java.io.IOException()
 
 fun deleteDeviceKey(alias: String) {
     KeyStore.getInstance("AndroidKeyStore").apply { load(null); deleteEntry(alias) }

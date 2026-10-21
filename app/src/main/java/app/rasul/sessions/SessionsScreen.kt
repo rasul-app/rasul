@@ -24,11 +24,15 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Alignment
@@ -43,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import app.rasul.R
 import app.rasul.data.ActiveTarget
+import app.rasul.data.BusyWhere
 import app.rasul.data.PinStore
 import app.rasul.data.pinnedFirst
 import androidx.compose.foundation.layout.size
@@ -106,7 +111,19 @@ fun SessionsScreen(
     val deleteError by vm.deleteError.collectAsState()
     val pinned by vm.pinned.collectAsState()
     val draftLines by vm.draftLines.collectAsState()
+    val busyChats by vm.busyChats.collectAsState()
     val pinLimit by vm.pinLimit.collectAsState()
+    // The list refreshes itself every few seconds only while this screen is visible.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle, vm) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) vm.onVisible()
+            if (event == Lifecycle.Event.ON_STOP) vm.onHidden()
+        }
+        lifecycle.addObserver(observer)
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) vm.onVisible()
+        onDispose { lifecycle.removeObserver(observer); vm.onHidden() }
+    }
     var rename by remember(picker.target) { mutableStateOf<PendingSession?>(null) }
     var confirmDelete by remember(picker.target) { mutableStateOf<PendingSession?>(null) }
     Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
@@ -127,6 +144,7 @@ fun SessionsScreen(
                 onDelete = { session -> source?.let { confirmDelete = PendingSession(it, session) } },
                 pinned = pinned,
                 draftLines = draftLines,
+                busyChats = busyChats,
                 onTogglePin = { session -> source?.let { vm.togglePin(it, session) } },
             )
         }
@@ -179,6 +197,7 @@ internal fun SessionList(
     onDelete: (SessionDto) -> Unit = {},
     pinned: List<String> = emptyList(),
     draftLines: Map<String, String> = emptyMap(),
+    busyChats: Map<String, BusyWhere> = emptyMap(),
     onTogglePin: (SessionDto) -> Unit = {},
 ) {
     var filter by remember { mutableStateOf(SessionFilter.All) }
@@ -237,14 +256,28 @@ internal fun SessionList(
                             Box(Modifier.weight(1f, fill = false)) { RowSub(draft, maxLines = 1) }
                         }
                     } else s.preview?.takeIf { it.isNotBlank() }?.let { RowSub(it, maxLines = 1) }
-                    if (s.isCronRun) {
-                        Text(
-                            stringResource(R.string.session_job_run),
-                            modifier = Modifier.padding(top = 3.dp).background(Rasul.colors.selected, RasulShapes.filter)
-                                .padding(horizontal = 8.dp, vertical = 3.dp),
-                            color = Rasul.colors.accent,
-                            style = RasulType.chip,
-                        )
+                    val busyWhere = busyChats[s.id]
+                    if (busyWhere != null || s.isCronRun) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (busyWhere != null) {
+                                Text(
+                                    stringResource(if (busyWhere == BusyWhere.Desktop) R.string.chat_busy_pc else R.string.chat_busy_now),
+                                    modifier = Modifier.padding(top = 3.dp).background(Rasul.colors.selected, RasulShapes.filter)
+                                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                                    color = Rasul.colors.accent,
+                                    style = RasulType.chip,
+                                )
+                            }
+                            if (s.isCronRun) {
+                                Text(
+                                    stringResource(R.string.session_job_run),
+                                    modifier = Modifier.padding(top = 3.dp).background(Rasul.colors.selected, RasulShapes.filter)
+                                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                                    color = Rasul.colors.accent,
+                                    style = RasulType.chip,
+                                )
+                            }
+                        }
                     }
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -543,6 +576,29 @@ private fun SessionsEn() = SessionsPreviewBody()
 @Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
 @Composable
 private fun SessionsAr() = SessionsPreviewBody()
+
+@Composable
+private fun SessionsBusyPreviewBody() = RasulTheme(false) {
+    Column(Modifier.fillMaxSize().background(Rasul.colors.bg)) {
+        ScreenHeader(stringResource(R.string.tab_sessions), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 0.dp), actionHorizontalPadding = 7.dp, actionInset = 4.dp, rightInset = 9.dp) {
+            PrimaryScreenActions({}, {}, {})
+            GlassText(stringResource(R.string.refresh), {})
+        }
+        SessionPcSwitcherHost(PcPicker(samplePcs, "a"), {})
+        SessionList(
+            sampleSessions, "a", 1_760_000_000_000L, onOpen = {},
+            busyChats = mapOf("1" to BusyWhere.Desktop, "2" to BusyWhere.App),
+        )
+    }
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700)
+@Composable
+private fun SessionsBusyEn() = SessionsBusyPreviewBody()
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 700, locale = "ar")
+@Composable
+private fun SessionsBusyAr() = SessionsBusyPreviewBody()
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 700)
 @Composable

@@ -226,11 +226,13 @@ class ActivePcHolder(private val store: ConnectionStore, private val scope: Coro
                             PcBridgeNotice.NoReadyBots(selectedGroup.name)
                         effectiveSelection == null && !directActive && bots.loaded && bots.groups.none { it.loading } -> {
                             val failed = bots.groups.firstOrNull { it.error != null }
-                            val empty = bots.groups.firstOrNull { it.error == null && it.profiles.none { profile -> profile.ready } }
+                            val newer = bots.groups.firstOrNull { it.newerHost }
+                            val empty = bots.groups.firstOrNull { it.error == null && !it.newerHost && it.profiles.none { profile -> profile.ready } }
                             when {
                                 failed != null &&
                                     (failed.error == HermesError.BridgeUnreachable || failed.error == HermesError.BridgeTimeout) -> PcBridgeNotice.Unreachable(failed.name)
                                 failed != null -> PcBridgeNotice.Failed(failed.error!!)
+                                newer != null -> PcBridgeNotice.Failed(HermesError.NewerHost)
                                 empty != null -> PcBridgeNotice.NoReadyBots(empty.name)
                                 else -> null
                             }

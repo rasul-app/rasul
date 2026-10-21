@@ -73,6 +73,7 @@ fun failureText(context: Context, failure: ChatFailure): String {
     return when (failure) {
         is ChatFailure.Api -> when (val error = failure.error) {
             HermesError.BridgeUnreachable -> text(R.string.bridge_unreachable)
+            HermesError.NewerHost -> text(R.string.pair_newer_host)
             HermesError.DeviceRevoked -> text(R.string.bridge_revoked)
             HermesError.DeviceKeyRepair -> text(R.string.bridge_key_repair)
             HermesError.BridgeTimeout -> text(R.string.bridge_timeout)

@@ -157,7 +157,7 @@ class SkillsToolsUiTest {
 
     @Test fun directBotsShowOneBridgeLineAndNoSwitches() {
         show(vm(null))
-        compose.onNodeWithText("Skill switches, installs and MCP servers need Rasul Bridge on the PC.").assertExists()
+        compose.onNodeWithText("Skill switches, installs and MCP servers need Rasul on your PC.").assertExists()
         compose.onAllNodes(isToggleable()).assertCountEquals(0)
         compose.onNodeWithText("Add skill").assertDoesNotExist()
     }
@@ -165,7 +165,7 @@ class SkillsToolsUiTest {
     @Test fun desktopUnavailableShowsTheApiListReadOnlyUnderTheNotice() {
         val fake = FakeDesktop().apply { skillsError = DesktopError.Unavailable }
         show(vm(fake))
-        compose.onNodeWithText("Open Hermes on your PC to see this").assertExists()
+        compose.onNodeWithText("Open the Rasul desktop app on your PC to see this").assertExists()
         compose.onNodeWithText("legacy").assertExists()
         compose.onAllNodes(isToggleable()).assertCountEquals(0)
     }
@@ -260,7 +260,7 @@ class SkillsToolsUiTest {
             mcpError = DesktopError.NotFound
         }))
         // The skills notice and the MCP section both point at the bridge update, not a job/session 404.
-        compose.onAllNodesWithText("Update Rasul Bridge on your PC to use this.").assertCountEquals(2)
+        compose.onAllNodesWithText("Update Rasul on your PC to use this.").assertCountEquals(2)
         compose.onAllNodesWithText("The server does not have that job or session any more", substring = true).assertCountEquals(0)
         // The read-only v1 list still shows underneath.
         compose.onNodeWithText("legacy").assertExists()
@@ -271,7 +271,7 @@ class SkillsToolsUiTest {
             skillsError = DesktopError.NotFound
             mcpError = DesktopError.NotFound
         }))
-        compose.onAllNodesWithText("حدّث Rasul Bridge على حاسوبك لاستخدام هذه الميزة.").assertCountEquals(2)
+        compose.onAllNodesWithText("حدّث رسول على حاسوبك لاستخدام هذه الميزة.").assertCountEquals(2)
     }
 
     @Test fun theAddSkillSheetSaysToUpdateAnOlderBridgeToo() {
@@ -282,7 +282,7 @@ class SkillsToolsUiTest {
         compose.onNodeWithText("Add skill").performClick()
         sched.advanceUntilIdle(); compose.waitForIdle()
         // The skills notice and the sheet both point at the bridge update, not a job/session 404.
-        compose.onAllNodesWithText("Update Rasul Bridge on your PC to use this.").assertCountEquals(2)
+        compose.onAllNodesWithText("Update Rasul on your PC to use this.").assertCountEquals(2)
         compose.onAllNodesWithText("The server does not have that job or session any more", substring = true).assertCountEquals(0)
     }
 }

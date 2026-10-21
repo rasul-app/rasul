@@ -175,6 +175,6 @@ internal fun decodeQr(image: ImageProxy): String? {
 @UiPreview(widthDp = 390, heightDp = 700, locale = "ar")
 @Composable private fun ScanningAr() = RasulTheme(false) { ScanContent(true, false, PairingState.Scanning) }
 @UiPreview(widthDp = 390, heightDp = 700)
-@Composable private fun CodeConfirmEn() = RasulTheme(false) { ScanContent(true, false, PairingState.Sending("Bridge", "123456")) }
+@Composable private fun CodeConfirmEn() = RasulTheme(false) { ScanContent(true, false, PairingState.Sending("Studio PC", "123456")) }
 @UiPreview(widthDp = 390, heightDp = 700, locale = "ar")
-@Composable private fun CodeConfirmAr() = RasulTheme(false) { ScanContent(true, false, PairingState.Sending("Bridge", "123456")) }
+@Composable private fun CodeConfirmAr() = RasulTheme(false) { ScanContent(true, false, PairingState.Sending("Studio PC", "123456")) }

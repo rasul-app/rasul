@@ -525,12 +525,42 @@ internal fun ChatScreenContent(
                             onReview = if (approval != null && reviewHidden) ({ hiddenFor = null }) else null,
                         )
                     }
+                    // The mirrored PC reply: the same card, with no Stop (nothing here may steer the PC run).
+                    state.pcLive?.let { pc ->
+                        RunProgressCard(
+                            run = ActiveRun(
+                                runId = null,
+                                startedAtMs = pc.startedAtMs,
+                                status = StatusLabel.Thinking,
+                                progress = pc.progress,
+                            ),
+                            onStop = null,
+                            onReconnect = {},
+                            onRefresh = {},
+                            onReview = null,
+                            statusLine = pc.statusText,
+                        )
+                    }
                     if (state.run == null) {
                         state.summary?.takeIf { it.runId == state.finishedRunId }?.let { RunSummaryLine(it) }
                     }
                 }
             }
             if (state.load == ChatLoad.Ready) {
+                if (state.busyOnPc && state.run == null) {
+                    Row(
+                        Modifier.fillMaxWidth().background(colors.selected)
+                            .padding(horizontal = 20.dp, vertical = 8.dp)
+                            .testTag("chat_busy_pc"),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            stringResource(R.string.chat_busy_pc_banner),
+                            color = colors.warnText,
+                            style = RasulType.bodySmall,
+                        )
+                    }
+                }
                 Composer(
                     draft = state.draft,
                     onDraft = onDraft,
@@ -1510,6 +1540,7 @@ internal fun statusText(status: StatusLabel): String = when (status) {
 internal fun failureText(failure: ChatFailure): String = when (failure) {
     is ChatFailure.Api -> when (val error = failure.error) {
         HermesError.BridgeUnreachable -> stringResource(R.string.bridge_unreachable)
+        HermesError.NewerHost -> stringResource(R.string.pair_newer_host)
         HermesError.DeviceRevoked -> stringResource(R.string.bridge_revoked)
         HermesError.DeviceKeyRepair -> stringResource(R.string.bridge_key_repair)
         HermesError.BridgeTimeout -> stringResource(R.string.bridge_timeout)
@@ -1602,6 +1633,7 @@ private enum class ChatPreviewKind {
     Lost,
     HistoryError,
     Fork,
+    BusyPc,
 }
 
 @Composable
@@ -1632,6 +1664,7 @@ private fun ChatPreviewBody(
         ChatPreviewKind.Lost -> preview(StatusLabel.Lost, RunPhase.Thinking, steps.take(1))
         ChatPreviewKind.HistoryError -> null
         ChatPreviewKind.Fork -> null
+        ChatPreviewKind.BusyPc -> null
     }
     val example = RunModelSelection("example", "Example model")
     val approvals = if (kind == ChatPreviewKind.Approval || kind == ChatPreviewKind.ApprovalLong) {
@@ -1648,7 +1681,8 @@ private fun ChatPreviewBody(
     ChatScreenContent(
         state = ChatState(
             load = ChatLoad.Ready,
-            sessionId = if (kind == ChatPreviewKind.Idle || kind == ChatPreviewKind.Fork) "sample-session" else null,
+            sessionId = if (kind == ChatPreviewKind.Idle || kind == ChatPreviewKind.Fork || kind == ChatPreviewKind.BusyPc) "sample-session" else null,
+            busyOnPc = kind == ChatPreviewKind.BusyPc,
             messages = messages,
             supportsFork = kind == ChatPreviewKind.Fork,
             forkTitle = if (kind == ChatPreviewKind.Fork) "Example fork" else null,
@@ -1755,3 +1789,11 @@ private fun ChatForkEn() = ChatPreviewBody(ChatPreviewKind.Fork)
 @Preview(showBackground = true, widthDp = 390, heightDp = 844, locale = "ar", name = "Chat fork AR")
 @Composable
 private fun ChatForkAr() = ChatPreviewBody(ChatPreviewKind.Fork)
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 844, name = "Chat busy PC EN")
+@Composable
+private fun ChatBusyPcEn() = ChatPreviewBody(ChatPreviewKind.BusyPc)
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 844, locale = "ar", name = "Chat busy PC AR")
+@Composable
+private fun ChatBusyPcAr() = ChatPreviewBody(ChatPreviewKind.BusyPc)

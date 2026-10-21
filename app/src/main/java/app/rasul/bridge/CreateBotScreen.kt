@@ -147,7 +147,7 @@ fun CreateBotContent(
 private val previewTemplates = listOf(ProfileTemplate("blank", "Blank"))
 @Composable private fun CreatePreview(phase: CreateBotPhase = CreateBotPhase.Editing, name: String = "", error: CreateBotError? = null) = RasulTheme(false) {
     CompositionLocalProvider(LocalInspectionMode provides true) {
-        CreateBotContent(CreateBotState(name, previewTemplates, "blank", false, phase, error, hasAttempt = phase != CreateBotPhase.Editing), "Bridge")
+        CreateBotContent(CreateBotState(name, previewTemplates, "blank", false, phase, error, hasAttempt = phase != CreateBotPhase.Editing), "Studio PC")
     }
 }
 @Preview(widthDp = 390, heightDp = 700)

@@ -139,7 +139,7 @@ class ChatForkModelUiTest {
 
     @Test fun missingForkRouteSaysUpdateHermes() {
         show(ready(failure = ChatFailure.ForkFailed(HermesError.NotFound)))
-        compose.onNodeWithText("This Hermes version doesn't support this action. Update Hermes and try again.").assertExists()
+        compose.onNodeWithText("The agent doesn't support this action. Update it and try again.").assertExists()
     }
 
     @Test fun aPickedModelShowsItsPlainName() {

@@ -20,6 +20,8 @@ class PairingInvitation(
     val invitation: String,
     val secret: String,
     val expiresAt: Long,
+    /** 1 for `rasul-pair:1:` codes, 2 for `rasul-pair:2:` codes; [bridgeId] holds the host id for 2. */
+    val protocol: Int = 1,
 )
 
 enum class PairingQrError(val message: Int) {
@@ -27,7 +29,15 @@ enum class PairingQrError(val message: Int) {
     Expired(R.string.pair_qr_expired),
     Version(R.string.pair_qr_version),
     MissingPin(R.string.pair_qr_missing_pin),
-    InsecureUrl(R.string.pair_qr_url),
+    InsecureUrl(R.string.pair_qr_url);
+
+    /** The text for a code of [protocol]; protocol 2 points at the Rasul window on the PC instead of a command. */
+    fun messageFor(protocol: Int): Int = if (protocol != 2) message else when (this) {
+        Invalid -> R.string.pair_v2_qr_invalid
+        Expired -> R.string.pair_v2_qr_expired
+        MissingPin -> R.string.pair_v2_qr_missing_pin
+        Version, InsecureUrl -> message
+    }
 }
 
 sealed interface PairingQrResult {
@@ -35,13 +45,21 @@ sealed interface PairingQrResult {
     data class Invalid(val error: PairingQrError) : PairingQrResult
 }
 
+/** How far the phone clock may differ from the host clock before a code is refused up front. */
+internal const val CLOCK_SKEW_SECONDS = 600L
+
 object PairingQrParser {
     fun parse(raw: String, nowSeconds: Long = System.currentTimeMillis() / 1000): PairingQrResult {
         fun invalid(error: PairingQrError = PairingQrError.Invalid) = PairingQrResult.Invalid(error)
         if (raw.length > 16_384 || !raw.startsWith("rasul-pair:")) return invalid()
-        if (!raw.startsWith("rasul-pair:1:")) return invalid(PairingQrError.Version)
+        val protocol = when {
+            raw.startsWith("rasul-pair:1:") -> 1
+            raw.startsWith("rasul-pair:2:") -> 2
+            else -> return invalid(PairingQrError.Version)
+        }
+        val idKey = if (protocol == 1) "bridge_id" else "host_id"
         return try {
-            val payload = decode(raw.removePrefix("rasul-pair:1:"))
+            val payload = decode(raw.removePrefix("rasul-pair:$protocol:"))
             val utf8 = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(payload)).toString()
             val strings = mutableMapOf<String, String>()
@@ -69,7 +87,7 @@ object PairingQrParser {
                             }
                             reader.endArray()
                         }
-                        "bridge_id", "name", "pin", "inv", "sec" -> {
+                        idKey, "name", "pin", "inv", "sec" -> {
                             require(reader.peek() == JsonToken.STRING)
                             strings[key] = reader.nextString()
                         }
@@ -79,23 +97,24 @@ object PairingQrParser {
                 reader.endObject()
                 require(reader.peek() == JsonToken.END_DOCUMENT)
             }
-            if (numbers["v"] != 1L) return invalid(PairingQrError.Version)
+            if (numbers["v"] != protocol.toLong()) return invalid(PairingQrError.Version)
             if ("pin" !in strings) return invalid(PairingQrError.MissingPin)
-            require(seen == setOf("v", "bridge_id", "name", "urls", "pin", "inv", "sec", "exp"))
+            require(seen == setOf("v", idKey, "name", "urls", "pin", "inv", "sec", "exp"))
             val expires = numbers.getValue("exp")
-            if (expires <= nowSeconds) return invalid(PairingQrError.Expired)
-            require(expires - nowSeconds in 1..120)
+            // The host owns real expiry on its own clock; here only a wildly wrong clock is refused.
+            if (expires < nowSeconds - CLOCK_SKEW_SECONDS) return invalid(PairingQrError.Expired)
+            require(expires <= nowSeconds + CLOCK_SKEW_SECONDS)
             if (urls.isEmpty() || urls.any { !validBridgeUrl(it) }) return invalid(PairingQrError.InsecureUrl)
             require(urls.distinct().size == urls.size)
             val name = strings.getValue("name")
-            val bridgeId = strings.getValue("bridge_id")
+            val bridgeId = strings.getValue(idKey)
             val invitation = strings.getValue("inv")
             require(name.isNotBlank() && name.length <= 128 && name.none { it.isISOControl() })
             require(Regex("[A-Za-z0-9-]{1,128}").matches(bridgeId))
             require(Regex("[a-f0-9]{32}").matches(invitation))
             val pin = decode(strings.getValue("pin")).also { require(it.size == 32) }
             val secret = strings.getValue("sec").also { require(decode(it).size == 32) }
-            PairingQrResult.Valid(PairingInvitation(bridgeId, name, urls.toList(), pin, invitation, secret, expires))
+            PairingQrResult.Valid(PairingInvitation(bridgeId, name, urls.toList(), pin, invitation, secret, expires, protocol))
         } catch (_: Exception) { invalid() }
     }
 

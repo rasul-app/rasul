@@ -2,11 +2,11 @@
 <resources>
     <string name="chan_wa_connect">إعداد واتساب</string>
     <string name="chan_wa_title">ربط واتساب</string>
-    <string name="chan_wa_mode_label">كيف يستخدم Hermes واتساب؟</string>
+    <string name="chan_wa_mode_label">كيف يستخدم رسول واتساب؟</string>
     <string name="chan_wa_mode_bot">بوت</string>
-    <string name="chan_wa_mode_bot_help">يردّ Hermes على الرسائل التي يرسلها الناس إلى رقم واتساب المرتبط.</string>
+    <string name="chan_wa_mode_bot_help">يردّ رسول على الرسائل التي يرسلها الناس إلى رقم واتساب المرتبط.</string>
     <string name="chan_wa_mode_self">محادثة مع النفس</string>
-    <string name="chan_wa_mode_self_help">تتحدث مع Hermes في محادثتك الخاصة «رسالة إلى نفسك».</string>
+    <string name="chan_wa_mode_self_help">تتحدث مع رسول في محادثتك الخاصة «رسالة إلى نفسك».</string>
     <string name="chan_wa_numbers_label">أرقام الهاتف المسموح بها (اختياري)</string>
     <string name="chan_wa_numbers_help">حتى %1$d رقمًا مفصولة بفواصل. أرقام فقط مع علامة + اختيارية في البداية.</string>
     <string name="chan_wa_numbers_invalid">استخدم أرقامًا فقط مع علامة + اختيارية في البداية، مثل ‎+10000000000. افصل بين الأرقام بفواصل.</string>
@@ -30,18 +30,18 @@
     <string name="chan_wa_connected_title">تم ربط واتساب</string>
     <string name="chan_wa_connected_account">الحساب: %1$s</string>
     <string name="chan_wa_connected_last4">الرقم المنتهي بـ %1$s</string>
-    <string name="chan_wa_connected_body">يحفظ التطبيق هذا الربط في Hermes. وقد يحتاج Hermes إلى إعادة تشغيل بعد ذلك.</string>
+    <string name="chan_wa_connected_body">يحفظ زر «تطبيق» هذا الربط في رسول على حاسوبك، وقد يحتاج بعدها إلى إعادة تشغيل.</string>
     <string name="chan_wa_apply">تطبيق</string>
     <string name="chan_wa_done_title">واتساب متصل</string>
-    <string name="chan_wa_busy_body">Hermes مشغول؛ هل تريد التطبيق على أي حال؟ سيعيد التطبيق تشغيل Hermes ويوقف أي عمل جارٍ.</string>
+    <string name="chan_wa_busy_body">الوكيل مشغول؛ هل تريد التطبيق على أي حال؟ سيعيد التطبيق تشغيل الوكيل ويوقف أي عمل جارٍ.</string>
     <string name="chan_wa_busy_now">طبّق على أي حال</string>
     <string name="chan_wa_expired">انتهت صلاحية الرمز. ابدأ من جديد.</string>
-    <string name="chan_wa_err_bridge_missing">موصّل واتساب غير موجود في Hermes على الكمبيوتر. حدّث Hermes ثم حاول مرة أخرى.</string>
-    <string name="chan_wa_err_install_failed">تعذّر تثبيت موصّل واتساب على الكمبيوتر. تحقق من اتصاله بالإنترنت ثم حاول مرة أخرى.</string>
+    <string name="chan_wa_err_bridge_missing">موصّل واتساب غير موجود في رسول على حاسوبك. حدّث رسول على حاسوبك ثم حاول مرة أخرى.</string>
+    <string name="chan_wa_err_install_failed">تعذّر تثبيت موصّل واتساب على الحاسوب. تحقق من اتصاله بالإنترنت ثم حاول مرة أخرى.</string>
     <string name="chan_wa_err_timeout">استغرق تثبيت موصّل واتساب وقتًا طويلًا. حاول مرة أخرى.</string>
     <string name="chan_wa_err_logged_out">سجّل واتساب خروج هذا الجهاز. ابدأ من جديد لربطه.</string>
     <string name="chan_wa_err_failed">فشل إعداد واتساب. ابدأ من جديد.</string>
-    <string name="chan_wa_err_cancelled">أُلغي إعداد واتساب هذا على الكمبيوتر. ابدأ من جديد.</string>
+    <string name="chan_wa_err_cancelled">أُلغي إعداد واتساب هذا على الحاسوب. ابدأ من جديد.</string>
 
     <string name="chan_settings">الإعدادات</string>
     <string name="chan_settings_for">إعدادات %1$s</string>
@@ -66,6 +66,6 @@
     <string name="chan_set_p_masked">تبدو هذه معاينة مخفية وليست قيمة حقيقية. الصق القيمة كاملة.</string>
     <string name="chan_set_too_many">غيّر %1$d إعدادات على الأكثر في المرة الواحدة.</string>
     <string name="chan_set_err_unknown">لا تملك هذه القناة هذا الإعداد. حدّث القائمة وحاول مرة أخرى.</string>
-    <string name="chan_set_err_invalid">رفض Hermes إحدى القيم. تحقق منها وحاول مرة أخرى.</string>
+    <string name="chan_set_err_invalid">رفض رسول إحدى القيم. تحقق منها وحاول مرة أخرى.</string>
     <string name="chan_set_err_redacted">تبدو إحدى القيم معاينة مخفية، فهي تحتوي مثلًا على ****. الصق القيمة كاملة بدلًا من ذلك.</string>
 </resources>

@@ -75,6 +75,14 @@ class RunFollowTest {
         assertEquals(listOf<RunUpdate>(RunUpdate.Lost(HermesError.Unauthorized)), out)
     }
 
+    @Test fun aNewerHostIsNotRetried() = runBlocking {
+        var opens = 0
+        val open: (Long?) -> Flow<RunFrame> = { opens++; flow { throw RunStreamException(HermesError.NewerHost) } }
+        val out = followRun(open, wait = {}).toList()
+        assertEquals(1, opens)
+        assertEquals(listOf<RunUpdate>(RunUpdate.Lost(HermesError.NewerHost)), out)
+    }
+
     @Test fun counterResetsWhenEventsArrive() = runBlocking {
         var opens = 0
         val open: (Long?) -> Flow<RunFrame> = { last ->

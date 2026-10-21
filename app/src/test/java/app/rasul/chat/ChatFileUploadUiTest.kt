@@ -94,7 +94,7 @@ class ChatFileUploadUiTest {
         show(ready(), filesViaBridge = false, onPickAnyFile = { picked++ }, onPickFile = { textPicked++ })
         compose.onNodeWithTag("chat_attach_button").performClick()
         compose.onNodeWithTag("chat_attach_any_file").assertIsNotEnabled().performClick()
-        compose.onNodeWithText("Sending files needs the Rasul Bridge").assertExists()
+        compose.onNodeWithText("Sending files needs Rasul on your PC").assertExists()
         assertEquals(0, picked)
         compose.onNodeWithText("Text file").assertIsEnabled().performClick()
         assertEquals(1, textPicked)
@@ -189,7 +189,7 @@ class ChatFileUploadUiTest {
         )
         show(ready(messages = messages))
         compose.onNodeWithText("huge.iso is larger than 50 MB").assertExists()
-        compose.onNodeWithText("Update the Rasul Bridge on your PC to send files").assertExists()
+        compose.onNodeWithText("Update Rasul on your PC to send files").assertExists()
         compose.onNodeWithText("a.pdf is no longer on your PC. Attach it again").assertExists()
     }
 

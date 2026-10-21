@@ -120,12 +120,12 @@ class ChannelsWhatsappUiTest {
         compose.onNodeWithText("Account: Work phone").assertExists()
         compose.onNodeWithText("Number ending in 0000").assertExists()
         compose.onNodeWithText("Apply").performClick(); settle()
-        compose.onNodeWithText("Hermes is busy; apply anyway? Applying restarts Hermes and stops any work in progress.").assertExists()
+        compose.onNodeWithText("The agent is busy; apply anyway? Applying restarts the agent and stops any work in progress.").assertExists()
         assertEquals(listOf(pairing to false), fake.waApplies)
         compose.onNodeWithText("Apply anyway").performClick(); settle()
         assertEquals(listOf(pairing to false, pairing to true), fake.waApplies)
         compose.onNodeWithText("WhatsApp is connected").assertExists()
-        compose.onNodeWithText("Restart Hermes to apply this.").assertExists()
+        compose.onNodeWithText("Restart the agent on your PC to apply this.").assertExists()
     }
 
     @Test fun anExpiredCodeSaysSoAndOffersStartAgain() {
@@ -148,7 +148,7 @@ class ChannelsWhatsappUiTest {
     }
 
     @Test fun missingBridgeHasItsOwnSentence() =
-        errorShows("whatsapp_bridge_missing", "The WhatsApp connector is missing from Hermes on the computer. Update Hermes, then try again.")
+        errorShows("whatsapp_bridge_missing", "The WhatsApp connector is missing from Rasul on the computer. Update Rasul, then try again.")
 
     @Test fun installFailureHasItsOwnSentence() =
         errorShows("whatsapp_install_failed", "The WhatsApp connector could not be installed on the computer. Check its internet connection, then try again.")
@@ -186,7 +186,7 @@ class ChannelsWhatsappUiTest {
         assertEquals(listOf(Triple("discord", mapOf("HOME_CHANNEL" to "general"), listOf("ALLOWED_USERS"))), fake.saves)
         compose.onNodeWithText("Discord settings saved.").assertExists()
         compose.onNodeWithText("OK").performClick(); settle()
-        compose.onNodeWithText("Restart Hermes to apply").assertExists()
+        compose.onNodeWithText("Restart the agent on your PC to apply").assertExists()
     }
 
     @Test fun aMaskedLookingValueShowsItsLineAndSendsNothing() {

@@ -474,7 +474,7 @@ class BridgeBotsUiTest {
                     bridges = BridgeBotsState(listOf(BridgeGroup("a", "Bridge", listOf(BridgeProfile("default", "default", "default", true, true)), false, HermesError.DeviceRevoked))))
             }
         }
-        compose.onNodeWithText("This device no longer has access. Remove the bridge and pair again.").assertExists()
+        compose.onNodeWithText("This device no longer has access. Remove the PC and pair again.").assertExists()
         compose.onNodeWithText("default").assertHasNoClickAction()
     }
     private fun withTranscriptNavigation(sessionSource: String,

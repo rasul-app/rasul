@@ -50,6 +50,7 @@ private fun Throwable.failures(): List<Throwable> {
 internal fun bridgeError(failure: Throwable): HermesError {
     val causes = failure.failures()
     causes.filterIsInstance<BridgeAccessException>().firstOrNull()?.let { return it.error }
+    if (causes.any { it is NewerHostException }) return HermesError.NewerHost
     if (causes.any { it is InterruptedIOException }) return HermesError.BridgeTimeout
     causes.filterIsInstance<BridgeHandshakeFailure>().firstOrNull()?.let {
         return if (it.cause is SSLException) HermesError.BridgeSecure else HermesError.BridgeLinkDropped

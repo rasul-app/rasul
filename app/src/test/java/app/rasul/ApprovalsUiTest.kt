@@ -178,21 +178,21 @@ class ApprovalsUiTest {
 
     @Test fun directTargetShowsTheBridgeOnlyTextAndNoActions() {
         screen(emptyList(), direct = true)
-        compose.onNodeWithText("Phone approvals need Rasul Bridge on the PC. Connect this bot through a paired bridge to approve requests here.").assertExists()
+        compose.onNodeWithText("Phone approvals need Rasul on your PC. Connect this bot through a paired PC to approve requests here.").assertExists()
         compose.onNodeWithText("Approve once").assertDoesNotExist()
     }
 
     @Test fun unreachableFeedShowsErrorAndRetry() {
         var retried = false
         screen(emptyList(), feedError = ApprovalsError.Unreachable, onReload = { retried = true })
-        compose.onNodeWithText("Cannot reach this bridge. Check that it is online.").assertExists()
+        compose.onNodeWithText("Cannot reach this PC. Check that it is online.").assertExists()
         compose.onNodeWithText("Retry").performClick()
         assertTrue(retried)
     }
 
     @Test fun unsupportedShowsUpdateText() {
         screen(emptyList(), unsupported = true)
-        compose.onNodeWithText("This PC does not offer approvals on the phone. Update the bridge on the computer.").assertExists()
+        compose.onNodeWithText("This PC does not offer approvals on the phone. Update Rasul on the computer.").assertExists()
     }
 
     @Test fun cardErrorShowsTheSpecificContractMessage() {

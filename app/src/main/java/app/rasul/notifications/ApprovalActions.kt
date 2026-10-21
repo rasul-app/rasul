@@ -74,9 +74,9 @@ internal class ApprovalAnswerer(
         if (!inFlight.add(request.requestId)) return
         try {
             ui.sending(request.tag)
-            val api = apiFor(request.bridgeId, request.profileId)
-            if (api == null) { ui.failed(request.tag, ApprovalsError.BridgeRemoved); return }
             try {
+                val api = apiFor(request.bridgeId, request.profileId)
+                if (api == null) { ui.failed(request.tag, ApprovalsError.BridgeRemoved); return }
                 api.answer(request.requestId, request.choice)
                 ui.finished(request.tag)
             } catch (e: CancellationException) { throw e }

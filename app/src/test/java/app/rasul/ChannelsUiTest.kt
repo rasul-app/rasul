@@ -73,18 +73,18 @@ class ChannelsUiTest {
 
     @Test fun anOlderBridgeShowsTheUpdateLineAndRetry() {
         show(FakeChannels().apply { listError = ChannelException(ChannelError.OlderBridge) })
-        compose.onNodeWithText("Update the bridge on the computer to manage channels.").assertExists()
+        compose.onNodeWithText("Update Rasul on the computer to manage channels.").assertExists()
         compose.onNodeWithText("Retry").assertExists()
     }
 
     @Test fun theRestartBannerAsksBeforeStoppingBusyWork() {
         val fake = pending(FakeChannels().apply { busy = true; busyAgents = 2 })
         show(fake)
-        compose.onNodeWithText("Restart Hermes to apply").assertExists()
+        compose.onNodeWithText("Restart the agent on your PC to apply").assertExists()
         compose.onNodeWithText("Restart").performClick()
         settle()
-        compose.onNodeWithText("Hermes is busy").assertExists()
-        compose.onNodeWithText("2 tasks are running. Restarting Hermes stops them.").assertExists()
+        compose.onNodeWithText("The agent on your PC is busy").assertExists()
+        compose.onNodeWithText("2 tasks are running. Restarting the agent stops them.").assertExists()
         assertEquals(listOf(false), fake.restarts)
         compose.onNodeWithText("Restart now").performClick()
         settle()
@@ -98,10 +98,10 @@ class ChannelsUiTest {
         settle()
         compose.onNodeWithText("Wait").performClick()
         settle()
-        compose.onNodeWithText("Waiting for Hermes to be idle…").assertExists()
+        compose.onNodeWithText("Waiting for the agent to be idle…").assertExists()
         compose.onNodeWithText("Cancel").performClick()
         settle()
-        compose.onNodeWithText("Restart Hermes to apply").assertExists()
+        compose.onNodeWithText("Restart the agent on your PC to apply").assertExists()
         compose.onNodeWithText("Restart").assertIsEnabled()
         sched.advanceTimeBy(60_000); sched.runCurrent()
         assertEquals(1, fake.restarts.size)
@@ -126,7 +126,7 @@ class ChannelsUiTest {
         settle()
         assertEquals(listOf("123456789"), fake.applies.single().second)
         compose.onNodeWithText("Telegram is connected").assertExists()
-        compose.onNodeWithText("Restart Hermes to apply this.").assertExists()
+        compose.onNodeWithText("Restart the agent on your PC to apply this.").assertExists()
     }
 
     @Test fun aLinkThatFailsTheCheckIsNeverHandedToTheOpener() {
@@ -175,11 +175,11 @@ class ChannelsUiTest {
         val vm = show(fake)
         compose.onNodeWithText("Restart").performClick()
         settle()
-        compose.onNodeWithText("Hermes is busy").assertExists()
+        compose.onNodeWithText("The agent on your PC is busy").assertExists()
         Espresso.pressBack()
         settle()
-        compose.onNodeWithText("Hermes is busy").assertDoesNotExist()
-        compose.onNodeWithText("Waiting for Hermes to be idle…").assertDoesNotExist()
+        compose.onNodeWithText("The agent on your PC is busy").assertDoesNotExist()
+        compose.onNodeWithText("Waiting for the agent to be idle…").assertDoesNotExist()
         assertEquals(BusyState.None, vm.state.value.busy)
         sched.advanceTimeBy(60_000); sched.runCurrent()
         assertEquals(1, fake.restarts.size)
@@ -192,10 +192,10 @@ class ChannelsUiTest {
         compose.onNodeWithText("Create the bot").performClick(); settle()
         sched.advanceTimeBy(3_000); settle()
         compose.onNodeWithText("Apply").performClick(); settle()
-        compose.onNodeWithText("Restart Hermes to apply this.").assertExists()
+        compose.onNodeWithText("Restart the agent on your PC to apply this.").assertExists()
         compose.onNodeWithText("Restart").performClick(); settle()
         assertEquals(listOf(false), fake.restarts)
-        compose.onNodeWithText("Restart Hermes to apply this.").assertDoesNotExist()
+        compose.onNodeWithText("Restart the agent on your PC to apply this.").assertDoesNotExist()
         compose.onNodeWithText("Restart").assertDoesNotExist()
     }
 }

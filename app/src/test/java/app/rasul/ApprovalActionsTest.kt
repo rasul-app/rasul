@@ -9,6 +9,21 @@ import app.rasul.bridge.ApprovalsApi
 import app.rasul.bridge.ApprovalsError
 import app.rasul.bridge.ApprovalsEvent
 import app.rasul.bridge.ApprovalsException
+import app.rasul.bridge.ApprovalsRepository
+import app.rasul.bridge.BridgeBotsState
+import app.rasul.bridge.BridgeClients
+import app.rasul.bridge.BridgeStore
+import app.rasul.bridge.NewerHostException
+import app.rasul.bridge.SavedBridge
+import app.rasul.data.SecretCipher
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import app.rasul.notifications.ACTION_APPROVAL_ANSWER
 import app.rasul.notifications.ApprovalAlert
 import app.rasul.notifications.ApprovalAnswerRequest
@@ -200,6 +215,32 @@ class ApprovalActionsTest {
         val ui = RecordingUi()
         ApprovalAnswerer({ _, _ -> null }, ui).handle(request)
         assertEquals(listOf("sending", "failed:${ApprovalsError.BridgeRemoved}"), ui.events)
+    }
+
+    @Test fun aResolverErrorReachesTheFailedNotice() = runTest {
+        val ui = RecordingUi()
+        ApprovalAnswerer({ _, _ -> throw NewerHostException() }, ui).handle(request)
+        assertEquals(listOf("sending", "failed:${ApprovalsError.Unreachable}"), ui.events)
+    }
+
+    @get:Rule val tmp = TemporaryFolder()
+
+    @Test fun aProtocolTwoPcAnswerFailsWithoutThrowing() = runTest {
+        val job = SupervisorJob()
+        val scope = CoroutineScope(job + Dispatchers.IO)
+        val ds = PreferenceDataStoreFactory.create(scope = scope) { tmp.root.resolve("answer.preferences_pb") }
+        val store = BridgeStore(ds, object : SecretCipher {
+            override fun encrypt(plain: String) = plain.reversed()
+            override fun decrypt(token: String) = token.reversed()
+        })
+        val clients = BridgeClients(store, scope, { _, _, _ -> error("no transport expected") }, {})
+        val repo = ApprovalsRepository(store, clients, MutableStateFlow(BridgeBotsState()))
+        val ui = RecordingUi()
+        try {
+            store.save(SavedBridge(bridge, "Computer", listOf("wss://example.invalid"), "pin", "device", "alias", protocol = 2, role = "owner"))
+            ApprovalAnswerer({ b, p -> repo.api(b, p) }, ui).handle(request)
+            assertEquals(listOf("sending", "failed:${ApprovalsError.Unreachable}"), ui.events)
+        } finally { job.cancelAndJoin() }
     }
 
     @Test fun secondTapWhileInFlightIsIgnored() = runTest {

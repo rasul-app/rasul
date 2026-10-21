@@ -58,7 +58,7 @@ class PairingFlowTest {
     }
     @Test fun expiredInvitationNeverCreatesATransportOrReadsTheDeviceIdentity() = runBlocking {
         var opened = false
-        val service = PairingClient(transport = { _, _ -> opened = true; error("not expected") }, now = { 100 })
+        val service = PairingClient(transport = { _, _ -> opened = true; error("not expected") }, now = { 100 + 601 })
         val body = body()
         val invitation = PairingInvitation(UUID.randomUUID().toString(), "Bridge", emptyList(), ByteArray(32), body.inv, body.sec, 100)
         val identity = object : app.rasul.bridge.DeviceIdentity {

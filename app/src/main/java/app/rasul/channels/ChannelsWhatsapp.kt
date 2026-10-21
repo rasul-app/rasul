@@ -407,8 +407,8 @@ private fun ChannelSettingsEn() = RasulTheme(false) { SettingsPreview() }
 private fun ChannelSettingsAr() = RasulTheme(false) { SettingsPreview() }
 
 private val rowsWithSettings = listOf(
-    ChannelDto("discord", "Discord", "Talk to Hermes from a Discord server.", enabled = true, configured = true, state = "connected", fields = formFields),
-    ChannelDto("whatsapp", "WhatsApp", "Message Hermes on WhatsApp.", enabled = false, configured = false, state = "not_configured", fields = formFields.take(1)),
+    ChannelDto("discord", "Discord", "Talk to Rasul from a Discord server.", enabled = true, configured = true, state = "connected", fields = formFields),
+    ChannelDto("whatsapp", "WhatsApp", "Message Rasul on WhatsApp.", enabled = false, configured = false, state = "not_configured", fields = formFields.take(1)),
 )
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 420, name = "ChannelsSettingsRow")

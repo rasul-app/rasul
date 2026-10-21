@@ -195,7 +195,7 @@ fun BotsListContent(
 
 private val sample = ConnectionsState.Loaded(
     listOf(
-        Connection("a", "Hermes", "http://192.0.2.7:8642"),
+        Connection("a", "Home server", "http://192.0.2.7:8642"),
         Connection("b", "Research", "http://192.0.2.7:8642", "research"),
         Connection("c", "Deploys", "http://192.0.2.9:8642", "deploys"),
     ),

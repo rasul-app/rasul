@@ -28,7 +28,7 @@ class DesktopNotFoundUiTest {
             }
         }
         compose.waitForIdle()
-        compose.onAllNodesWithText("Update Rasul Bridge on your PC to use this.").assertCountEquals(1)
+        compose.onAllNodesWithText("Update Rasul on your PC to use this.").assertCountEquals(1)
         compose.onAllNodesWithText("The server does not have that job or session any more", substring = true).assertCountEquals(0)
     }
 
@@ -39,7 +39,7 @@ class DesktopNotFoundUiTest {
             }
         }
         compose.waitForIdle()
-        compose.onAllNodesWithText("Update Rasul Bridge on your PC to use this.").assertCountEquals(1)
+        compose.onAllNodesWithText("Update Rasul on your PC to use this.").assertCountEquals(1)
         compose.onAllNodesWithText("The server does not have that job or session any more", substring = true).assertCountEquals(0)
     }
 }

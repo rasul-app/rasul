@@ -130,6 +130,8 @@ class ScreenshotTest(private val preview: ComposablePreview<AndroidPreviewInfo>,
                 screen == "McpCatalog" -> 78
                 screen == "HermesUpdateUnknown" -> 79
                 screen == "ChatApprovalLong" -> 80
+                screen == "ChatBusyPc" -> 121
+                screen == "SessionsBusy" -> 122
                 screen == "HermesUpdateNoDetail" -> 81
                 screen == "ProgressReceived" -> 166
                 screen == "ProgressTool" -> 167

@@ -38,7 +38,7 @@ There is no Rasul server. The app talks to your own computer, plus (optional, ca
 
 ## Status
 
-Early development (version 0.2.11). Pre-release APKs are on the Releases page.
+Early development (version 0.2.12). Pre-release APKs are on the Releases page.
 
 ## Requirements
 
@@ -168,7 +168,7 @@ Hermes Agent is a project of Nous Research. "Hermes" is used here only to name t
 
 ### الحالة
 
-قيد التطوير المبكر (الإصدار 0.2.11). ملفات APK التجريبية متاحة في صفحة الإصدارات.
+قيد التطوير المبكر (الإصدار 0.2.12). ملفات APK التجريبية متاحة في صفحة الإصدارات.
 
 ### جسر رسول (موصى به)
 

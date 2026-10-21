@@ -65,6 +65,8 @@ data class BridgeGroup(
     val profiles: List<BridgeProfile> = emptyList(),
     val loading: Boolean = true,
     val error: HermesError? = null,
+    /** The PC speaks a newer protocol; its bots are not listed and no request is sent to it. */
+    val newerHost: Boolean = false,
 )
 
 data class BridgeBotsState(
@@ -157,11 +159,12 @@ class BridgeBotsRepository(
             }
             val cached = mutable.value.groups.associateBy { it.id }
             mutable.value = BridgeBotsState(bridges.map { bridge ->
-                cached[bridge.bridgeId]?.copy(name = bridge.name, loading = true)
+                if (bridge.protocol != 1) BridgeGroup(bridge.bridgeId, bridge.name, loading = false, newerHost = true)
+                else cached[bridge.bridgeId]?.copy(name = bridge.name, loading = true)
                     ?: BridgeGroup(bridge.bridgeId, bridge.name)
             }, loaded = true)
             coroutineScope {
-                bridges.forEach { bridge -> launch {
+                bridges.filter { it.protocol == 1 }.forEach { bridge -> launch {
                     try {
                         followProfiles(api(clients.client(bridge).client)).collect { update ->
                             mutable.update { state -> state.copy(groups = state.groups.map { group ->
@@ -186,6 +189,7 @@ class BridgeBotsRepository(
 
     suspend fun target(bridgeId: String, profileId: String): HermesResult<HermesTarget> {
         val bridge = store.get(bridgeId) ?: return HermesResult.Err(HermesError.ConnectionChanged)
+        if (bridge.protocol != 1) return HermesResult.Err(HermesError.NewerHost)
         val cached = state.value.groups.firstOrNull { it.id == bridgeId }
         val group = cached?.takeIf { it.error == null && it.profiles.any { p -> p.id == profileId && p.ready } } ?: run {
             val previous = (cached ?: BridgeGroup(bridgeId, bridge.name)).copy(name = bridge.name)

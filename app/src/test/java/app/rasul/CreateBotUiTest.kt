@@ -97,7 +97,7 @@ class CreateBotUiTest {
                 CreateBotPhase.WaitingForBot, CreateBotError.Unreachable, "new-profile", true), "Bridge", onBack = { left = true })
         } }
         compose.onNodeWithText("Bot created. Waiting for the live list…").assertExists()
-        compose.onNodeWithText("Cannot reach this bridge. Check that it is online.").assertExists()
+        compose.onNodeWithText("Cannot reach this PC. Check that it is online.").assertExists()
         compose.onNodeWithText("Back").performScrollTo().performClick()
         assertTrue(left)
     }
@@ -107,7 +107,7 @@ class CreateBotUiTest {
         } }
         compose.onNodeWithText("Bot name").assertIsNotEnabled()
         compose.onNodeWithText("Blank").assertHasNoClickAction()
-        compose.onNodeWithText("Creating bot… Waiting for the bridge.").assertExists()
+        compose.onNodeWithText("Creating bot… Waiting for your PC.").assertExists()
         compose.onNodeWithText("Confirm and create").assertDoesNotExist()
     }
 }

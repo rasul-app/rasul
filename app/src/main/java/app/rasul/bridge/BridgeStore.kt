@@ -25,6 +25,10 @@ data class SavedBridge(
     val deviceId: String,
     val keyAlias: String,
     val lastWorkingUrl: String? = null,
+    /** Which PC protocol this PC speaks; saves from before protocol 2 have none and are 1. */
+    val protocol: Int = 1,
+    /** "owner" or "viewer" for a protocol-2 PC, null for protocol 1. */
+    val role: String? = null,
 )
 
 data class BridgeSelection(val bridgeId: String, val profileId: String)

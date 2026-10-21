@@ -75,6 +75,7 @@ internal fun HermesError.text(surface: FeatureErrorSurface? = null): String {
     if (specificMessage != null) return stringResource(specificMessage)
     return when (this) {
         HermesError.BridgeUnreachable -> stringResource(R.string.bridge_unreachable)
+        HermesError.NewerHost -> stringResource(R.string.pair_newer_host)
         HermesError.DeviceRevoked -> stringResource(R.string.bridge_revoked)
         HermesError.DeviceKeyRepair -> stringResource(R.string.bridge_key_repair)
         HermesError.BridgeTimeout -> stringResource(R.string.bridge_timeout)

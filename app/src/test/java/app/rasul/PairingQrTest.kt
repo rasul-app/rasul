@@ -55,12 +55,20 @@ class PairingQrTest {
     }
 
     @Test fun rejectsExpiredVersionHttpAndMissingPinWithSpecificErrors() {
-        assertEquals(PairingQrResult.Invalid(PairingQrError.Expired), change("exp", JsonPrimitive(now)))
+        assertEquals(PairingQrResult.Invalid(PairingQrError.Expired), change("exp", JsonPrimitive(now - 601)))
         assertEquals(PairingQrResult.Invalid(PairingQrError.Version), change("v", JsonPrimitive(2)))
-        assertEquals(PairingQrResult.Invalid(PairingQrError.Version), PairingQrParser.parse("rasul-pair:2:any", now))
+        assertEquals(PairingQrResult.Invalid(PairingQrError.Version), PairingQrParser.parse("rasul-pair:3:any", now))
         assertEquals(PairingQrResult.Invalid(PairingQrError.MissingPin), parse(JsonObject(payload() - "pin")))
         val http = payload().toString().replace("wss://example.invalid/v1/link", "http://example.invalid/v1/link")
         assertEquals(PairingQrResult.Invalid(PairingQrError.InsecureUrl), PairingQrParser.parse(qr(http), now))
+    }
+
+    @Test fun clockSkewOfTenMinutesEitherWayIsAccepted() {
+        assertTrue(change("exp", JsonPrimitive(now - 600)) is PairingQrResult.Valid)
+        assertTrue(change("exp", JsonPrimitive(now)) is PairingQrResult.Valid)
+        assertEquals(PairingQrResult.Invalid(PairingQrError.Expired), change("exp", JsonPrimitive(now - 601)))
+        assertTrue(change("exp", JsonPrimitive(now + 600)) is PairingQrResult.Valid)
+        assertEquals(PairingQrResult.Invalid(PairingQrError.Invalid), change("exp", JsonPrimitive(now + 601)))
     }
 
     @Test fun rejectsDuplicatesUnknownFieldsAndNoncanonicalNumbersOrBase64() {
@@ -71,7 +79,7 @@ class PairingQrTest {
             json.replace("\"v\":1", "\"v\":\"1\""),
             json.replace("\"v\":1", "\"v\":1.0"),
             json + " {}",
-            json.replace("\"exp\":1120", "\"exp\":1121"),
+            json.replace("\"exp\":1120", "\"exp\":1601"),
         )
         for (value in invalid) assertTrue(PairingQrParser.parse(qr(value), now) is PairingQrResult.Invalid)
         assertTrue(PairingQrParser.parse(qr(json) + "=", now) is PairingQrResult.Invalid)
@@ -108,7 +116,7 @@ class PairingQrTest {
             "This pairing code has expired. On your PC, run rasul-bridge pair and scan its new QR code." to "انتهت صلاحية رمز الإقران. شغّل الأمر $command على حاسوبك وامسح رمز QR الجديد.",
             "This pairing code uses an unsupported version." to "إصدار رمز الإقران غير مدعوم.",
             "This pairing code has no server fingerprint. On your PC, run rasul-bridge pair and scan its QR code." to "رمز الإقران بلا بصمة للخادم. شغّل الأمر $command على حاسوبك وامسح رمز QR الجديد.",
-            "This pairing code has an invalid bridge address. Only WS or WSS bridge addresses are supported." to "عنوان الجسر في رمز الإقران غير صالح. يُسمح فقط بعناوين WS أو WSS.",
+            "This pairing code has an invalid PC address. Only WS or WSS addresses are supported." to "عنوان الحاسوب في رمز الإقران غير صالح. يُسمح فقط بعناوين WS أو WSS.",
         )
         PairingQrError.entries.zip(expected).forEach { (error, messages) ->
             assertEquals(messages.first, app.getString(error.message))

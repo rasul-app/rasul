@@ -3,10 +3,15 @@ package app.rasul.sessions
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.rasul.data.ActiveTarget
+import app.rasul.data.BusyChatsApi
+import app.rasul.data.BusyChatsResult
+import app.rasul.data.BusyWhere
+import app.rasul.data.busyApi
 import app.rasul.data.ConnectionStore
 import app.rasul.data.DraftStore
 import app.rasul.data.PinStore
 import app.rasul.data.HermesError
+import app.rasul.data.HermesTarget
 import app.rasul.data.Load
 import app.rasul.data.HermesResult
 import app.rasul.data.load
@@ -18,6 +23,7 @@ import app.rasul.ui.pendingLoad
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -42,6 +48,9 @@ class SessionsViewModel(
     private val onSessionDeleted: suspend (String) -> Unit = {},
     private val drafts: DraftStore? = null,
     private val pins: PinStore? = null,
+    /** The bridge's turn-lease list; null on a direct target keeps every badge off. */
+    private val busyApiFor: (HermesTarget) -> BusyChatsApi? = { it.busyApi() },
+    private val pollMs: Long = LIST_POLL_MS,
 ) : ViewModel() {
     private val _state = MutableStateFlow<Load<List<SessionDto>>>(Load.Loading)
     val state: StateFlow<Load<List<SessionDto>>> = _state
@@ -53,6 +62,13 @@ class SessionsViewModel(
     val busy: StateFlow<String?> = _busy
     private val refreshes = MutableStateFlow(0)
     private var generation = 0
+    private var pollJob: Job? = null
+    /** A bridge that answered 404 keeps the feature off until the shown target changes. */
+    private var busyUnsupported = false
+
+    /** Chat id -> where it is replying, from the bridge's turn leases; empty on a direct target or an old bridge. */
+    private val _busyChats = MutableStateFlow<Map<String, BusyWhere>>(emptyMap())
+    val busyChats: StateFlow<Map<String, BusyWhere>> = _busyChats
 
     /** The bot and profile the shown list belongs to: the key of its pins and drafts. */
     private val bot: Flow<Pair<String, String?>?> = _state.map { load ->
@@ -111,6 +127,8 @@ class SessionsViewModel(
                     _busy.value = null
                     _renameError.value = null
                     _deleteError.value = null
+                    _busyChats.value = emptyMap()
+                    busyUnsupported = false
                 }
                 _state.value = Load.Loading
                 val loaded = pending ?: try {
@@ -152,6 +170,70 @@ class SessionsViewModel(
     }
 
     fun refresh() { refreshes.update { it + 1 } }
+
+    /** The Sessions screen is visible (lifecycle STARTED): while it is, the list and the busy map
+     * refresh every [pollMs]; when it stops, the refresh stops with it. */
+    fun onVisible() {
+        if (pollJob?.isActive != true) pollJob = viewModelScope.launch { pollLoop() }
+    }
+
+    fun onHidden() {
+        pollJob?.cancel()
+        pollJob = null
+    }
+
+    private suspend fun pollLoop() {
+        while (true) {
+            delay(pollMs)
+            refreshShownQuietly()
+        }
+    }
+
+    /**
+     * The background refresh: never writes Loading, keeps the shown list and scroll on a failure,
+     * and never surfaces an error (a pull-to-refresh failure still does). Only a Ready list is
+     * touched, and only while it still shows the target it was read from.
+     */
+    private suspend fun refreshShownQuietly() {
+        val current = _state.value as? Load.Ready ?: return
+        val source = current.source
+        val listed = try {
+            when (val r = client.list(source.target)) {
+                is HermesResult.Ok -> current.copy(value = r.value)
+                is HermesResult.Err -> null
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        if (listed != null && (_state.value as? Load.Ready)?.source == source) {
+            _state.value = listed
+            dropPinsOfMissingChats(listed)
+        }
+        val api = if (busyUnsupported) null else busyApiFor(source.target)
+        if (api == null) {
+            if (_busyChats.value.isNotEmpty()) _busyChats.value = emptyMap()
+            return
+        }
+        try {
+            when (val r = api.list()) {
+                is BusyChatsResult.Ok ->
+                    if ((_state.value as? Load.Ready)?.source == source) _busyChats.value = r.busy
+                BusyChatsResult.Unsupported -> {
+                    if ((_state.value as? Load.Ready)?.source == source) {
+                        busyUnsupported = true
+                        _busyChats.value = emptyMap()
+                    }
+                }
+                BusyChatsResult.Failed -> Unit
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // The last known map stays.
+        }
+    }
 
     fun clearRenameError() { _renameError.value = null }
 
@@ -265,6 +347,11 @@ class SessionsViewModel(
                 if (gen == generation) _busy.value = null
             }
         }
+    }
+
+    companion object {
+        /** How often the visible list refreshes itself and re-asks the bridge which chats reply elsewhere. */
+        const val LIST_POLL_MS = 5_000L
     }
 }
 

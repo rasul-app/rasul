@@ -25,12 +25,14 @@ from .http import HTTPError, Reader, chunk, no_content, request, response, strea
 from .limits import Limits, MAX_BODY
 from .instructions import Instructions
 from .processes import running as running_processes
+from .turns import active as active_turns
 from .network import extra_plan, lan_addresses, tailscale_addresses
 from .status import Status
 from .pairing import Pairing
 from .profiles import Profiles
 from .files import Files, TOKEN
-from .proxy import StreamAborted, Upstream, allowed, with_media_note
+from .proxy import ID, StreamAborted, Upstream, allowed, with_media_note
+from .live import Live
 from .registry import Registry
 from .uploads import Uploads
 from .tls import TLSLink, ensure_identity, server_context
@@ -82,6 +84,7 @@ class Bridge:
         self.profiles = Profiles(store, config, self.upstream, run=run)
         self.instructions = Instructions(self.profiles)
         self.desktop = Desktop(self.profiles)
+        self.live = Live(self.profiles, self.desktop)
         self.status = Status(self)
         self.files = Files(config.hermes_home, store.root, self.file_audit)
         self.uploads = Uploads(store.root, lambda profile: self.profiles.directories().get(profile))
@@ -408,6 +411,14 @@ class Bridge:
                 profile = target.split("/")[3]
                 status = 200
                 await response(link, status, running_processes(directory))
+            elif method == "GET" and re.fullmatch(r"/v1/profiles/[a-z0-9][a-z0-9_-]{0,63}/turns", target):
+                route = "/v1/profiles/{id}/turns"
+                directory = self.profiles.directories().get(target.split("/")[3])
+                if directory is None:
+                    raise HTTPError(404, "Profile not found")
+                profile = target.split("/")[3]
+                status = 200
+                await response(link, status, active_turns(directory))
             elif method == "POST" and re.fullmatch(r"/v1/profiles/[a-z0-9][a-z0-9_-]{0,63}/uploads", target):
                 route, profile = "/v1/profiles/{id}/uploads", target.split("/")[3]
                 value = self.uploads.start(device, profile, body)
@@ -441,6 +452,10 @@ class Bridge:
                     raise HTTPError(400, "desktop_invalid")
                 status, value = await self.desktop.call(device, profile, method, suffix, body)
                 await response(link, status, value)
+            elif method == "GET" and (live_match := re.fullmatch(
+                    r"/v1/profiles/([a-z0-9][a-z0-9_-]{0,63})/live/(" + ID + r")", target)):
+                route, profile, status = "/v1/profiles/{id}/live/{id}", live_match[1], 200
+                status = await self.live.stream(link, device, live_match[1], live_match[2], head)
             elif method == "GET" and re.fullmatch(r"/v1/operations/[0-9a-f]{32}", target):
                 route, status = "/v1/operations/{id}", 200
                 await response(link, status, self.profiles.operation(path.rsplit("/", 1)[1]))
