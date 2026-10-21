@@ -247,7 +247,10 @@ class _Feed:
 
     async def call(self, method, params, timeout=CALL_TIMEOUT):
         # Only the live queue is read here: stashed event frames stay for the relay phase.
-        rid = await self.send(method, params)
+        try:
+            rid = await self.send(method, params)
+        except (ConnectionClosed, OSError) as error:
+            raise _Closed from error
         deadline = self.clock() + timeout
         while True:
             frame, size = await self._take(deadline - self.clock())

@@ -752,6 +752,46 @@ async def test_live_replay_overflow_resets_and_ends(tmp_path, monkeypatch):
 
 
 @asynchronous
+async def test_live_replay_overflow_before_since_is_sent_resets_and_ends(tmp_path, monkeypatch):
+    """The reader closes the backend socket on overflow before ``events.since`` is sent: the
+    send hits a closed socket and the stream must still reset and end."""
+    original = live_module._Feed.send
+    closed_sends = []
+
+    async def send_after_close(self, method, params):
+        if method == "session.events.since":
+            await asyncio.wait_for(asyncio.shield(self.reader), 5)
+            assert self.ws.close_code is not None
+        try:
+            return await original(self, method, params)
+        except ConnectionClosed as error:
+            closed_sends.append(error)
+            raise
+
+    monkeypatch.setattr(live_module._Feed, "send", send_after_close)
+    async with backend(tmp_path, monkeypatch) as (bridge, fake):
+        fake.sessions = [SESSION]
+        fake.since_result = {"events": [], "latest_seq": 300, "truncated": False, "count": 0,
+                             "epoch": fake.epoch, "open_requests": []}
+        fake.events = [fake.event("message.delta", i, {"text": "x"})
+                       for i in range(1, 301)]
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "GET", TARGET, extra="Last-Event-ID: " + fake.epoch + ":0\r\n")
+            status, head = await open_stream(reader)
+            assert status == 200
+            sse = Sse(reader, head)
+            assert await sse.next() == ("snapshot",
+                                        {"running": True, "turn_started_at": 1700.5}, None)
+            assert await sse.next() == ("reset", {}, None)
+            with pytest.raises(StopAsyncIteration):
+                await sse.next(15)
+            await asyncio.wait_for(fake.closed.wait(), 5)
+            assert bridge.live.total == 0
+            assert len(closed_sends) == 1
+
+
+@asynchronous
 async def test_live_replay_write_deadline_releases_slot(tmp_path, monkeypatch):
     """65 replayed ~60 KB events to a phone that never reads: the write deadline ends the
     attach before the relay even starts, closing the backend socket and freeing the slot."""
