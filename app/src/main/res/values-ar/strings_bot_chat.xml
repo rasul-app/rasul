@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="bot_chat_title">محادثة اللابتوب</string>
+    <string name="bot_chat_subtitle">نفس المحادثة الموجودة على حاسوبك</string>
+</resources>

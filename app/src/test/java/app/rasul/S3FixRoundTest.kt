@@ -122,6 +122,8 @@ class S3FixRoundTest {
         val list = SessionsViewModel(s, ActivePcHolder(s, listScope), SessionsClient(HermesClient()))
         waitFor { list.state.value is Load.Ready }
         val source = (list.state.value as Load.Ready).source
+        // The sessions VM also looks up the hidden bot chat right after the list: the second GET to A.
+        waitFor { a.requestCount == 2 }
         listScope.cancel() // the list screen is gone; only the transcript's own guard is under test
 
         // The user edits the same saved connection (same id, same name, same key) to address B.
@@ -130,7 +132,7 @@ class S3FixRoundTest {
         waitFor { vm.state.value is Load.Failed }
         assertEquals(HermesError.ConnectionChanged, (vm.state.value as Load.Failed).error)
         assertEquals(0, b.requestCount) // no session id reached B
-        assertEquals(1, a.requestCount) // only the list GET, from before the edit
+        assertEquals(2, a.requestCount) // the list GET and the bot chat look-up, both from before the edit
     }
 
     private val sessionsJson = """{"object":"list","data":[{"id":"sess-1","title":"Hello","started_at":1760000000,"message_count":1}],"limit":50,"offset":0,"has_more":false}"""

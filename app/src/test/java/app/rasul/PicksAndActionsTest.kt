@@ -344,15 +344,16 @@ class PicksAndActionsTest {
         val jobs = JobsViewModel(s, holder, JobsClient(HermesClient()))
         val sessions = SessionsViewModel(s, holder, SessionsClient(HermesClient()))
         waitFor { jobsReady(jobs, "A") && sessionsReady(sessions, "A") }
+        waitFor { a.requestCount == 3 } // jobs list + sessions list + the bot chat look-up, all settled on A
         runBlocking { s.setActive(idB) }
         assertEquals(idB, runBlocking { s.active()?.id }) // targets now diverge: holder A, store B
         val na = a.requestCount
         val nb = b.requestCount
         jobs.refresh()
         sessions.refresh()
-        waitFor { a.requestCount == na + 2 }
+        waitFor { a.requestCount == na + 3 }
         Thread.sleep(300)
-        assertEquals(na + 2, a.requestCount)
+        assertEquals(na + 3, a.requestCount)
         assertEquals(nb, b.requestCount) // nothing went to the store's target
         assertTrue(jobsReady(jobs, "A") && sessionsReady(sessions, "A"))
     }

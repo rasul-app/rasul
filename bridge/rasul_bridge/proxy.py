@@ -20,7 +20,7 @@ RULES = [
     ("GET", rf"/v1/runs/{ID}", "/v1/runs/{id}", set()),
     ("GET", rf"/v1/runs/{ID}/events", "/v1/runs/{id}/events", {"after"}),
     ("POST", rf"/v1/runs/{ID}/(?:stop|steer|approval)", "/v1/runs/{id}/action", set()),
-    ("GET", r"/api/sessions", "/api/sessions", {"limit", "offset", "source", "search"}),
+    ("GET", r"/api/sessions", "/api/sessions", {"include_hidden", "limit", "offset", "search", "source", "title"}),
     ("GET", rf"/api/sessions/{ID}", "/api/sessions/{id}", set()),
     ("PATCH", rf"/api/sessions/{ID}", "/api/sessions/{id}", set()),
     ("DELETE", rf"/api/sessions/{ID}", "/api/sessions/{id}", set()),

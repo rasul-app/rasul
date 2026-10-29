@@ -407,6 +407,23 @@ async def test_phone_authorization_dropped_route_allowlist_and_audit(tmp_path):
 
 
 @asynchronous
+async def test_sessions_list_forwards_title_and_include_hidden_and_rejects_unlisted(tmp_path):
+    async with running(tmp_path) as (bridge, upstream):
+        identity, _ = registered(bridge)
+        async with client(bridge, tmp_path, identity) as (link, reader, _):
+            await send(link, "GET",
+                       "/v1/profiles/default/hermes/api/sessions?title=Bot%20Chat&include_hidden=true&limit=1")
+            assert (await read_response(reader)) == (200, {"status": "ok"})
+            assert upstream.requests[-1][0:2] == (
+                "GET", "/api/sessions?title=Bot%20Chat&include_hidden=true&limit=1")
+            forwarded = len(upstream.requests)
+            await send(link, "GET",
+                       "/v1/profiles/default/hermes/api/sessions?include_archived=true")
+            assert (await read_response(reader))[0] == 404
+            assert len(upstream.requests) == forwarded
+
+
+@asynchronous
 async def test_fork_and_model_route_limits_return_specific_codes(tmp_path):
     async with running(tmp_path) as (bridge, _):
         identity, _ = registered(bridge)

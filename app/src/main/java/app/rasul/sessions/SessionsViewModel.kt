@@ -1,5 +1,6 @@
 package app.rasul.sessions
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.rasul.data.ActiveTarget
@@ -70,6 +71,15 @@ class SessionsViewModel(
     private val _busyChats = MutableStateFlow<Map<String, BusyWhere>>(emptyMap())
     val busyChats: StateFlow<Map<String, BusyWhere>> = _busyChats
 
+    /**
+     * The shown bot's hidden forever chat ("Bot Chat" on the server, "Laptop chat" on screen), or null when it
+     * has none, was not read yet, or its read failed. It belongs to the shown source: a switch clears it first.
+     */
+    private val _botChat = MutableStateFlow<SessionDto?>(null)
+    val botChat: StateFlow<SessionDto?> = _botChat
+    /** One debug line per shown source is enough for a look-up that runs on each load or refresh. */
+    private var botChatLogged = false
+
     /** The bot and profile the shown list belongs to: the key of its pins and drafts. */
     private val bot: Flow<Pair<String, String?>?> = _state.map { load ->
         (load as? Load.Ready)?.source?.let { it.id to (it.target.profile ?: it.target.bridge?.profileId) }
@@ -128,7 +138,9 @@ class SessionsViewModel(
                     _renameError.value = null
                     _deleteError.value = null
                     _busyChats.value = emptyMap()
+                    _botChat.value = null
                     busyUnsupported = false
+                    botChatLogged = false
                 }
                 _state.value = Load.Loading
                 val loaded = pending ?: try {
@@ -139,6 +151,8 @@ class SessionsViewModel(
                     Load.Failed(HermesError.Storage(e.message ?: e.javaClass.simpleName))
                 }
                 _state.value = loaded
+                // The hidden forever chat rides the same load the list just did.
+                (loaded as? Load.Ready)?.let { fetchBotChat(it.source) }
                 // Pins of chats beyond the newest SESSIONS_LIST_LIMIT are not fetched by id: that read also returns rows the list hides, so a chat could show twice.
                 dropPinsOfMissingChats(loaded)
             }
@@ -232,6 +246,36 @@ class SessionsViewModel(
             throw e
         } catch (_: Exception) {
             // The last known map stays.
+        }
+    }
+
+    /**
+     * Re-reads the shown source's hidden forever chat. Any failure maps to null (the row simply hides) and is
+     * logged once per source at debug level, never changing the list's Load state, error or retry. A late
+     * answer is applied only while its source is still the shown one.
+     */
+    private suspend fun fetchBotChat(source: ActiveTarget.Ready) {
+        val chat = try {
+            when (val r = client.botChat(source.target)) {
+                is HermesResult.Ok -> r.value
+                is HermesResult.Err -> {
+                    logBotChatOnce()
+                    null
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            logBotChatOnce()
+            null
+        }
+        if ((_state.value as? Load.Ready)?.source == source) _botChat.value = chat
+    }
+
+    private fun logBotChatOnce() {
+        if (!botChatLogged) {
+            botChatLogged = true
+            Log.d("SessionsViewModel", "bot chat lookup failed")
         }
     }
 

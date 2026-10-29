@@ -194,6 +194,14 @@ const val SESSIONS_LIST_LIMIT = 50
 
 interface SessionsManagementApi {
     suspend fun list(target: HermesTarget, limit: Int = SESSIONS_LIST_LIMIT): HermesResult<List<SessionDto>>
+
+    /**
+     * The bot's one forever chat the desktop keeps hidden, titled exactly "Bot Chat". The plain list never
+     * returns hidden rows, so it is asked for by exact title. Null: the bot never opened one, or the server
+     * has no such row. Default Ok(null) keeps fakes of this interface compiling.
+     */
+    suspend fun botChat(target: HermesTarget): HermesResult<SessionDto?> = HermesResult.Ok(null)
+
     suspend fun rename(target: HermesTarget, sessionId: String, title: String): HermesResult<SessionDto>
     suspend fun delete(target: HermesTarget, sessionId: String): HermesResult<Unit>
 }
@@ -237,6 +245,23 @@ class SessionsClient(
     override suspend fun list(target: HermesTarget, limit: Int): HermesResult<List<SessionDto>> =
         decode("api/sessions", client.send(target, "api/sessions", query = mapOf("limit" to limit.toString()))) {
             json.decodeFromString<SessionListDto>(it).data
+        }
+
+    /**
+     * GET /api/sessions?title=Bot Chat&include_hidden=true&limit=1 — the hidden forever chat by exact title.
+     * The row is trusted only when its title matches exactly: a server that ignores `title` answers with the
+     * newest normal chat, and that must read as "no bot chat". An empty `data` is Ok(null).
+     */
+    override suspend fun botChat(target: HermesTarget): HermesResult<SessionDto?> =
+        decode(
+            "api/sessions",
+            client.send(
+                target,
+                "api/sessions",
+                query = mapOf("title" to BOT_CHAT_TITLE, "include_hidden" to "true", "limit" to "1"),
+            ),
+        ) {
+            json.decodeFromString<SessionListDto>(it).data.firstOrNull()?.takeIf { s -> s.title == BOT_CHAT_TITLE }
         }
 
     /** GET /api/sessions/{id}/messages (live transcript, images as placeholders). */
@@ -318,5 +343,8 @@ class SessionsClient(
 
     private companion object {
         val SAFE_ID = Regex("[A-Za-z0-9_.:-]{1,200}")
+
+        /** The exact title the desktop gives the bot's forever chat (api_server.py hidden row). */
+        const val BOT_CHAT_TITLE = "Bot Chat"
     }
 }

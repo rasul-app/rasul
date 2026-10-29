@@ -226,10 +226,21 @@ internal class FakeSessionList : SessionsManagementApi {
     var calls = 0
     var list: List<SessionDto> = emptyList()
     var fail = false
+    var botCalls = 0
+    var botFor: (HermesTarget) -> HermesResult<SessionDto?> = { HermesResult.Ok(null) }
+
+    /** When set, botChat() waits on it first — a look-up still in flight when the test moves on. */
+    var botGate: CompletableDeferred<Unit>? = null
 
     override suspend fun list(target: HermesTarget, limit: Int): HermesResult<List<SessionDto>> {
         calls++
         return if (fail) HermesResult.Err(HermesError.Unreachable("down")) else HermesResult.Ok(list)
+    }
+
+    override suspend fun botChat(target: HermesTarget): HermesResult<SessionDto?> {
+        botCalls++
+        botGate?.await()
+        return botFor(target)
     }
 
     override suspend fun rename(target: HermesTarget, sessionId: String, title: String) =

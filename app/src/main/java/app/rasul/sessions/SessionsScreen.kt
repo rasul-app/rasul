@@ -113,6 +113,7 @@ fun SessionsScreen(
     val draftLines by vm.draftLines.collectAsState()
     val busyChats by vm.busyChats.collectAsState()
     val pinLimit by vm.pinLimit.collectAsState()
+    val botChat by vm.botChat.collectAsState()
     // The list refreshes itself every few seconds only while this screen is visible.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, vm) {
@@ -146,6 +147,7 @@ fun SessionsScreen(
                 draftLines = draftLines,
                 busyChats = busyChats,
                 onTogglePin = { session -> source?.let { vm.togglePin(it, session) } },
+                botChat = botChat,
             )
         }
     }
@@ -199,31 +201,40 @@ internal fun SessionList(
     draftLines: Map<String, String> = emptyMap(),
     busyChats: Map<String, BusyWhere> = emptyMap(),
     onTogglePin: (SessionDto) -> Unit = {},
+    /** The bot's hidden forever chat, pinned as the first row; it is never filtered and never has a menu. */
+    botChat: SessionDto? = null,
 ) {
     var filter by remember { mutableStateOf(SessionFilter.All) }
-    if (list.isEmpty()) {
+    if (list.isEmpty() && botChat == null) {
         Text(
             stringResource(R.string.sessions_empty), style = RasulType.body, color = Rasul.colors.muted,
             modifier = Modifier.padding(24.dp),
         )
         return
     }
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        FilterPill(stringResource(R.string.filter_all), filter == SessionFilter.All, width = 46.dp) { filter = SessionFilter.All }
-        FilterPill(stringResource(R.string.filter_open), filter == SessionFilter.Open, width = 60.dp) { filter = SessionFilter.Open }
-        FilterPill(stringResource(R.string.filter_ended), filter == SessionFilter.Ended, width = 60.dp) { filter = SessionFilter.Ended }
+    if (list.isNotEmpty()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterPill(stringResource(R.string.filter_all), filter == SessionFilter.All, width = 46.dp) { filter = SessionFilter.All }
+            FilterPill(stringResource(R.string.filter_open), filter == SessionFilter.Open, width = 60.dp) { filter = SessionFilter.Open }
+            FilterPill(stringResource(R.string.filter_ended), filter == SessionFilter.Ended, width = 60.dp) { filter = SessionFilter.Ended }
+        }
     }
     val shown = pinnedFirst(list.filter {
-        when (filter) {
+        it.id != botChat?.id && when (filter) {
             SessionFilter.All -> true
             SessionFilter.Open -> it.isActive
             SessionFilter.Ended -> !it.isActive
         }
     }, pinned) { it.id }
     LazyColumn(Modifier.fillMaxSize()) {
+        botChat?.let { bot ->
+            item(key = bot.id) {
+                BotChatRow(bot, avatarKey, nowMillis, busyChats[bot.id]) { onOpen(bot) }
+            }
+        }
         itemsIndexed(shown, key = { _, s -> s.id }) { index, s ->
             val isArabic = LocalConfiguration.current.locales[0].language == "ar"
             val lastActive = s.lastActive?.takeUnless { it is JsonNull }
@@ -235,7 +246,7 @@ internal fun SessionList(
                     onLongClick = { menuOpen = true },
                     onLongClickLabel = stringResource(R.string.ux3c_chat_actions),
                     hairlineStart = if (isArabic) 78.dp else 82.dp, hairlineEnd = if (isArabic) 20.dp else 16.dp,
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = if (index == 0) 10.dp else 8.dp, bottom = 16.dp),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = if (index == 0 && botChat == null) 10.dp else 8.dp, bottom = 16.dp),
                     leading = { BotAvatar(avatarStyleFor(avatarKey), size = 40.dp) },
                     trailing = {
                         time?.let { Text(it, style = RasulType.meta, color = Rasul.colors.muted, modifier = Modifier.widthIn(min = 32.dp), textAlign = TextAlign.End) }
@@ -259,15 +270,7 @@ internal fun SessionList(
                     val busyWhere = busyChats[s.id]
                     if (busyWhere != null || s.isCronRun) {
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (busyWhere != null) {
-                                Text(
-                                    stringResource(if (busyWhere == BusyWhere.Desktop) R.string.chat_busy_pc else R.string.chat_busy_now),
-                                    modifier = Modifier.padding(top = 3.dp).background(Rasul.colors.selected, RasulShapes.filter)
-                                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                                    color = Rasul.colors.accent,
-                                    style = RasulType.chip,
-                                )
-                            }
+                            if (busyWhere != null) BusyChip(busyWhere)
                             if (s.isCronRun) {
                                 Text(
                                     stringResource(R.string.session_job_run),
@@ -297,6 +300,47 @@ internal fun SessionList(
             }
         }
     }
+}
+
+/**
+ * The "Laptop chat" row: the bot's hidden forever chat, styled like the other rows but titled and subtitled
+ * from strings (the server title is the internal "Bot Chat"), with no long-press menu — pin, rename (a PATCH)
+ * and delete must not reach it. [busyWhere] reuses the same map as normal rows when the id is busy.
+ */
+@Composable
+private fun BotChatRow(
+    session: SessionDto,
+    avatarKey: String,
+    nowMillis: Long,
+    busyWhere: BusyWhere?,
+    onOpen: () -> Unit,
+) {
+    val isArabic = LocalConfiguration.current.locales[0].language == "ar"
+    val time = relativeSessionTime(session.lastActive?.takeUnless { it is JsonNull } ?: session.startedAt, nowMillis)
+    RasulRow(
+        onClick = onOpen,
+        hairlineStart = if (isArabic) 78.dp else 82.dp, hairlineEnd = if (isArabic) 20.dp else 16.dp,
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 16.dp),
+        leading = { BotAvatar(avatarStyleFor(avatarKey), size = 40.dp) },
+        trailing = {
+            time?.let { Text(it, style = RasulType.meta, color = Rasul.colors.muted, modifier = Modifier.widthIn(min = 32.dp), textAlign = TextAlign.End) }
+        },
+    ) {
+        RowTitle(stringResource(R.string.bot_chat_title))
+        RowSub(stringResource(R.string.bot_chat_subtitle), maxLines = 1)
+        if (busyWhere != null) BusyChip(busyWhere)
+    }
+}
+
+@Composable
+private fun BusyChip(where: BusyWhere) {
+    Text(
+        stringResource(if (where == BusyWhere.Desktop) R.string.chat_busy_pc else R.string.chat_busy_now),
+        modifier = Modifier.padding(top = 3.dp).background(Rasul.colors.selected, RasulShapes.filter)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        color = Rasul.colors.accent,
+        style = RasulType.chip,
+    )
 }
 
 @Composable
